@@ -39,6 +39,12 @@ $env:APKSTART_TEST_APK="C:\path\to\any.apk"; npm test
 
 - 不要在测试里访问外网。需要网络行为的测试请起本地 `http` 服务（参考 `test/engine-test.js`）。
 
+## PR 与版本号
+
+- 每批改动开一个 PR，写明改了什么、验证了什么；检查通过后再合并到 `main`，不直接推送 `main`。
+- 同一个 PR 更新版本号：修复递增补丁号，有新功能或不兼容改动时按语义化版本升级。同步 `package.json`、锁文件根版本和 README 的当前版本标识。
+- PR 合并仅更新源码版本；安装包发布由匹配版本号的 `v` 标签另行触发。
+
 ## 提交信息
 
 使用 Conventional Commits 风格，例如：

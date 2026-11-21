@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="docs/images/readme/hero.svg" alt="Apk Start --Q 1.0.0 · MoonlyCake：让 Android 应用在 Windows 桌面上找到自己的位置" width="100%">
+  <img src="docs/images/readme/hero.svg" alt="Apk Start --Q 1.0.1 · MoonlyCake：让 Android 应用在 Windows 桌面上找到自己的位置" width="100%">
 </p>
 
-<h1 align="center">Apk Start --Q 1.0.0</h1>
+<h1 align="center">Apk Start --Q 1.0.1</h1>
 
 <p align="center"><strong>让 Android 应用从 Windows 桌面直接打开。</strong></p>
 <p align="center">
