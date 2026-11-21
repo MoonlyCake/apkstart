@@ -1,0 +1,161 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="640" viewBox="0 0 1200 640" role="img" aria-labelledby="t d">
+  <title id="t">Apk Start --Q 的应用库界面</title>
+  <desc id="d">纯黑背景上的应用库窗口：顶部是搜索与「安装 APK」，中间是两行方形应用卡片，底部状态条显示运行时已就绪。</desc>
+  <defs>
+    <filter id="lift" x="-.15" y="-.2" width="1.4" height="1.5">
+      <feDropShadow dx="0" dy="20" stdDeviation="26" flood-color="#000000" flood-opacity=".55"/>
+    </filter>
+    <clipPath id="win"><rect x="40" y="80" width="1120" height="444"/></clipPath>
+  </defs>
+
+  <rect width="1200" height="640" fill="#0B0C0D"/>
+
+  <g font-family="Segoe UI, Microsoft YaHei, PingFang SC, Noto Sans SC, system-ui, sans-serif">
+    <g font-family="Cascadia Mono, Consolas, monospace" font-size="9.5" letter-spacing="1.8" fill="#6A727B">
+      <text x="40" y="44">APP LIBRARY / 应用库</text>
+      <text x="1160" y="44" text-anchor="end">APK START --Q · 1.0.0</text>
+    </g>
+    <path d="M40 56h1120" stroke="#FFFFFF" stroke-opacity=".14"/>
+
+    <g filter="url(#lift)">
+      <g clip-path="url(#win)">
+        <rect x="40" y="80" width="1120" height="444" fill="#101214"/>
+
+        <!-- 标题栏 -->
+        <rect x="40" y="80" width="1120" height="28" fill="#16191C"/>
+        <g fill="#5A626B">
+          <rect x="55" y="91" width="5" height="5"/>
+          <rect x="67" y="91" width="5" height="5"/>
+          <rect x="79" y="91" width="5" height="5"/>
+        </g>
+        <text x="600" y="98" text-anchor="middle" fill="#7A828B" font-size="10" letter-spacing=".4">Apk Start --Q</text>
+        <g stroke="#8A929B" stroke-width="1.1" stroke-linecap="round" opacity=".85">
+          <path d="M1096 94h9M1118 90v8"/>
+          <path d="M1140 90l8 8m0-8-8 8"/>
+        </g>
+
+        <!-- 抬头 -->
+        <g transform="translate(58 118)">
+          <rect width="22" height="22" fill="#8FB6D0"/>
+          <path d="M8.4 7 15.6 11 8.4 15Z" fill="#0B0C0D"/>
+          <text x="30" y="16" fill="#F2F4F5" font-size="14" font-weight="650" letter-spacing=".2">Apk Start --Q</text>
+          <rect x="150" y="3" width="54" height="18" fill="rgba(255,255,255,.04)" stroke="rgba(255,255,255,.14)"/>
+          <text x="177" y="15.5" text-anchor="middle" fill="#8A929B" font-size="9" font-weight="600">待开机</text>
+        </g>
+        <g transform="translate(1118 120)" fill="none" stroke="#8A929B" stroke-width="1.2">
+          <circle cx="8" cy="8" r="5"/>
+          <path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6 13 13M13 3l-1.4 1.4M4.4 11.6 3 13" stroke-linecap="round"/>
+        </g>
+
+        <!-- 工具条 -->
+        <g transform="translate(58 160)">
+          <rect width="248" height="30" fill="#0B0D0F" stroke="rgba(255,255,255,.1)"/>
+          <circle cx="16" cy="14.5" r="4.4" fill="none" stroke="#6A727B" stroke-width="1.2"/>
+          <path d="m19.2 17.6 3 3" stroke="#6A727B" stroke-width="1.2" stroke-linecap="round"/>
+          <text x="30" y="18.5" fill="#616972" font-size="11">搜索已安装应用</text>
+
+          <g font-size="10.5" font-weight="600">
+            <rect x="828" y="0" width="60" height="30" fill="rgba(255,255,255,.03)" stroke="rgba(255,255,255,.14)"/>
+            <text x="858" y="19" text-anchor="middle" fill="#C3C9CF">运行时</text>
+            <rect x="896" y="0" width="74" height="30" fill="rgba(255,255,255,.03)" stroke="rgba(255,255,255,.14)"/>
+            <text x="933" y="19" text-anchor="middle" fill="#C3C9CF">共享目录</text>
+            <rect x="978" y="0" width="92" height="30" fill="#EDEFF1"/>
+            <text x="1024" y="19" text-anchor="middle" fill="#0B0C0D">安装 APK</text>
+          </g>
+        </g>
+
+        <!-- 应用卡片 -->
+        <g transform="translate(72 210)">
+          <g>
+            <rect width="198" height="132" fill="#15181B" stroke="#8FB6D0" stroke-opacity=".7" stroke-width="1.2"/>
+            <rect x="16" y="16" width="48" height="48" fill="#1E4E86"/>
+            <path d="M32 31v16a4.4 4.4 0 0 0 8.8 0V22a2.6 2.6 0 0 1 5.2 0v6" fill="none" stroke="#CFE8FF" stroke-width="2" stroke-linecap="round"/>
+            <text x="76" y="34" fill="#F2F4F5" font-size="12.5" font-weight="600">全民 K 歌</text>
+            <text x="76" y="49" fill="#767E87" font-family="Cascadia Mono, Consolas, monospace" font-size="9">RUNNING</text>
+            <text x="16" y="94" fill="#8A929B" font-size="10">96.2 MB</text>
+            <text x="16" y="112" fill="#616972" font-family="Cascadia Mono, Consolas, monospace" font-size="9">刚刚运行</text>
+            <rect x="172" y="108" width="8" height="8" fill="#8FB6D0"/>
+          </g>
+          <g transform="translate(214 0)">
+            <rect width="198" height="132" fill="#15181B" stroke="rgba(255,255,255,.08)"/>
+            <rect x="16" y="16" width="48" height="48" fill="#4A3B63"/>
+            <path d="M27 33h8l4 15 6-21 4.5 12h11" fill="none" stroke="#E4D8F5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <text x="76" y="34" fill="#F2F4F5" font-size="12.5" font-weight="600">微信读书</text>
+            <text x="76" y="49" fill="#767E87" font-family="Cascadia Mono, Consolas, monospace" font-size="9">v6.4.1</text>
+            <text x="16" y="94" fill="#8A929B" font-size="10">58.4 MB</text>
+            <text x="16" y="112" fill="#616972" font-family="Cascadia Mono, Consolas, monospace" font-size="9">3 天前</text>
+          </g>
+          <g transform="translate(428 0)">
+            <rect width="198" height="132" fill="#15181B" stroke="rgba(255,255,255,.08)"/>
+            <rect x="16" y="16" width="48" height="48" fill="#2E4A57"/>
+            <circle cx="40" cy="40" r="11" fill="none" stroke="#CFE8F0" stroke-width="2"/>
+            <path d="m33 47 14-14" stroke="#CFE8F0" stroke-width="1.8" stroke-linecap="round"/>
+            <text x="76" y="34" fill="#F2F4F5" font-size="12.5" font-weight="600">相机</text>
+            <text x="76" y="49" fill="#767E87" font-family="Cascadia Mono, Consolas, monospace" font-size="9">v2.1.0</text>
+            <text x="16" y="94" fill="#8A929B" font-size="10">34.1 MB</text>
+            <text x="16" y="112" fill="#616972" font-family="Cascadia Mono, Consolas, monospace" font-size="9">上周</text>
+          </g>
+          <g transform="translate(642 0)">
+            <rect width="198" height="132" fill="#15181B" stroke="rgba(255,255,255,.08)"/>
+            <rect x="16" y="16" width="48" height="48" fill="#3B4A3F"/>
+            <path d="M27 30h18M27 40h13M27 50h16" stroke="#DCE8DD" stroke-width="2" stroke-linecap="round"/>
+            <text x="76" y="34" fill="#F2F4F5" font-size="12.5" font-weight="600">笔记</text>
+            <text x="76" y="49" fill="#767E87" font-family="Cascadia Mono, Consolas, monospace" font-size="9">v1.8.4</text>
+            <text x="16" y="94" fill="#8A929B" font-size="10">7.8 MB</text>
+            <text x="16" y="112" fill="#616972" font-family="Cascadia Mono, Consolas, monospace" font-size="9">上个月</text>
+          </g>
+          <g transform="translate(856 0)">
+            <rect width="198" height="132" fill="#15181B" stroke="rgba(255,255,255,.08)"/>
+            <rect x="16" y="16" width="48" height="48" fill="#5A3B39"/>
+            <path d="M40 26a10 10 0 0 1 8 16l-8 9-8-9a10 10 0 0 1 8-16z" fill="none" stroke="#F3DAD5" stroke-width="2" stroke-linejoin="round"/>
+            <circle cx="40" cy="37" r="2.8" fill="#F3DAD5"/>
+            <text x="76" y="34" fill="#F2F4F5" font-size="12.5" font-weight="600">地图</text>
+            <text x="76" y="49" fill="#767E87" font-family="Cascadia Mono, Consolas, monospace" font-size="9">v15.2.0</text>
+            <text x="16" y="94" fill="#8A929B" font-size="10">112 MB</text>
+            <text x="16" y="112" fill="#616972" font-family="Cascadia Mono, Consolas, monospace" font-size="9">2 周前</text>
+          </g>
+          <g transform="translate(0 140)">
+            <rect width="198" height="132" fill="#15181B" stroke="rgba(255,255,255,.08)"/>
+            <rect x="16" y="16" width="48" height="48" fill="#4A5A8C"/>
+            <g fill="#DCE5FF">
+              <rect x="24" y="34" width="7" height="14"/>
+              <rect x="36" y="26" width="7" height="30"/>
+              <rect x="48" y="31" width="7" height="20"/>
+            </g>
+            <text x="76" y="34" fill="#F2F4F5" font-size="12.5" font-weight="600">钢琴块 2</text>
+            <text x="76" y="49" fill="#767E87" font-family="Cascadia Mono, Consolas, monospace" font-size="9">v3.0.7</text>
+            <text x="16" y="94" fill="#8A929B" font-size="10">88.6 MB</text>
+            <text x="16" y="112" fill="#616972" font-family="Cascadia Mono, Consolas, monospace" font-size="9">5 分钟前</text>
+          </g>
+          <g transform="translate(214 140)">
+            <rect width="198" height="132" fill="#15181B" stroke="rgba(255,255,255,.08)"/>
+            <rect x="16" y="16" width="48" height="48" fill="#2F6B63"/>
+            <path d="M33 27h10l6 6v17H33z" fill="none" stroke="#D6F0EA" stroke-width="2" stroke-linejoin="round"/>
+            <text x="76" y="34" fill="#F2F4F5" font-size="12.5" font-weight="600">WPS Office</text>
+            <text x="76" y="49" fill="#767E87" font-family="Cascadia Mono, Consolas, monospace" font-size="9">v13.9</text>
+            <text x="16" y="94" fill="#8A929B" font-size="10">142 MB</text>
+            <text x="16" y="112" fill="#616972" font-family="Cascadia Mono, Consolas, monospace" font-size="9">昨天</text>
+          </g>
+          <g transform="translate(428 140)">
+            <rect width="198" height="132" fill="rgba(255,255,255,.02)" stroke="rgba(255,255,255,.12)" stroke-dasharray="6 6"/>
+            <rect x="23" y="23" width="34" height="34" fill="none" stroke="#4C5665" stroke-width="1.4"/>
+            <path d="M40 32v16M32 40h16" stroke="#8FB6D0" stroke-width="1.4" stroke-linecap="round"/>
+            <text x="70" y="36" fill="#A7AEB6" font-size="11" font-weight="600">拖入安装包</text>
+            <text x="70" y="52" fill="#6A727B" font-family="Cascadia Mono, Consolas, monospace" font-size="8.5">.apk / .apks / .xapk</text>
+            <text x="16" y="94" fill="#5C646C" font-size="10">或双击 .apk 文件直接安装</text>
+          </g>
+        </g>
+
+        <!-- 状态栏 -->
+        <path d="M40 492h1120" stroke="rgba(255,255,255,.08)"/>
+        <rect x="57" y="508" width="6" height="6" fill="#8FB6D0"/>
+        <text x="70" y="514.5" fill="#767E87" font-size="10">运行时已就绪 · 6 个应用 · 复用 Quick Boot 快照</text>
+        <text x="1140" y="514.5" text-anchor="end" fill="#5C646C" font-size="10">Windows 10 / 11 · x64</text>
+      </g>
+      <rect x="40.5" y="80.5" width="1119" height="443" fill="none" stroke="#FFFFFF" stroke-opacity=".16"/>
+    </g>
+
+    <text x="40" y="588" fill="#6A727B" font-size="11">安装包、运行时镜像、应用数据与日志都留在这台机器上；关掉窗口即退出应用。</text>
+    <text x="1160" y="588" text-anchor="end" fill="#4E555D" font-family="Cascadia Mono, Consolas, monospace" font-size="9.5" letter-spacing="1.2">ACTUAL UI · 1:1</text>
+  </g>
+</svg>

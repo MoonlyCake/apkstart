@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="t d">
+  <title id="t">分层结构：渲染层、IPC 边界、应用层、核心层与外部宿主</title>
+  <desc id="d">五段横向剖面：src/ui 渲染层、src/ipc 单点注册、src/application 运行时与会话、src/core 设备与安装，以及 Android Emulator、ADB 与窗口代理构成的外部宿主。</desc>
+  <defs>
+    <clipPath id="frame"><rect width="1200" height="420"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#frame)">
+    <rect width="1200" height="420" fill="#0B0C0D"/>
+
+    <g font-family="Segoe UI, Microsoft YaHei, PingFang SC, Noto Sans SC, system-ui, sans-serif">
+      <text x="48" y="46" fill="#6A727B" font-size="9.5" font-weight="700" letter-spacing="2.2">ARCHITECTURE</text>
+      <text x="1152" y="46" text-anchor="end" fill="#5C646C" font-family="Cascadia Mono, Consolas, monospace" font-size="9" letter-spacing="1">MAIN PROCESS / 4 LAYERS + HOST</text>
+      <path d="M48 60h1104" stroke="#22262A" stroke-width="1"/>
+
+      <!-- 层脊 -->
+      <path d="M52 76v300" stroke="#8FB6D0" stroke-width="1.6"/>
+      <g stroke="#8FB6D0" stroke-width="1.6">
+        <path d="M52 76h8M52 136h8M52 196h8M52 256h8M52 316h8"/>
+      </g>
+      <path d="M254 76v300" stroke="#1E2226"/>
+
+      <!-- 01 -->
+      <g>
+        <text x="70" y="99" fill="#6A727B" font-family="Cascadia Mono, Consolas, monospace" font-size="9.5" letter-spacing="1">01</text>
+        <text x="102" y="102" fill="#F2F4F5" font-size="13.5" font-weight="700">渲染层</text>
+        <text x="276" y="102" fill="#C3C9CF" font-size="12.5">shell.html · 设置面板 · 启动画面 · 内置手册</text>
+        <text x="276" y="123" fill="#6A727B" font-size="11">只通过 preload 暴露的通道与主进程通信</text>
+        <text x="1152" y="102" text-anchor="end" fill="#5C646C" font-family="Cascadia Mono, Consolas, monospace" font-size="10">src/ui</text>
+      </g>
+      <path d="M70 136h1082" stroke="#1E2226"/>
+
+      <!-- 02 -->
+      <g>
+        <text x="70" y="159" fill="#6A727B" font-family="Cascadia Mono, Consolas, monospace" font-size="9.5" letter-spacing="1">02</text>
+        <text x="102" y="162" fill="#F2F4F5" font-size="13.5" font-weight="700">IPC 边界</text>
+        <text x="276" y="162" fill="#C3C9CF" font-size="12.5">dispatch.js 唯一注册点 · 12 个领域处理器 · 失败日志</text>
+        <text x="276" y="183" fill="#6A727B" font-size="11">注册前检查重复通道；日志不写参数与命令输出</text>
+        <text x="1152" y="162" text-anchor="end" fill="#5C646C" font-family="Cascadia Mono, Consolas, monospace" font-size="10">src/ipc</text>
+      </g>
+      <path d="M70 196h1082" stroke="#1E2226"/>
+
+      <!-- 03 -->
+      <g>
+        <text x="70" y="219" fill="#6A727B" font-family="Cascadia Mono, Consolas, monospace" font-size="9.5" letter-spacing="1">03</text>
+        <text x="102" y="222" fill="#F2F4F5" font-size="13.5" font-weight="700">应用层</text>
+        <text x="276" y="222" fill="#C3C9CF" font-size="12.5">RuntimeLifecycle 串行队列 · AppSessions 窗口令牌 · 窗口接入</text>
+        <text x="276" y="243" fill="#6A727B" font-size="11">停机、换向、维护与应用启动排在同一条队列里</text>
+        <text x="1152" y="222" text-anchor="end" fill="#5C646C" font-family="Cascadia Mono, Consolas, monospace" font-size="10">src/application</text>
+      </g>
+      <path d="M70 256h1082" stroke="#1E2226"/>
+
+      <!-- 04 -->
+      <g>
+        <text x="70" y="279" fill="#6A727B" font-family="Cascadia Mono, Consolas, monospace" font-size="9.5" letter-spacing="1">04</text>
+        <text x="102" y="282" fill="#F2F4F5" font-size="13.5" font-weight="700">核心层</text>
+        <text x="276" y="282" fill="#C3C9CF" font-size="12.5">AdbClient · Installer · audio-policy · runtime-ownership · leftovers</text>
+        <text x="276" y="303" fill="#6A727B" font-size="11">ADB 统一路由；按 AVD 锁与控制台核对实例归属</text>
+        <text x="1152" y="282" text-anchor="end" fill="#5C646C" font-family="Cascadia Mono, Consolas, monospace" font-size="10">src/core</text>
+      </g>
+
+      <!-- 05 -->
+      <path d="M70 316h1082" stroke="#282D32" stroke-dasharray="4 4"/>
+      <g>
+        <text x="70" y="339" fill="#6A727B" font-family="Cascadia Mono, Consolas, monospace" font-size="9.5" letter-spacing="1">05</text>
+        <text x="102" y="342" fill="#8A929B" font-size="13.5" font-weight="700">宿主</text>
+        <text x="276" y="342" fill="#C3C9CF" font-size="12.5">Android Emulator · ADB · AEHD 驱动 · Windows 窗口代理</text>
+        <text x="276" y="363" fill="#6A727B" font-size="11">由本程序管理，但不属于本程序发布</text>
+        <text x="1152" y="342" text-anchor="end" fill="#5C646C" font-family="Cascadia Mono, Consolas, monospace" font-size="10">external</text>
+      </g>
+
+      <text x="48" y="400" fill="#8A929B" font-size="11">同一台机器上的运行时由一条队列串行调度；排队失败不会堵住后续命令。</text>
+    </g>
+
+    <rect x=".5" y=".5" width="1199" height="419" fill="none" stroke="#282D32"/>
+  </g>
+</svg>

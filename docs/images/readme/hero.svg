@@ -1,148 +1,113 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="440" viewBox="0 0 1200 440" role="img" aria-labelledby="title desc">
-  <title id="title">Apk Start --Q 1.0.2 by MoonlyCake</title>
-  <desc id="desc">A midnight-blue poster with an illustrated desktop library and a floating Android app window. Android apps, at home on Windows.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="680" viewBox="0 0 1200 680" role="img" aria-labelledby="t d">
+  <title id="t">Apk Start --Q 1.0.2：让 Android 应用在 Windows 桌面上有个位置</title>
+  <desc id="d">纯黑底海报：整幅宽度的白色扩展黑体字标，下方左侧是中文主张与规格，中间是三步流程，右侧是一块冷蓝色版与桌面图标示意。</desc>
   <defs>
-    <linearGradient id="night" x2="1" y2="1" gradientUnits="objectBoundingBox">
-      <stop stop-color="#091220"/>
-      <stop offset=".6" stop-color="#121A34"/>
-      <stop offset="1" stop-color="#192747"/>
+    <linearGradient id="sky" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#0E1826"/>
+      <stop offset=".35" stop-color="#22374E"/>
+      <stop offset=".7" stop-color="#5C7F97"/>
+      <stop offset="1" stop-color="#C2D9E4"/>
     </linearGradient>
-    <linearGradient id="rim" x2="1" y2="1">
-      <stop stop-color="#445576"/>
-      <stop offset=".53" stop-color="#24354D"/>
-      <stop offset="1" stop-color="#547E89"/>
+    <linearGradient id="veil" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0B0C0D" stop-opacity="0"/>
+      <stop offset="1" stop-color="#0B0C0D" stop-opacity=".38"/>
     </linearGradient>
-    <radialGradient id="orchid">
-      <stop stop-color="#7664DD" stop-opacity=".43"/>
-      <stop offset="1" stop-color="#7664DD" stop-opacity="0"/>
-    </radialGradient>
-    <radialGradient id="lagoon">
-      <stop stop-color="#3BD1B8" stop-opacity=".26"/>
-      <stop offset="1" stop-color="#3BD1B8" stop-opacity="0"/>
-    </radialGradient>
-    <linearGradient id="accent" x2="1" y2="1">
-      <stop stop-color="#D1B2FC"/>
-      <stop offset=".48" stop-color="#9BBAFC"/>
-      <stop offset="1" stop-color="#57E1CF"/>
-    </linearGradient>
-    <linearGradient id="screen" x2="1" y2="1">
-      <stop stop-color="#212B50"/>
-      <stop offset=".65" stop-color="#152342"/>
-      <stop offset="1" stop-color="#1E4551"/>
-    </linearGradient>
-    <pattern id="dots" width="21" height="21" patternUnits="userSpaceOnUse">
-      <circle cx="1" cy="1" r=".9" fill="#AFC5F5" opacity=".20"/>
-    </pattern>
-    <clipPath id="frame"><rect width="1200" height="440" rx="28"/></clipPath>
-    <filter id="lift" x="-.2" y="-.25" width="1.4" height="1.55">
-      <feDropShadow dx="0" dy="16" stdDeviation="18" flood-color="#060B15" flood-opacity=".55"/>
+    <filter id="grain" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="3" stitchTiles="stitch"/>
+      <feColorMatrix type="saturate" values="0"/>
     </filter>
-    <filter id="phone-lift" x="-.3" y="-.2" width="1.7" height="1.45">
-      <feDropShadow dx="0" dy="12" stdDeviation="13" flood-color="#060B15" flood-opacity=".72"/>
-    </filter>
+    <clipPath id="plateClip">
+      <rect x="800" y="308" width="356" height="232"/>
+    </clipPath>
   </defs>
 
-  <g clip-path="url(#frame)">
-    <rect width="1200" height="440" fill="url(#night)"/>
-    <ellipse cx="893" cy="17" rx="490" ry="315" fill="url(#orchid)"/>
-    <ellipse cx="1130" cy="420" rx="530" ry="316" fill="url(#lagoon)"/>
-    <path d="M650 0H1200V440H550V355H650Z" fill="url(#dots)" opacity=".62"/>
-    <g fill="none" stroke="#9FB9F1" stroke-opacity=".15">
-      <path d="M787-50C681 49 675 167 742 237c75 80 227 70 288 118 47 36 36 66 21 103"/>
-      <path d="M827-50C720 49 713 157 784 217c77 66 236 55 297 105 48 40 36 87 10 136"/>
-      <path d="M868-50C766 34 755 146 829 198c89 64 236 47 297 95 52 40 47 99 9 165"/>
-      <path d="M911-50C815 21 796 131 871 175c96 58 232 33 294 86 55 47 61 101 12 197"/>
-    </g>
-    <path d="M65 55h26m-13-13v26" stroke="#57E1CF" stroke-opacity=".47" stroke-width="1.4" stroke-linecap="round" transform="translate(1070 270)"/>
-    <circle cx="1124" cy="98" r="5" fill="#C4A6F6" opacity=".8"/>
-    <circle cx="645" cy="339" r="3" fill="#F8A58C" opacity=".83"/>
-    <circle cx="1056" cy="57" r="2" fill="#9CB4FF"/>
-    <path d="M666 94v18m-9-9h18" stroke="#A9B9F1" stroke-opacity=".41" stroke-width="1.4" stroke-linecap="round"/>
+  <rect width="1200" height="680" fill="#0B0C0D"/>
 
-    <g font-family="Segoe UI, system-ui, sans-serif">
-      <g transform="translate(68 60)">
-        <rect width="31" height="31" rx="10" fill="#1C2C42" stroke="#4D6A83"/>
-        <path d="M19 6.8a8.8 8.8 0 1 0 5.2 13A8.8 8.8 0 0 1 19 6.8Z" fill="#8CE5D5"/>
-        <circle cx="21.1" cy="10.2" r="1.4" fill="#C4A6F6"/>
-        <text x="46" y="20" fill="#BDCDE4" font-size="15" font-weight="650" letter-spacing="2.9">MOONLYCAKE / WINDOWS DESKTOP</text>
-      </g>
-      <text x="63" y="204" fill="#F6F8FF" font-size="108" font-weight="750" letter-spacing="-6.5">Apk Start</text>
-      <rect x="70" y="236" width="100" height="4" rx="2" fill="url(#accent)"/>
-      <g transform="translate(190 222)">
-        <rect width="108" height="32" rx="16" fill="#272744" stroke="#625680"/>
-        <text x="54" y="21" text-anchor="middle" fill="#E7DCFF" font-size="14" font-weight="650" letter-spacing=".7">--Q 1.0.2</text>
-      </g>
-      <text x="68" y="283" fill="#E2EBFF" font-size="28" font-weight="500" letter-spacing="-.42">Android apps, at home on Windows.</text>
-      <g transform="translate(68 327)" font-size="14.5" font-weight="650">
-        <rect width="151" height="36" rx="18" fill="#152A3A" stroke="#34545F"/>
-        <circle cx="19" cy="18" r="3" fill="#57E1CF"/>
-        <text x="31" y="23" fill="#CBEFEB">APK &amp; bundles</text>
-        <rect x="162" width="146" height="36" rx="18" fill="#202847" stroke="#404F77"/>
-        <circle cx="181" cy="18" r="3" fill="#8DA9FF"/>
-        <text x="193" y="23" fill="#DFE6FF">App windows</text>
-        <rect x="319" width="135" height="36" rx="18" fill="#29233F" stroke="#51486D"/>
-        <circle cx="338" cy="18" r="3" fill="#C4A6F6"/>
-        <text x="350" y="23" fill="#EEE3FF">Host audio</text>
-      </g>
-    </g>
+  <!-- 抬头 -->
+  <g font-family="Cascadia Mono, Consolas, monospace" font-size="10.5" letter-spacing="2.4" fill="#6B737C">
+    <text x="40" y="44">ANDROID RUNNER FOR WINDOWS</text>
+    <text x="1160" y="44" text-anchor="end">V1.0.2 / MIT</text>
+  </g>
+  <path d="M40 58h1120" stroke="#FFFFFF" stroke-opacity=".16" stroke-width="1"/>
 
-    <g transform="translate(687 102)">
-      <rect width="394" height="253" rx="23" fill="#111B30" stroke="url(#rim)" stroke-width="1.3" filter="url(#lift)"/>
-      <path d="M1 44h392M99 44v208" fill="none" stroke="#2E3B59"/>
-      <rect x="16" y="13" width="18" height="18" rx="6" fill="#8DA9FF" opacity=".94"/>
-      <path d="M22 18v8l7-4Z" fill="#152243"/>
-      <text x="43" y="26" font-family="Segoe UI, system-ui, sans-serif" font-size="11.5" font-weight="700" fill="#D5E1F7" letter-spacing=".7">APP LIBRARY</text>
-      <g fill="none" stroke="#B7C7E5" stroke-width="1.15" stroke-linecap="round" opacity=".76">
-        <path d="M330 23h7"/>
-        <rect x="349" y="18" width="7" height="7" rx="1"/>
-        <path d="m368 18 7 7m0-7-7 7"/>
-      </g>
-      <rect x="13" y="63" width="72" height="28" rx="8" fill="#26334F"/>
-      <rect x="22" y="73" width="7" height="7" rx="2" fill="#9FB4FE"/>
-      <rect x="36" y="75" width="34" height="4" rx="2" fill="#B6C7F0" opacity=".7"/>
-      <g fill="#607497" opacity=".55">
-        <rect x="22" y="104" width="7" height="7" rx="2"/>
-        <rect x="36" y="106" width="27" height="4" rx="2"/>
-        <rect x="22" y="130" width="7" height="7" rx="2"/>
-        <rect x="36" y="132" width="32" height="4" rx="2"/>
-        <rect x="22" y="156" width="7" height="7" rx="2"/>
-        <rect x="36" y="158" width="21" height="4" rx="2"/>
-        <rect x="20" y="219" width="52" height="7" rx="3.5"/>
-      </g>
-      <g transform="translate(121 64)">
-        <rect width="145" height="10" rx="5" fill="#A8B9DD" opacity=".7"/>
-        <rect y="20" width="92" height="5" rx="2.5" fill="#657592"/>
-        <rect y="42" width="106" height="94" rx="12" fill="#1B2D45" stroke="#32485F"/>
-        <rect x="118" y="42" width="106" height="94" rx="12" fill="#252744" stroke="#3A3D60"/>
-        <rect x="13" y="54" width="37" height="37" rx="11" fill="#335E66"/>
-        <path d="M22 80c6-1 7-11 11-11s5 5 8 6" stroke="#A3F4DC" stroke-width="2.2" stroke-linecap="round" fill="none"/>
-        <rect x="131" y="54" width="37" height="37" rx="11" fill="#46415E"/>
-        <circle cx="149.5" cy="72.5" r="8" fill="none" stroke="#D0B9FF" stroke-width="2"/>
-        <path d="M143 78l12-12" fill="none" stroke="#D0B9FF" stroke-width="1.8" stroke-linecap="round"/>
-        <rect x="13" y="102" width="69" height="5" rx="2.5" fill="#9CB4CB" opacity=".68"/>
-        <rect x="13" y="115" width="42" height="4" rx="2" fill="#677E96"/>
-        <rect x="131" y="102" width="66" height="5" rx="2.5" fill="#B9ADD8" opacity=".72"/>
-        <rect x="131" y="115" width="37" height="4" rx="2" fill="#756C95"/>
-        <circle cx="5" cy="159" r="3.5" fill="#57E1CF"/>
-        <rect x="17" y="157" width="79" height="4" rx="2" fill="#657994"/>
-      </g>
-    </g>
+  <!-- 字标 -->
+  <path d="M1.1 0 49.6 -100.2H89.3L137.8 0.0H99.2L93.2 -13.2H44.1L38.3 0.0ZM55 -38.1H82.3L75.3 -55.0Q74.9 -56.2 74.1 -58.2Q73.4 -60.1 72.5 -62.6Q71.7 -65.1 70.9 -67.6Q70.1 -70.1 69.3 -72.1H68.3Q67.4 -69.6 66.3 -66.4Q65.1 -63.2 64 -60.1Q62.9 -57.1 62 -55.0Z M149.8 0.0V-100.2H230.4Q240.3 -100.2 247.9 -95.8Q255.4 -91.3 259.7 -83.4Q263.9 -75.4 263.9 -65.1Q263.9 -54.5 259.6 -46.4Q255.3 -38.4 247.7 -34.1Q240.1 -29.7 230.4 -29.7H185.8V0.0ZM185.8 -54.6H220.3Q225.9 -54.6 228.6 -57.2Q231.2 -59.9 231.2 -65.0Q231.2 -68.4 230 -70.7Q228.8 -73 226.4 -74.1Q224 -75.3 220.3 -75.3H185.8Z M275.8 0.0V-100.2H311.8V-55.9L360.4 -100.2H405.0L360.7 -59.3L406.1 0.0H362.3L334.1 -37.7L311.8 -19.6V0.0Z  M519.5 1.7Q506.5 1.7 495.3 0.2Q484.1 -1.3 475.6 -5.0Q467.2 -8.7 462.4 -15.3Q457.6 -22 457.6 -32.0Q457.6 -32.3 457.6 -32.8Q457.6 -33.3 457.7 -33.9H492.8Q492.7 -33.3 492.7 -32.8Q492.7 -32.3 492.7 -31.9Q492.7 -27.5 495.6 -25.2Q498.5 -22.8 503.8 -22.0Q509 -21.2 515.9 -21.2Q518.6 -21.2 521.6 -21.3Q524.6 -21.4 527.5 -21.7Q530.3 -22.1 532.6 -22.8Q534.8 -23.6 536.2 -24.8Q537.6 -26 537.6 -27.9Q537.6 -30.6 534.3 -32.0Q531 -33.5 525.4 -34.3Q519.8 -35.1 512.9 -35.8Q506 -36.5 498.5 -37.7Q491.1 -38.9 484.2 -41.0Q477.3 -43.1 471.6 -46.7Q466 -50.4 462.7 -56.1Q459.5 -61.7 459.5 -69.9Q459.5 -78.6 464.1 -84.8Q468.7 -90.9 476.5 -94.7Q484.4 -98.5 494.6 -100.2Q504.8 -102 515.9 -102.0Q527.2 -102 537.2 -100.3Q547.2 -98.6 554.9 -95.0Q562.5 -91.3 566.9 -85.4Q571.3 -79.5 571.3 -71.1V-69.3H536.4V-69.9Q536.4 -72.8 534.5 -75.1Q532.6 -77.3 528.4 -78.7Q524.2 -80.1 517.3 -80.1Q510.3 -80.1 505.7 -79.2Q501 -78.4 498.7 -76.8Q496.5 -75.3 496.5 -73.5Q496.5 -70.9 499.8 -69.5Q503 -68 508.7 -67.2Q514.3 -66.4 521.2 -65.7Q528.1 -65 535.5 -63.9Q543 -62.8 549.9 -60.8Q556.8 -58.8 562.4 -55.3Q568 -51.8 571.3 -46.4Q574.6 -41 574.6 -33.2Q574.6 -20.8 567.4 -13.1Q560.2 -5.3 547.7 -1.8Q535.3 1.7 519.5 1.7Z M625.8 0.0V-72.7H583.2V-100.2H704.3V-72.7H661.8V0.0Z M708.8 0 757.4 -100.2H797.0L845.5 0.0H806.9L800.9 -13.2H751.8L746 0.0ZM762.8 -38.1H790.0L783 -55.0Q782.6 -56.2 781.8 -58.2Q781.1 -60.1 780.2 -62.6Q779.4 -65.1 778.6 -67.6Q777.8 -70.1 777 -72.1H776.0Q775.1 -69.6 774 -66.4Q772.8 -63.2 771.7 -60.1Q770.6 -57.1 769.8 -55.0Z M857.5 0.0V-100.2H944.3Q955.6 -100.2 963.1 -95.6Q970.6 -90.9 974.4 -83.3Q978.2 -75.7 978.2 -67.0Q978.2 -56.9 973.7 -49.1Q969.3 -41.3 960.7 -36.7L980.5 0.0H939.8L924.7 -31.3H893.5V0.0ZM893.5 -56.2H931.7Q935.7 -56.2 938.5 -58.8Q941.3 -61.3 941.3 -65.8Q941.3 -68.9 940 -71.0Q938.7 -73.1 936.6 -74.2Q934.4 -75.3 931.7 -75.3H893.5Z M1030 0.0V-72.7H987.5V-100.2H1108.6V-72.7H1066.0V0.0Z" transform="translate(40 240)" fill="#FFFFFF"/>
 
-    <g transform="translate(982 157)">
-      <rect width="145" height="246" rx="24" fill="#121C31" stroke="#6982A4" stroke-width="1.25" filter="url(#phone-lift)"/>
-      <rect x="8" y="8" width="129" height="230" rx="18" fill="url(#screen)"/>
-      <path d="M15 159c27-44 63-42 98-64l24-19v145c0 9-8 17-17 17H25c-9 0-17-8-17-17v-43Z" fill="#4861A2" opacity=".21"/>
-      <path d="M9 182c34-26 63-24 93-45 14-10 25-21 35-33v118a16 16 0 0 1-16 16H24a16 16 0 0 1-16-16Z" fill="#28867F" opacity=".25"/>
-      <rect x="57" y="16" width="30" height="4" rx="2" fill="#8493B9" opacity=".37"/>
-      <rect x="35" y="63" width="75" height="75" rx="22" fill="url(#accent)"/>
-      <path d="M58 84h23l10 10v22H58z" fill="#253A56" opacity=".95" stroke="#253A56" stroke-width="1.7" stroke-linejoin="round"/>
-      <path d="M81 84v11h10" fill="none" stroke="#CCDEFE" stroke-width="1.5" stroke-linejoin="round"/>
-      <path d="M68 100v11l10-5.5Z" fill="#89F0D6"/>
-      <text x="72.5" y="162" text-anchor="middle" font-family="Segoe UI, system-ui, sans-serif" font-size="11.2" font-weight="700" letter-spacing="1.25" fill="#E0EEFC">ANDROID APP</text>
-      <rect x="40" y="178" width="65" height="4" rx="2" fill="#92BED1" opacity=".6"/>
-      <rect x="53" y="188" width="39" height="4" rx="2" fill="#92BED1" opacity=".35"/>
-      <rect x="54" y="224" width="37" height="3" rx="1.5" fill="#CBDEF0" opacity=".58"/>
+  <path d="M40 286h1120" stroke="#FFFFFF" stroke-opacity=".16" stroke-width="1"/>
+
+  <!-- 左栏：主张与规格 -->
+  <text x="40" y="332" font-family="Cascadia Mono, Consolas, monospace" font-size="10" letter-spacing="2.2" fill="#6B737C">01 / 它是什么</text>
+  <g font-family="Segoe UI, Microsoft YaHei, PingFang SC, sans-serif" fill="#E7EAEC" font-size="20.5">
+    <text x="40" y="374">拖入 APK，双击桌面图标，</text>
+    <text x="40" y="404">它就在独立窗口里运行。</text>
+  </g>
+  <g font-family="Segoe UI, Microsoft YaHei, PingFang SC, sans-serif" fill="#7E868F" font-size="12.5">
+    <text x="40" y="446">基于 Android 30 AOSP 的精简运行时，</text>
+    <text x="40" y="466">不装模拟器，也不接管已有的应用数据。</text>
+  </g>
+
+  <g font-family="Cascadia Mono, Consolas, monospace">
+    <text x="40" y="514" font-size="10" letter-spacing="2.2" fill="#6B737C">SPEC</text>
+    <g font-size="12">
+      <text x="40" y="544" fill="#7B828B">系统镜像</text>
+      <text x="470" y="544" text-anchor="end" font-size="11.5" fill="#C7CED5">ANDROID 30 AOSP</text>
+      <path d="M40 554h430" stroke="#FFFFFF" stroke-opacity=".09"/>
+      <text x="40" y="574" fill="#7B828B">音频</text>
+      <text x="470" y="574" text-anchor="end" font-size="11.5" fill="#C7CED5">双向 / 默认关闭</text>
+      <path d="M40 584h430" stroke="#FFFFFF" stroke-opacity=".09"/>
+      <text x="40" y="604" fill="#7B828B">窗口</text>
+      <text x="470" y="604" text-anchor="end" font-size="11.5" fill="#C7CED5">原生 / 嵌入</text>
     </g>
-    <rect x=".65" y=".65" width="1198.7" height="438.7" rx="27.35" fill="none" stroke="#8296BF" stroke-opacity=".30" stroke-width="1.3"/>
+  </g>
+
+  <!-- 中栏：三步 -->
+  <text x="530" y="332" font-family="Cascadia Mono, Consolas, monospace" font-size="10" letter-spacing="2.2" fill="#6B737C">02 / 三步</text>
+  <g font-family="Segoe UI, Microsoft YaHei, PingFang SC, sans-serif">
+    <text x="530" y="384" font-family="Cascadia Mono, Consolas, monospace" font-size="10.5" fill="#8FB6D0">01</text>
+    <text x="556" y="384" font-size="14" fill="#E7EAEC">拖入安装包</text>
+    <text x="556" y="404" font-size="11.5" fill="#6F777F">.apk / .apks / .xapk</text>
+    <path d="M530 420h240" stroke="#FFFFFF" stroke-opacity=".09"/>
+
+    <text x="530" y="458" font-family="Cascadia Mono, Consolas, monospace" font-size="10.5" fill="#8FB6D0">02</text>
+    <text x="556" y="458" font-size="14" fill="#E7EAEC">准备运行时</text>
+    <text x="556" y="478" font-size="11.5" fill="#6F777F">首次写入，之后复用快照</text>
+    <path d="M530 494h240" stroke="#FFFFFF" stroke-opacity=".09"/>
+
+    <text x="530" y="532" font-family="Cascadia Mono, Consolas, monospace" font-size="10.5" fill="#8FB6D0">03</text>
+    <text x="556" y="532" font-size="14" fill="#E7EAEC">双击图标</text>
+    <text x="556" y="552" font-size="11.5" fill="#6F777F">独立窗口，可固定到任务栏</text>
+    <path d="M530 568h240" stroke="#FFFFFF" stroke-opacity=".09"/>
+  </g>
+
+  <!-- 右栏：冷蓝图版 -->
+  <g clip-path="url(#plateClip)">
+    <rect x="800" y="308" width="356" height="232" fill="url(#sky)"/>
+    <g stroke="#EAF3F8" stroke-opacity=".22" stroke-width="1">
+      <path d="M800 496 1156 336"/>
+      <path d="M800 520 1156 360"/>
+      <path d="M800 544 1100 412"/>
+    </g>
+    <rect x="800" y="308" width="356" height="232" fill="url(#veil)"/>
+    <rect x="800" y="308" width="356" height="232" filter="url(#grain)" opacity=".10"/>
+    <g transform="translate(924 396)">
+      <rect width="52" height="52" fill="#FFFFFF"/>
+      <path d="M20 15 38 26 20 37z" fill="#0B0C0D"/>
+    </g>
+  </g>
+  <rect x="800" y="308" width="356" height="232" fill="none" stroke="#FFFFFF" stroke-opacity=".14"/>
+
+  <g font-family="Segoe UI, Microsoft YaHei, PingFang SC, sans-serif" font-size="12" fill="#6F777F">
+    <text x="800" y="566">贴一张桌面快捷方式，</text>
+    <text x="800" y="584">图标由安装包里的资源生成。</text>
+  </g>
+  <g font-family="Cascadia Mono, Consolas, monospace" font-size="10" letter-spacing="1.6" fill="#565D65">
+    <text x="800" y="620">ICON EXTRACTED FROM PACKAGE</text>
+  </g>
+
+  <!-- 页脚 -->
+  <path d="M40 640h1120" stroke="#FFFFFF" stroke-opacity=".16"/>
+  <g font-family="Cascadia Mono, Consolas, monospace" font-size="10" letter-spacing="1.8" fill="#565D65">
+    <text x="40" y="662">MAINTAINED BY MOONLYCAKE</text>
+    <text x="1160" y="662" text-anchor="end">DOUBLE-CLICK TO LAUNCH</text>
   </g>
 </svg>
