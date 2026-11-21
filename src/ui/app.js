@@ -1068,6 +1068,7 @@ function fillSettings(s) {
   if ($('setMirrorPrefix')) $('setMirrorPrefix').value = (s.runtime && s.runtime.mirrorPrefix) || '';
   if ($('setConnections')) $('setConnections').value = Number((s.runtime && s.runtime.downloadConnections) || 8);
   $('setAudio').checked = s.engine.audio !== false;
+  $('setHostMicrophone').checked = s.engine.hostMicrophone === true;
   $('setLiteMode').checked = s.engine.liteMode !== false;
   $('setPrewarm').checked = s.engine.prewarm !== false;
   $('setPriorityMode').value = ['performance', 'game'].includes(s.engine.priorityMode)
@@ -1439,6 +1440,7 @@ async function openSettings() {
   fillSettings(state.settings);
   fillAutodebugSettings((state.settings && state.settings.debug) || {});
   const info = await api.info();
+  $('hostMicField').hidden = info.platform !== 'win32';
   $('setRuntimeDir').value = info.runtimeDir || info.dataDir;
   if ($('setAvdDir')) {
     const di = await api.dataInfo().catch(() => null);
@@ -1785,6 +1787,26 @@ function bindSettings() {
     });
   }
   $('setAudio').addEventListener('change', (e) => save({ engine: { audio: e.target.checked } }));
+  $('setHostMicrophone').addEventListener('change', async (e) => {
+    const control = e.target;
+    const requested = control.checked;
+    control.disabled = true;
+    try {
+      const next = await api.setSettings({ engine: { hostMicrophone: requested } });
+      state.settings = next;
+      control.checked = next.engine.hostMicrophone === true;
+      toast({
+        title: requested ? '已保存麦克风开启' : '已保存麦克风关闭',
+        body: requested ? '重启安卓运行时后生效；还需在安卓里授予目标应用麦克风权限。'
+          : '如果安卓运行时还在运行，请停止或重启它，才会停止传入麦克风声音。',
+      });
+    } catch (error) {
+      control.checked = state.settings?.engine?.hostMicrophone === true;
+      toast({ type: 'error', title: '无法保存麦克风设置', body: error.message });
+    } finally {
+      control.disabled = false;
+    }
+  });
   $('setLiteMode').addEventListener('change', (e) => save({ engine: { liteMode: e.target.checked } }));
   $('setPrewarm').addEventListener('change', (e) => save({ engine: { prewarm: e.target.checked } }));
   $('setPriorityMode').addEventListener('change', (e) => save({ engine: { priorityMode: e.target.value } }));
@@ -1948,6 +1970,7 @@ function bindSettings() {
       }
       const r = await api.runtimeCleanup({ apply: true, includeSnapshots });
       if (r.cancelled) return;
+      if (r.ok === false) throw new Error(r.error);
       toast({
         title: '清理完成',
         body: `释放约 ${(r.saved / 1048576).toFixed(0)} MB（${r.removed.length} 项），已安装应用保留。`,
@@ -2724,7 +2747,7 @@ async function fixIssue(issue) {
     case 'disk': {
       // 主进程会弹出原生确认框（含可释放空间预览），这里不再重复 confirm
       const r = await api.runtimeCleanup({ apply: true }).catch(() => null);
-      if (!r) { toast({ title: '清理失败', body: '请重试', type: 'error' }); break; }
+      if (!r || r.ok === false) { toast({ title: '清理失败', body: r?.error || '请重试', type: 'error' }); break; }
       if (r.cancelled) break;
       toast({ title: '清理完成', body: `释放约 ${((r.saved || 0) / 1048576).toFixed(0)} MB`, type: 'ok' });
       break;
@@ -2741,7 +2764,7 @@ async function fixIssue(issue) {
     }
     case 'lock': {
       const r = await api.clearLocks().catch(() => ({ ok: false }));
-      toast(r.ok ? { title: '已清理残留锁文件', type: 'ok' } : { title: '清理失败', body: r.error, type: 'error' });
+      toast(r.ok ? { title: '可以重新启动运行时', body: r.note, type: 'info' } : { title: '当前不能处理锁', body: r.error, type: 'error' });
       break;
     }
     // ---- 自动检测（自动 debug）新增的修复动作 ----
@@ -2760,7 +2783,7 @@ async function fixIssue(issue) {
     case 'orphans': {
       const r = await api.clearOrphans().catch(() => ({ ok: false }));
       toast(r && r.ok
-        ? { title: '已清理残留的模拟器进程', type: 'ok' }
+        ? { title: 'ApkStart 安卓运行时未在运行', body: r.note, type: 'ok' }
         : { title: '清理失败', body: (r && r.error) || '请重试', type: 'error' });
       break;
     }
@@ -2807,7 +2830,7 @@ async function fixIssue(issue) {
     }
     // ---- 0.6.2 声音检测对应的修复动作 ----
     case 'audio': {
-      const t = toast({ title: '正在打开安卓应用声音…', body: '马上重启运行时让 -no-audio 失效', type: 'info', sticky: true, spinner: true });
+      const t = toast({ title: '正在打开安卓应用声音…', body: '重启安卓运行时后恢复播放', type: 'info', sticky: true, spinner: true });
       const s = await api.setSettings({ engine: { audio: true } }).catch(() => null);
       if (!s) { failFix(issue, t, '没能保存声音设置，已打开对应教程'); break; }
       state.settings = s;

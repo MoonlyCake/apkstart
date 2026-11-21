@@ -156,7 +156,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
 
   console.log('\n[layers.js 容器式瘦身]');
 
-  await test('盘点可回收项：非 x86_64 QEMU、旧镜像、旧 AVD、锁文件、旧快照', () => {
+  await test('盘点可回收项：非 x86_64 QEMU、旧镜像、旧 AVD、旧快照', () => {
     const root = path.join(TMP, 'runtime-layers');
     const mk = (p, size) => {
       fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -179,7 +179,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(paths.some((p) => p.endsWith('qemu-system-aarch64.exe')), '应列出非 x86_64 QEMU');
     assert(!paths.some((p) => p.endsWith('qemu-system-x86_64.exe')), '不能删 x86_64 QEMU');
     assert(paths.some((p) => p.includes('android-30')), '应列出旧版 API30 镜像');
-    assert(paths.some((p) => p.endsWith('.lock')), '应列出锁文件');
+    assert(!paths.some((p) => p.endsWith('.lock')), '不能把活动 AVD 的锁列为清理项');
     assert(paths.some((p) => p.includes('snapshots')), '应列出旧快照');
     assert(paths.some((p) => p.includes('apkstart-arm.avd')), '应列出非活动 AVD');
     assert(!paths.some((p) => p.endsWith('apkstart.avd/config.ini')), '不能删活动 AVD 配置');
@@ -189,7 +189,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(fs.existsSync(path.join(root, 'avd', 'apkstart-arm.avd', 'userdata-qemu.img')));
 
     const done = layers.prune(root, { apply: true });
-    assert(done.saved > 0 && done.removed.length >= 5, '实际清理应释放空间');
+    assert(done.saved > 0 && done.removed.length >= 4, '实际清理应释放空间');
     assert(!fs.existsSync(path.join(root, 'avd', 'apkstart-arm.avd')), '非活动 AVD 应被清掉');
     assert(fs.existsSync(path.join(root, 'avd', 'apkstart.avd', 'config.ini')), '活动 AVD 必须保留');
     assert(fs.existsSync(path.join(root, 'emulator', 'qemu', 'windows-x86_64', 'qemu-system-x86_64.exe')), 'x86_64 QEMU 必须保留');
@@ -525,8 +525,8 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
   });
 
   await test('游戏模式必须使用高优先级且关闭全局鼠标钩子', () => {
-    const ps = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'win', 'priority.ps1'), 'utf8');
-    assert(/game\s*=\s*'High'/.test(ps), 'game 级别要把 qemu 提到 High');
+    const emu = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'emulator.js'), 'utf8');
+    assert(/game:\s*os\.constants\.priority\.PRIORITY_HIGH/.test(emu), 'game 级别要把 qemu 提到 High');
     const aw = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'appwin.js'), 'utf8');
     assert(/opts\.enabled && !game/.test(aw), 'game 模式不能装 WH_MOUSE_LL 全局钩子');
   });
@@ -603,12 +603,12 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(!/performance.*\? 'normal' : 'below'/.test(begin),
       '不能再把 balanced 落到 below');
     // 每次打开/切回都要重设优先级：endApp 会降到 idle，切换回来不提权就会发木
-    const setIdx = begin.indexOf("setPriority(level)");
+    const setIdx = begin.indexOf("setGuestPriority(level)");
     const firstIdx = begin.indexOf("if (first)");
     assert(setIdx > -1, 'beginApp 要调 setPriority');
     // setPriority 不应只在第一个 if(first) 块里 —— 切换应用（非 first）也要提权
     const firstBlock = begin.slice(firstIdx, begin.indexOf('\n\n', firstIdx));
-    assert(!/setPriority\(level\)/.test(firstBlock) || begin.split('setPriority(level)').length >= 2,
+    assert(!/setGuestPriority\(level\)/.test(firstBlock) || begin.split('setGuestPriority(level)').length >= 2,
       'setPriority 要在每次 beginApp 都执行，不只第一次');
   });
 
@@ -2160,7 +2160,6 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
   });
 
   await test('.xapk 拆分包：流式解出分片、解析 base、失败时清理临时目录', async () => {
-    const crypto = require('crypto');
     const { parseBundle } = require('../src/core/installer');
     const { buildApkBytes, buildStoredZip } = require('./lib/make-apk');
     const apk = buildApkBytes();
@@ -2180,16 +2179,14 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     } finally {
       b.cleanup();
     }
+    assert(!fs.existsSync(path.dirname(b.files[0])), '成功后应清理已知临时目录');
 
-    // 失败：包里没有 APK 分片 → 明确报错，且不能把临时目录留在用户机器上
+    // 失败：包里没有 APK 分片 → 明确报错；失败清理另见 phase2-bundle.test.js。
     const badPath = path.join(TMP, 'bad.xapk');
     fs.writeFileSync(badPath, buildStoredZip([{ name: 'readme.txt', data: Buffer.from('nope') }]));
     let err = null;
     try { await parseBundle(badPath); } catch (e) { err = e; }
     assert(err && /没有找到 APK 分片/.test(err.message), `应报没有分片，实际 ${err && err.message}`);
-    const dir = path.join(os.tmpdir(), 'apkstart-bundle',
-      crypto.createHash('sha1').update(badPath).digest('hex').slice(0, 12));
-    assert(!fs.existsSync(dir), '失败时应清理临时目录');
   });
 
   await test('materializeImages：展开 .img.gz、已展开跳过、坏镜像上报失败且不留半截', async () => {
@@ -2409,29 +2406,31 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
       '控制台归属要靠 IsOurConsole（conhost 的 pid 不是 emulator 的）');
   });
 
-  await test('重启换面板后不能「复用」一台已经关掉的模拟器', () => {
-    const root = path.join(__dirname, '..');
-    const emuJs = fs.readFileSync(path.join(root, 'src', 'core', 'emulator.js'), 'utf8');
-    // emulator.exe 只是启动器，spawn 完 qemu 自己就退出了，但 this.proc 会一直留着
-    // （killed 仍是 false）。只看它 = 把已经关掉的机器当成还活着：
-    // restartForOrientation 关掉机器后紧接着 ensure() → start() 直接 reused，
-    // 调用方拿着死掉的 serial 去 adb → `device not found`，切换应用直接失败。
-    const reuse = emuJs.slice(emuJs.indexOf('async start('), emuJs.indexOf('async start(') + 900);
-    assert(/_consoleAlive\(\)/.test(reuse), 'start() 的复用分支必须再确认控制台端口上真有机器');
-    assert(/this\.proc = null;/.test(reuse), '确认没在跑就把 proc 清掉，走真正的开机流程');
-    // stop() 关干净后必须丢掉启动器句柄，否则 running() 永远为 true
-    const stopFn = emuJs.slice(emuJs.indexOf('async stop('), emuJs.indexOf('async stop(') + 1800);
-    assert(/killAttempt\(\)[\s\S]{0,200}this\.proc = null;/.test(stopFn), 'stop() 收尾要清掉 this.proc');
-    // engine 层还要防另一种假象：模拟器刚退出时 adb 仍短时报 device，
-    // isOnline() 于是判成就绪，后续命令全部 device not found。
-    const engineJs = fs.readFileSync(path.join(root, 'src', 'core', 'engine.js'), 'utf8');
-    const inner = engineJs.slice(engineJs.indexOf('async _ensureInner('), engineJs.indexOf('async _ensureInner(') + 2200);
-    assert(/getprop sys\.boot_completed/.test(inner), 'ensure 要补一条真实命令验证设备可用');
-    assert(/probe !== null/.test(inner), '命令不通时不能复用旧客户端');
-    // 换向前后要等 adb 侧设备真的消失，再拉起新机器
-    const mainJs = fs.readFileSync(path.join(root, 'src', 'main.js'), 'utf8');
-    const rot = mainJs.slice(mainJs.indexOf('async function restartForOrientation'), mainJs.indexOf('async function restartForOrientation') + 2600);
-    assert(/c\.isOnline\(\)\.catch\(\(\) => false\)/.test(rot), 'stop 后要等 adb 设备消失');
+  await test('重启换面板前核实实例，关机成功后释放旧句柄', async () => {
+    const assert = require('node:assert/strict');
+    const { EmulatorEngine } = require('../src/core/emulator');
+    const emu = Object.create(EmulatorEngine.prototype);
+    const commands = [];
+    const identity = {
+      pid: 123, port: 5558, serial: 'emulator-5558',
+      revalidate: async () => false,
+      client: { exec: async (args) => { commands.push(args); return { stdout: 'OK' }; } },
+    };
+    emu.proc = {};
+    emu._avdOwner = () => ({ state: 'live', pid: 123 });
+    await assert.rejects(emu.start(), /仍占用数据目录/);
+    assert.equal(await emu.stop({ adbPath: 'adb', identity }), false);
+    assert.deepEqual(commands, [], '不能向归属不明确的实例发送关机指令');
+    assert(emu.proc, '不能把失败关闭误报为已退出');
+
+    identity.revalidate = async () => true;
+    emu._adbGuestHealthy = async () => true;
+    emu.snapshotWorthSaving = false;
+    emu._avdOwner = () => ({ state: 'absent' });
+    emu._consoleAlive = async (port) => { assert.equal(port, 5558); return false; };
+    assert.equal(await emu.stop({ adbPath: 'adb', identity }), true);
+    assert.deepEqual(commands, [['emu', 'kill']]);
+    assert.equal(emu.proc, null);
   });
 
   await test('Windows Terminal 弹出的开机黑框也要能认出来', () => {

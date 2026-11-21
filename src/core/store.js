@@ -63,6 +63,7 @@ const DEFAULT_SETTINGS = {
     badGpu: '',
     forceTcg: false,         // 保留给高级排障；正常路径已由 doctor 自动回退
     audio: true,             // 安卓应用的声音（提示音/视频）。关闭可省一点 CPU
+    hostMicrophone: false,   // Windows 麦克风输入独立于播放，必须显式开启
     // ---- 轻量容器（默认全开省资源，用户可逐项关掉）----
     liteMode: true,          // 收敛 vCPU 配额，避免 qemu 占满物理核拖慢 Windows
     // 一句话策略：save（省资源）/ balanced（均衡）/ smooth（流畅，视频·游戏优先）。

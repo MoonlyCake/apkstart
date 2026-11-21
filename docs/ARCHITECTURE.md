@@ -87,7 +87,7 @@ Linux 内核、zygote、system_server 必须整包引导一次，**做不到「�
 | --- | --- | --- |
 | 每开一个 App 都重新引导完整 Android（40~142s，CPU/磁盘打满） | 环境只引导一次并常驻；detached qemu 在 ApkStart 退出后仍活着，下次 `adoptExisting()` 接管 + quickboot 快照，点开只做 `am start` + 挂窗口 | `engine.js` / `emulator.js` |
 | 之前开过的 App 全留在后台吃内存、拉网络 | 打开新 App 时 `am force-stop` 其他用户 App；关掉最后一个窗口时 `am kill-all` + `deviceidle force-idle` | `container.js` / `Runtime.beginApp()` / `endApp()` |
-| qemu 以 Normal 优先级和 Windows 桌面抢 CPU | 启动后降到 `BelowNormal`，容器停放时降到 `Idle`；vCPU 收敛到物理核的 1/4（2~3 核） | `win/priority.ps1` / `doctor.liteProfile()` |
+| qemu 以 Normal 优先级和 Windows 桌面抢 CPU | 只调整已确认归属的 QEMU 进程；启动后降到 `BelowNormal`，容器停放时降到 `Idle`；保留性能档位 | `EmulatorEngine.setPriority()` / `doctor.liteProfile()` |
 | 没有 App 时同步、通知、窗口巡检仍全速轮询 | 文件同步与通知桥只在有应用窗口时开；窗口巡巡检限在 embed 后 8 秒内；socket 主循环改 50ms 短轮询 | `main.js` / `win/agent.ps1` |
 
 ### 关于「APK 转译成 x86」

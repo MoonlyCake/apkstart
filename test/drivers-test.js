@@ -279,7 +279,7 @@ const base = () => ({
       gpuMode: 'swangle',
       forceTcg: true,
       args: [{ flag: '-feature', value: 'Vulkan' }, { flag: '-gpu', value: 'host' }],
-      ini: { 'hw.gpu.mode': 'swangle', 'hw.audioInput': 'yes' },
+      ini: { 'hw.gpu.mode': 'swangle', 'hw.gps': 'yes', 'hw.audioInput': 'yes' },
       env: { ANDROID_EMU_TEST: '1' },
       notes: [],
     };
@@ -293,7 +293,8 @@ const base = () => ({
     assert.equal(env.ANDROID_EMU_TEST, '1');
     const ini = emu._iniWithDrivers('hw.gpu.mode=host\nhw.keyboard=yes\n');
     assert(/hw\.gpu\.mode=swangle/.test(ini), 'ini 没被覆盖');
-    assert(/hw\.audioInput=yes/.test(ini), 'ini 新键没追加');
+    assert(/hw\.gps=yes/.test(ini), 'ini 新键没追加');
+    assert(!/hw\.audioInput=/.test(ini), '驱动不应代替用户打开麦克风');
     assert.equal((ini.match(/hw\.gpu\.mode=/g) || []).length, 1, 'ini 出现了重复键');
     emu._driverEffect = null;
   });

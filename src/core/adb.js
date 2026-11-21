@@ -239,6 +239,26 @@ function parseStatList(text) {
   return rows;
 }
 
+// ADB_SERVER_SOCKET takes precedence over the port, so inherited selectors must not reroute the private transport.
+function adbEnvironment(port = process.env.APKSTART_ADB_PORT || '5044', source = process.env) {
+  const env = { ...source };
+  for (const key of Object.keys(env)) {
+    if (/^(ADB_SERVER_SOCKET|ANDROID_ADB_SERVER_(ADDRESS|PORT))$/i.test(key)) delete env[key];
+  }
+  env.ANDROID_ADB_SERVER_PORT = String(port);
+  // Play 商店镜像会强制 ADB 授权：host 的 adb server 与 guest 的 adbd 必须用同一把
+  // adbkey。官方做法是 adb/emulator 共用 %USERPROFILE%\.android\adbkey{,.pub}，
+  // emulator 启动时把 adbkey.pub 烤进 guest 的 /data/misc/adb/adb_keys。
+  // 显式告诉 adb server 去哪里找公钥：某些环境 ANDROID_SDK_HOME / 绿色版运行时
+  // 会让 adb 在别处找 key，于是每次冷启动都弹「允许 USB 调试」→ device unauthorized。
+  if (!env.ADB_VENDOR_KEYS) {
+    const home = process.env.USERPROFILE || process.env.HOME || '';
+    const keyDir = path.join(home, '.android');
+    try { if (home && fs.existsSync(keyDir)) env.ADB_VENDOR_KEYS = keyDir; } catch (_) { /* ignore */ }
+  }
+  return env;
+}
+
 class AdbClient {
   constructor({ adbPath, serial }) {
     this.adbPath = adbPath || 'adb';
@@ -266,20 +286,7 @@ class AdbClient {
     return a.concat(args);
   }
 
-  _adbEnv() {
-    const env = { ...process.env, ANDROID_ADB_SERVER_PORT: process.env.ANDROID_ADB_SERVER_PORT || '5044' };
-    // Play 商店镜像会强制 ADB 授权：host 的 adb server 与 guest 的 adbd 必须用同一把
-    // adbkey。官方做法是 adb/emulator 共用 %USERPROFILE%\.android\adbkey{,.pub}，
-    // emulator 启动时把 adbkey.pub 烤进 guest 的 /data/misc/adb/adb_keys。
-    // 显式告诉 adb server 去哪里找公钥：某些环境 ANDROID_SDK_HOME / 绿色版运行时
-    // 会让 adb 在别处找 key，于是每次冷启动都弹「允许 USB 调试」→ device unauthorized。
-    if (!env.ADB_VENDOR_KEYS) {
-      const home = process.env.USERPROFILE || process.env.HOME || '';
-      const keyDir = path.join(home, '.android');
-      try { if (home && fs.existsSync(keyDir)) env.ADB_VENDOR_KEYS = keyDir; } catch (_) { /* ignore */ }
-    }
-    return env;
-  }
+  _adbEnv() { return adbEnvironment(); }
 
   exec(args, { timeout = 30000, withSerial = true, binary = false } = {}) {
     return new Promise((resolve, reject) => {
@@ -466,12 +473,12 @@ class AdbClient {
    *  - adb 版本不认该参数 / 中文路径 / 传输错误时自动换写法重试；
    *  - NO_MATCHING_ABIS 抛带 code 的错误，交给上层自动切换兼容镜像。
    */
-  async install(apkPath, { grantPermissions = true } = {}) {
+  async install(apkPath, { grantPermissions = false } = {}) {
     if (!fs.existsSync(apkPath)) throw new Error(`APK 不存在: ${apkPath}`);
     const staged = stageApk(apkPath);
     const file = staged.path;
     const variants = [
-      // -g 自动授予运行时权限，省掉应用里的授权弹窗；部分镜像不支持则自动降级去掉
+      // 仅显式调用方可请求 -g；普通安装让应用通过 Android 权限弹窗询问用户。
       ...(grantPermissions ? [['install', '-r', '-t', '-g', '--bypass-low-target-sdk-block', file]] : []),
       ['install', '-r', '-t', '--bypass-low-target-sdk-block', file],
       ['install', '-r', '-t', file],
@@ -1202,6 +1209,6 @@ class AdbClient {
 
 module.exports = {
   parsePidList,
-  AdbClient, AdbError, parseStatList, friendlyInstallError, friendlyLaunchError,
+  AdbClient, AdbError, adbEnvironment, parseStatList, friendlyInstallError, friendlyLaunchError,
   componentArg, parseResolvedActivity, parseDeviceState, isUnauthorizedError, parsePmPaths,
 };

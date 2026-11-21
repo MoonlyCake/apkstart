@@ -474,26 +474,11 @@ async function restartForOrientation(landscape, { reloadApp = true } = {}) {
     } catch (_) { /* 窗口可能刚关 */ }
     // 先把嵌入窗口摘下来，避免重启过程中在桌面留下黑窗
     try { await appWin.agent.detach(); } catch (_) { /* ignore */ }
-    await runtime.stop({ graceful: false }).catch(() => {});
-    /**
-     * 等 adb 侧真正看不到这台设备，再重新拉起。
-     *
-     * 模拟器进程退出和 adb 侧状态更新之间有几百毫秒的空档：这段时间
-     * `adb -s emulator-5554 get-state` 仍然回 "device"。紧接着调 ensure()，
-     * 它会走 isOnline() 直接判定「运行时就绪（reused）」并秒返回，
-     * 但后面每一条 adb 命令都是 `device 'emulator-5554' not found` ——
-     * 换面板方向时整条启动链就这么崩了（实测 0.2 秒"就绪"，然后全部失败）。
-     */
-    try {
-      const c = runtime.client();
-      for (let i = 0; i < 14; i += 1) {
-        // eslint-disable-next-line no-await-in-loop
-        const online = await c.isOnline().catch(() => false);
-        if (!online) break;
-        // eslint-disable-next-line no-await-in-loop
-        await new Promise((r) => setTimeout(r, 300));
-      }
-    } catch (_) { /* 判定失败就直接继续，ensure 里还有兜底 */ }
+    // stop 已核实旧 AVD 退出；失败时不要复用仍在运行的旧面板。
+    if (!await runtime.stop({ graceful: false })) {
+      appWin.waitingForRestart = false;
+      return false;
+    }
     appLog(`rotate -> landscape=${landscape} restarting runtime`);
     const rt = await runtime.ensure({
       onLog: (m) => { send('runtime:log', m); appLog(`  rt ${m}`); },
@@ -1572,6 +1557,7 @@ function startNotifier() {
 function registerIpc() {
   ipcMain.handle('app:info', () => ({    version: app.getVersion(),
     isDev: IS_DEV,
+    platform: process.platform,
     dataDir: store.DATA_DIR,
     runtimeDir: runtime.provisioner.paths().root,
     diskFreeMB: (() => {
@@ -1984,8 +1970,8 @@ function registerIpc() {
     return r.ok ? { ok: true, engine: r.engine } : { ok: false, error: r.error, needsSetup: r.needsSetup };
   });
   ipcMain.handle('runtime:stop', async () => {
-    await runtime.stop();
-    return { ok: true };
+    const stopped = await runtime.stop();
+    return stopped ? { ok: true } : { ok: false, error: '未能确认 ApkStart 安卓运行时已停止。' };
   });
   ipcMain.handle('runtime:log', () => runtime.bootLog);
 
@@ -2123,8 +2109,9 @@ function registerIpc() {
   /** 清残留的孤儿模拟器进程（emulator.exe 只是启动器，qemu 是 detached 的） */
   ipcMain.handle('app:clearOrphans', async () => {
     try {
-      const r = await runtime.killOrphanEmulators({ onLog: (m) => appLog(`orphan: ${m}`) });
-      return { ok: true, note: r && r.note };
+      const stopped = await runtime.stop();
+      return stopped ? { ok: true, note: '已确认没有在运行的 ApkStart 安卓实例。' }
+        : { ok: false, error: '无法确认归属或关闭失败，未终止其他模拟器。' };
     } catch (e) {
       return { ok: false, error: e.message };
     }
@@ -2143,9 +2130,9 @@ function registerIpc() {
   /** 重启运行时：自愈 unauthorized / 引导卡死 / 孤儿锁的首选动作 */
   ipcMain.handle('runtime:restart', async () => {
     try {
-      await runtime.stop({ onLog: (m) => appLog(`restart-stop: ${m}`) }).catch(() => {});
+      if (!await runtime.stop()) return { ok: false, error: '无法确认旧运行时已关闭。' };
       const r = await runtime.ensure({ onLog: (m) => send('runtime:log', m) });
-      return { ok: true, ready: !!r };
+      return r?.ok ? { ok: true, ready: true } : { ok: false, error: r?.error || '安卓运行时未能启动。' };
     } catch (e) {
       return { ok: false, error: e.message };
     }
@@ -2290,8 +2277,8 @@ function registerIpc() {
       title: '确认清理运行时缓存',
       message: `将释放约 ${(preview.candidates.reduce((n, c) => n + c.size, 0) / 1048576).toFixed(0)} MB`,
       detail: (opts.includeSnapshots
-        ? '会先停止运行时，再删除旧镜像、当前 AVD 的快速启动快照、锁文件和非活动 AVD 的缓存。已安装的应用本身保留（只清快照），'
-        : '只删除旧镜像、旧快照、锁文件和非活动 AVD 的缓存，已安装的应用会保留。')
+        ? '会先停止运行时，再删除旧镜像、当前 AVD 的快速启动快照和非活动 AVD 的缓存。已安装的应用本身保留（只清快照），'
+        : '只删除旧镜像和非活动 AVD 的缓存，已安装的应用会保留。')
         + '此操作不可撤销，建议先导出诊断报告。',
     });
     if (response !== 1) return { ...preview, cancelled: true };
@@ -2643,20 +2630,13 @@ function registerIpc() {
     shell.openPath(dir);
   });
 
-  /** 清理上次残留的 AVD 锁文件：会让下次启动被误判为「AVD 已被占用」而 FATAL */
-  ipcMain.handle('app:clearLocks', async () => {
-    try {
-      const avdHome = runtime.provisioner.paths().avdHome;
-      let removed = 0;
-      for (const f of fs.readdirSync(avdHome)) {
-        if (/\.lock$/i.test(f)) {
-          try { fs.rmSync(path.join(avdHome, f), { force: true }); removed++; } catch (_) { /* ignore */ }
-        }
-      }
-      return { ok: true, removed };
-    } catch (e) {
-      return { ok: false, error: e.message };
+  /** 不手动删除模拟器的锁，避免其他进程正在重新打开该目录。 */
+  ipcMain.handle('app:clearLocks', () => {
+    const { state } = runtime.avdOwner();
+    if (state === 'live' || state === 'unknown') {
+      return { ok: false, error: '请先关闭 ApkStart 安卓运行时，再重新启动。' };
     }
+    return { ok: true, note: '重新启动时由 Android Emulator 回收失效的锁。' };
   });
 
   /**
@@ -2680,7 +2660,9 @@ function registerIpc() {
       const { spawn } = require('child_process');
       // 卸载前先收掉常驻的模拟器：qemu 会锁住 resources\runtime 里的 exe/dll，
       // NSIS 删不掉就会留下半个安装目录。这里只针对「真的在卸载」，不影响日常退出。
-      try { await runtime?.emulator?.killOrphanProcesses(); } catch (_) { /* ignore */ }
+      if (runtime && !await runtime.stop()) {
+        return { ok: false, error: '请先关闭 ApkStart 安卓运行时，再卸载。' };
+      }
       // 先让本程序退出，再由一个独立进程延迟 2 秒拉起卸载器：
       // 运行中的 exe 会锁住安装目录里的文件，直接拉起卸载器容易删不干净。
       const cmd = `ping 127.0.0.1 -n 3 >nul & start "" "${uninstaller}"`;

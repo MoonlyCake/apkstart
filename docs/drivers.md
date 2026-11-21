@@ -130,6 +130,10 @@
 `disk.dataPartition.size`、`hw.ramSize`、`hw.cpu.ncore`、`image.sysdir.*` 一律拒绝 ——
 这些 ApkStart 自己会按设置写，混着改只会互相打架。
 
+音频输入和输出以 ApkStart 设置为准。为兼容旧驱动，仍接受 `hw.audioInput`、
+`hw.audioOutput` 和 `-no-audio`，但应用驱动时会忽略这些项，也不会通过 `-qemu`
+执行音频开关。要接入 Windows 麦克风，用户必须在设置中主动开启并重启安卓运行时。
+
 **`env`**：`ANDROID_*`、`QEMU_*`、`LIBGL_*`、`MESA_*`、`EMUGL_*`；值 ≤200 字且不能带换行。
 `PATH`、`SystemRoot`、`NODE_OPTIONS` 这类会被直接拒。
 

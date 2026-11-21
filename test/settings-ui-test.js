@@ -47,10 +47,15 @@ const DEBUG_ISSUES = [
   { code: 'settings.orientationConflict', category: 'settings', severity: 'warn', title: '屏幕方向策略与当前面板方向相反', hint: '把面板方向改成与策略一致即可。', fix: 'orientation', detail: '' },
 ];
 
+const settingsWrites = [];
 const OVERRIDES = {
   'settings:get': () => SETTINGS,
-  'settings:set': () => SETTINGS,
-  'app:info': () => ({ version: '0.6.0', isDev: true, dataDir: 'C:\\data', runtimeDir: 'C:\\data\\runtime' }),
+  'settings:set': (patch) => {
+    settingsWrites.push(patch);
+    if (patch.engine) Object.assign(SETTINGS.engine, patch.engine);
+    return SETTINGS;
+  },
+  'app:info': () => ({ version: '0.6.0', isDev: true, platform: 'win32', dataDir: 'C:\\data', runtimeDir: 'C:\\data\\runtime' }),
   'apps:list': () => ({ apps: [] }),
   'assoc:status': () => ({ registered: false }),
   'doctor:profile': () => ({ profile: {}, text: '均衡 · 4 核 / 4 GB / 720p' }),
@@ -148,6 +153,27 @@ app.whenReady().then(async () => {
   // 注意：分类会被记住（localStorage），所以这里只断言「同一时刻只显示一个分类的分组」
   const oneCat = navInfo.visible.length > 0 && navInfo.visible.every((c) => c === navInfo.visible[0]);
   step('同一时刻只显示一个分类的分组', oneCat, `默认可见：${navInfo.visible.join(',')}`);
+
+  await evalJs(`document.querySelector('#setNav .set-nav-item[data-cat="perf"]').click()`);
+  const defaults = await evalJs(`({
+    visible: !document.getElementById('hostMicField').hidden,
+    mic: document.getElementById('setHostMicrophone').checked,
+    playback: document.getElementById('setAudio').checked,
+  })`);
+  step('Windows 麦克风可见，默认关闭且不影响播放', defaults.visible && !defaults.mic && defaults.playback);
+  await evalJs(`document.getElementById('setHostMicrophone').click()`);
+  await new Promise((r) => setTimeout(r, 150));
+  const micSaved = await evalJs(`document.getElementById('setHostMicrophone').checked
+    && document.getElementById('setAudio').checked
+    && document.body.innerText.includes('重启安卓运行时后生效')`);
+  step('开启麦克风只保存采集设置并提示重启', micSaved
+    && JSON.stringify(settingsWrites.at(-1)) === JSON.stringify({ engine: { hostMicrophone: true } }));
+  await evalJs(`document.getElementById('setHostMicrophone').click()`);
+  await new Promise((r) => setTimeout(r, 150));
+  const micOff = await evalJs(`!document.getElementById('setHostMicrophone').checked
+    && document.body.innerText.includes('才会停止传入麦克风声音')`);
+  step('关闭麦克风明确提示如何停止已在运行的输入', micOff
+    && JSON.stringify(settingsWrites.at(-1)) === JSON.stringify({ engine: { hostMicrophone: false } }));
 
   // 点「显示与窗口」
   await evalJs(`document.querySelector('#setNav .set-nav-item[data-cat="display"]').click()`);

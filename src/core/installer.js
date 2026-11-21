@@ -6,7 +6,6 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const crypto = require('crypto');
 const store = require('./store');
 const { parseApk } = require('./apk');
 const { ZipFile } = require('./zip');
@@ -39,34 +38,54 @@ async function runningHasArm(client) {
   }
 }
 
+function baseApkRank(name) {
+  const basename = path.posix.basename(name.replace(/\\/g, '/')).toLowerCase();
+  if (basename === 'base.apk') return 0;
+  if (basename === 'base-master.apk') return 1;
+  if (basename === 'universal.apk') return 2;
+  return 3;
+}
+
 /**
- * 拆分安装包（.apks / .xapk）：解出里面的分片 APK 到纯 ASCII 临时目录。
- * 用文件版 ZIP 读取器 + 流式落盘：拆分包动辄 2GB+，整包读内存会失败。
- * 返回 { meta, files, cleanup }；meta 来自带 AndroidManifest 的 base APK。
+ * 拆分安装包（.apks / .xapk）：先预检声明体积，再流式落盘到操作独占的临时目录。
+ * 优先从常见的 base APK 文件名读取元数据，不改变安装顺序。
  */
-async function parseBundle(filePath) {
+async function parseBundle(filePath, assertSpace = () => {}) {
   const zip = new ZipFile(filePath);
-  const dir = path.join(os.tmpdir(), 'apkstart-bundle', crypto.createHash('sha1')
-    .update(filePath).digest('hex').slice(0, 12));
-  const cleanup = () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) { /* ignore */ } };
+  let dir;
+  const cleanup = () => {
+    // 只删除本次 mkdtemp 创建的直属目录，不从 ZIP 条目推导路径。
+    if (!dir) return;
+    try {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+      dir = null;
+    } catch (_) { /* 清理失败不覆盖安装结果 */ }
+  };
   try {
     const apkNames = zip.names().filter((n) => /\.apk$/i.test(n));
     if (!apkNames.length) throw new Error('这个安装包里没有找到 APK 分片（可能不是 .apks/.xapk）');
-    fs.mkdirSync(dir, { recursive: true });
+    const declaredBytes = apkNames.reduce((bytes, name) => bytes + zip.entrySize(name), 0);
+    assertSpace(declaredBytes);
+    dir = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), 'apkstart-bundle-'));
     const files = [];
+    let writtenBytes = 0;
     for (let i = 0; i < apkNames.length; i++) {
       const target = path.join(dir, `split-${i}.apk`);
       // 单个分片也可能是几百 MB：流式解压，不经过 Buffer
+      const dest = fs.createWriteStream(target);
       // eslint-disable-next-line no-await-in-loop
-      await zip.pipeTo(apkNames[i], fs.createWriteStream(target));
+      await zip.pipeTo(apkNames[i], dest);
+      writtenBytes += dest.bytesWritten;
       files.push(target);
     }
+    const candidates = files.map((file, i) => ({ file, rank: baseApkRank(apkNames[i]) }));
+    candidates.sort((a, b) => a.rank - b.rank);
     let meta = null;
-    for (const f of files) {
-      try { meta = parseApk(f); break; } catch (_) { /* 分片里没有清单 */ }
+    for (const { file } of candidates) {
+      try { meta = parseApk(file); break; } catch (_) { /* 尝试下一个清单 */ }
     }
     if (!meta) throw new Error('拆分包的 base APK 解析失败');
-    return { meta, files, cleanup };
+    return { meta, files, sizeBytes: writtenBytes, cleanup };
   } catch (e) {
     cleanup();
     throw e;
@@ -222,47 +241,30 @@ class Installer {
 
   async install(filePath, onProgress = () => {}) {
     onProgress({ stage: 'parse', message: '正在解析 APK…' });
-    let meta;
     let bundle = null;
-    if (/\.(apks|xapk)$/i.test(filePath)) {
-      bundle = await parseBundle(filePath);
-      meta = bundle.meta;
-    } else {
-      meta = parseApk(filePath);
-    }
-    onProgress({
-      stage: 'parse-done',
-      message: `已识别 ${meta.label}（${meta.package}）`,
-      meta: { label: meta.label, package: meta.package, versionName: meta.versionName },
-    });
-
-    // 50GB 级游戏：先核对模拟器数据盘剩余空间，而不是装到一半才报
-    // INSTALL_INSUFFICIENT_STORAGE（用户看到的是「装了很久然后失败」）。
-    try {
-      const backend = this.runtime && this.runtime.backend;
-      if (backend && typeof backend.checkDiskFor === 'function') {
-        let bytes = 0;
-        if (bundle && bundle.files) {
-          for (const f of bundle.files) {
-            try { bytes += fs.statSync(f).size; } catch (_) { /* 忽略临时文件 */ }
-          }
-        } else {
-          try { bytes = fs.statSync(filePath).size; } catch (_) { /* 用 0 兜底 */ }
-        }
-        const verdict = backend.checkDiskFor(bytes);
-        if (!verdict.ok) {
-          onProgress({ stage: 'error', message: verdict.message });
-          const err = new Error(verdict.message);
-          err.needsSetup = 'disk';
-          throw err;
-        }
+    // 大包先核对模拟器数据盘，避免无谓解包，或安装到一半才报告空间不足。
+    const assertSpace = (bytes) => {
+      let verdict;
+      try { verdict = this.runtime?.backend?.checkDiskFor?.(bytes); } catch (e) {
+        if (e?.needsSetup === 'disk') throw e;
+        return; // 容量探测失败不能挡住安装
       }
-    } catch (e) {
-      if (e && e.needsSetup === 'disk') throw e;
-      // 容量探测失败不能挡住安装
-    }
+      if (!verdict || verdict.ok) return;
+      onProgress({ stage: 'error', message: verdict.message });
+      throw Object.assign(new Error(verdict.message), { needsSetup: 'disk' });
+    };
 
     try {
+      if (/\.(apks|xapk)$/i.test(filePath)) bundle = await parseBundle(filePath, assertSpace);
+      const meta = bundle ? bundle.meta : parseApk(filePath);
+      onProgress({
+        stage: 'parse-done',
+        message: `已识别 ${meta.label}（${meta.package}）`,
+        meta: { label: meta.label, package: meta.package, versionName: meta.versionName },
+      });
+      // 临时目录可能和模拟器同盘；解包后重新核对剩余空间，使用实际写入体积。
+      assertSpace(bundle?.sizeBytes ?? meta.sizeBytes);
+
       onProgress({ stage: 'runtime', message: '正在准备安卓运行时…' });
       let rt = await this.runtime.ensure({ onLog: (m) => onProgress({ stage: 'runtime', message: m }) });
       if (!rt.ok) {
@@ -324,6 +326,7 @@ class Installer {
         throw e;
       }
     }
+    bundle?.cleanup(); // 安装 / ABI 重试已结束，先释放分片空间，再备份原包。
     this.runtime.touch();
 
     // 图标落盘。APK 图标大量是 WebP，nativeImage 解不了，交给渲染进程解码 +
@@ -353,9 +356,10 @@ class Installer {
     // 备份 APK，便于日后重装/找回
     let apkCopy = null;
     try {
-      apkCopy = store.apkPath(meta.package, meta.versionCode.toString(36));
-      fs.copyFileSync(filePath, apkCopy);
-    } catch (_) { /* ignore */ }
+      const target = store.apkPath(meta.package, meta.versionCode.toString(36));
+      await fs.promises.copyFile(filePath, target);
+      apkCopy = target;
+    } catch (_) { /* 安装已成功；不要把未备份的路径写进目录 */ }
 
     // 启动入口以系统解析结果为准：APK 里解析到的「主 Activity」经常不是
     // 真正的 LAUNCHER 入口，直接用它启动会跳过应用的初始化页导致闪退。
@@ -410,6 +414,7 @@ class Installer {
 
     // 兼容性提示：只有 ARM 原生库时，x86 运行时需要转译层
     const warnings = [];
+    if (!apkCopy) warnings.push('应用已安装，但本地安装包备份失败。以后无法从本地备份自动重装，请保留原安装包。');
     if (meta.minSdk && meta.minSdk > 34) {
       warnings.push(`此应用要求 Android ${meta.minSdk}+，高于当前运行时，可能无法正常运行。`);
     }

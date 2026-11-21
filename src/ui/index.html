@@ -261,7 +261,7 @@
             <input type="checkbox" id="chkCleanSnapshots" />
             <span>连当前 AVD 的快速启动快照也一起清（会先停运行时，能真正回收几 GB 快照）</span>
           </label>
-          <span class="sub">系统镜像全机共享一份，应用数据用差分层保存；旧镜像、旧快照、日志和锁文件都可回收。日志超过上限会自动滚动，不会无限增长。「重置安卓数据」会真实删除数 GB 用户数据，仅保留系统本身。</span>
+          <span class="sub">系统镜像全机共享一份，应用数据用差分层保存；旧镜像、旧快照和日志可以回收。日志超过上限会自动滚动，不会无限增长。「重置安卓数据」会真实删除数 GB 用户数据，仅保留系统本身。</span>
         </div>
         <div class="runtime-actions">
           <button class="btn ghost sm" id="btnDiagnostics">导出诊断报告</button>
@@ -485,10 +485,17 @@
         </div>
         <div class="field switch-field">
           <div>
-            <label>安卓声音</label>
-            <span class="sub">让应用提示音、视频声音正常播放。仅在你完全不需要声音、想再省一点 CPU 时关闭。</span>
+            <label for="setAudio">安卓声音输出</label>
+            <span class="sub">通过 Windows 扬声器或耳机播放。请在 Windows 的「系统 → 声音」选择输出设备；此开关在重启安卓运行时后生效。</span>
           </div>
           <input type="checkbox" id="setAudio" class="switch" />
+        </div>
+        <div class="field switch-field" id="hostMicField" hidden>
+          <div>
+            <label for="setHostMicrophone">Windows 麦克风输入</label>
+            <span class="sub" id="hostMicNote">默认关闭。开启后，已有麦克风权限的安卓应用可以使用 Windows 音频输入。开启或关闭均在重启安卓运行时后生效。</span>
+          </div>
+          <input type="checkbox" id="setHostMicrophone" class="switch" aria-describedby="hostMicNote" />
         </div>
         <div class="field switch-field">
           <div>

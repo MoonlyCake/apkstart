@@ -12,6 +12,8 @@
 const zlib = require('zlib');
 const fs = require('fs');
 const path = require('path');
+const { Readable } = require('node:stream');
+const { finished, pipeline } = require('node:stream/promises');
 
 const EOCD_SIG = 0x06054b50;
 const CEN_SIG = 0x02014b50;
@@ -22,6 +24,11 @@ const MAX32 = 0xffffffff;
 const MAX16 = 0xffff;
 // read() 单条目上限：超过就要求调用方走 pipeTo（流式），避免整块进内存
 const MAX_READ = 256 * 1024 * 1024;
+
+function waitForClose(stream) {
+  if (stream.closed) return Promise.resolve();
+  return new Promise((resolve) => stream.once('close', resolve));
+}
 
 /** 把 BigInt 偏移安全地转成 Number（ZIP 不可能大过 2^53 字节） */
 function toNum(v) { return typeof v === 'bigint' ? Number(v) : v; }
@@ -224,9 +231,11 @@ class ZipFile {
   constructor(filePath) {
     this.path = filePath;
     this.fd = fs.openSync(filePath, 'r');
-    this.size = fs.statSync(filePath).size;
     this.entries = new Map();
-    try { this._parse(); } catch (e) { this.close(); throw e; }
+    try {
+      this.size = fs.fstatSync(this.fd).size;
+      this._parse();
+    } catch (e) { this.close(); throw e; }
   }
 
   close() {
@@ -307,6 +316,7 @@ class ZipFile {
   has(name) { return this.entries.has(name); }
   names() { return [...this.entries.keys()]; }
   find(re) { return this.names().filter((n) => re.test(n)); }
+  entrySize(name) { return this.entries.get(name)?.uncompSize; }
 
   _range(name) {
     const e = this.entries.get(name);
@@ -333,25 +343,33 @@ class ZipFile {
     throw new Error(`不支持的压缩方式 ${e.method}: ${name}`);
   }
 
-  pipeTo(name, dest) {
-    let r;
-    try { r = this._range(name); } catch (e) { return Promise.reject(e); }
-    const { e, start, end } = r;
-    return new Promise((resolve, reject) => {
-      const done = (err) => (err ? reject(err) : resolve(e.uncompSize));
-      dest.on('error', done);
-      dest.on('finish', () => done(null));
-      if (e.compSize === 0) { dest.end(); return undefined; }
-      if (e.method !== 0 && e.method !== 8) return done(new Error(`不支持的压缩方式 ${e.method}: ${name}`));
-      const src = fs.createReadStream(null, {
-        fd: this.fd, autoClose: false, start, end: Math.max(start, end),
+  async pipeTo(name, dest) {
+    let src;
+    try {
+      const { e, start, end } = this._range(name);
+      if (e.compSize && e.method !== 0 && e.method !== 8) {
+        throw new Error(`不支持的压缩方式 ${e.method}: ${name}`);
+      }
+      src = e.compSize === 0 ? Readable.from([]) : fs.createReadStream(null, {
+        fd: this.fd, start, end, autoClose: false,
+        // pipeline 可销毁条目流；ZIP 的共享 fd 仍由 ZipFile.close 管理。
+        fs: { read: fs.read, close: (_fd, callback) => callback(null) },
       });
-      src.on('error', done);
-      if (e.method === 0) return src.pipe(dest);
-      const inflater = zlib.createInflateRaw();
-      inflater.on('error', done);
-      return src.pipe(inflater).pipe(dest);
-    });
+      if (e.compSize && e.method === 8) await pipeline(src, zlib.createInflateRaw(), dest);
+      else await pipeline(src, dest);
+      return e.uncompSize;
+    } catch (error) {
+      // Node 20 的 pipeline 可在关闭磁盘句柄前报错；Windows 上要等 close 再清理。
+      const destFinished = finished(dest).catch(() => {}); // 同时接住尚未接入 pipeline 时的底层 I/O 错误。
+      const destClosed = dest instanceof fs.WriteStream ? waitForClose(dest) : destFinished;
+      dest.destroy();
+      if (src instanceof fs.ReadStream) {
+        src.destroy();
+        await waitForClose(src);
+      }
+      await destClosed;
+      throw error;
+    }
   }
 }
 

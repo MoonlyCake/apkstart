@@ -227,7 +227,7 @@ function fixtureApk(t, bundle = false) {
   return file;
 }
 
-test('ADB cached-reinstall mode sends no -g; ordinary explicit install retains its existing choice', async (t) => {
+test('ADB install and cached reinstall leave permissions to Android by default', async (t) => {
   const file = fixtureApk(t);
   const client = new AdbClient({ adbPath: 'never-run', serial: 'test' });
   const seen = [];
@@ -237,8 +237,7 @@ test('ADB cached-reinstall mode sends no -g; ordinary explicit install retains i
   await client.install(file, { grantPermissions: false });
 
   assert.equal(seen.length, 2);
-  assert.ok(seen[0].includes('-g'));
-  assert.ok(!seen[1].includes('-g'));
+  assert.ok(seen.every((args) => !args.includes('-g')));
   assert.ok(seen[1].includes('-r'), 'replace installs retain app data');
 });
 

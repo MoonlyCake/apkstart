@@ -84,11 +84,8 @@ function analyze(root, { keepAvd = 'apkstart.avd', aggressive = false, keepSnaps
       add(path.join(avdHome, e.name), dirSize(path.join(avdHome, e.name)),
         '非活动 AVD（含 8-16GB 的旧用户数据镜像）', 'dir');
     }
-    // 5) 锁文件：残留会导致「AVD is already running」
-    for (const f of walk(avdHome)) {
-      if (/\.lock$/i.test(f.path)) add(f.path, f.size, '上次异常退出残留的锁文件');
-    }
-    // 6) 快速启动快照：ram.img ≈ 分配给虚拟机的内存，损坏或配置变更后必须丢弃
+    // 锁由模拟器自行回收，不能用清理缓存的逻辑判断它是否失效。
+    // 5) 快速启动快照：ram.img ≈ 分配给虚拟机的内存，损坏或配置变更后必须丢弃
     const activeAvd = path.join(avdHome, keepAvd);
     if (exists(activeAvd) && !keepSnapshots) {
       for (const e of fs.readdirSync(activeAvd, { withFileTypes: true })) {
@@ -100,7 +97,7 @@ function analyze(root, { keepAvd = 'apkstart.avd', aggressive = false, keepSnaps
     }
   }
 
-  // 7) 下载缓存 / QEMU 遗留 ISO
+  // 6) 下载缓存 / QEMU 遗留 ISO
   for (const d of ['_tmp', 'images']) {
     const p = path.join(root, d);
     if (exists(p)) {
@@ -109,7 +106,7 @@ function analyze(root, { keepAvd = 'apkstart.avd', aggressive = false, keepSnaps
     }
   }
 
-  // 8) 激进裁剪：仅构建发行包时启用。
+  // 7) 激进裁剪：仅构建发行包时启用。
   // 注意：Qt6WebEngineCoreAndroidEmu.dll 是 qemu-system-x86_64.exe 的加载时依赖，
   // 实测删掉会直接起不来，绝不能放进清单；qsn/netsim 也可能被快照与网络功能按需调用，保守保留。
   if (aggressive) {

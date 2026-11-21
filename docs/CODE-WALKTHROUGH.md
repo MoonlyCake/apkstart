@@ -42,7 +42,7 @@ apkstart/
 │     ├─ 编排    installer.js engine.js container.js
 │     ├─ 运行时  emulator.js provision.js userdata.js doctor.js layers.js
 │     ├─ 设备    adb.js android.js sharer.js notify.js display.js
-│     ├─ 窗口    appwin.js agent.js win/agent.ps1 win/priority.ps1 windowctl.js pointer.js
+│     ├─ 窗口    appwin.js agent.js win/agent.ps1 windowctl.js pointer.js
 │     ├─ 解析    zip.js axml.js arsc.js apk.js png.js shortcut.js assoc.js
 │     └─ 下载/更新 download.js sources.js updater.js store.js logfile.js
 ├─ build/                    打包流水线（pack.js / prepare-runtime.js / slim-runtime.js / zip.js / seed/）

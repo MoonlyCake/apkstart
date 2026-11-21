@@ -280,7 +280,7 @@ function evaluate(obs) {
   /* ---------------- 声音 ---------------- */
 
   // 0.6.2 新增：用户反馈「有的应用没声音」时，第一反应往往是系统音量问题，
-  // 实际上最常见是引擎开关被关掉（-no-audio）或 Windows Audio 服务被停了。
+  // 实际上最常见是安卓应用的声音输出被关闭或 Windows Audio 服务被停了。
   const audio = o.audio || {};
   if (audio.checked && audio.enabled === false) {
     push({
@@ -288,7 +288,7 @@ function evaluate(obs) {
       category: 'settings',
       severity: 'warn',
       title: '安卓应用声音已在设置里关闭',
-      hint: '模拟器是以 -no-audio 启动的，所以只有 ApkStart 里的应用没声音。点「处理」重新打开，并重启一次运行时即可。',
+      hint: '安卓应用的声音输出已关闭。点「处理」打开，重启安卓运行时后生效。',
       fix: 'audio',
     });
   }
