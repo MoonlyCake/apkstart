@@ -1,10 +1,10 @@
-# ApkStart 隐私政策 / Privacy Policy
+# Apk Start --Q 隐私政策 / Privacy Policy
 
-最后更新：2026-11-16
+最后更新 / Last updated：2026-11-22
 
 ## 简体中文
 
-ApkStart 是一个在本机运行的 Android 应用运行器。我们的原则很简单：**不收集、不上传、不分享你的个人数据。**
+Apk Start --Q 是由 MoonlyCake 维护、在本机运行的 Android 应用运行器。我们的原则很简单：**不收集、不上传、不分享你的个人数据。**
 
 ### 1. 我们不收集什么
 
@@ -19,7 +19,7 @@ ApkStart 是一个在本机运行的 Android 应用运行器。我们的原则�
 
 | 位置 | 内容 |
 |---|---|
-| `%USERPROFILE%\ApkStart\data` | 安卓系统镜像、已安装应用、应用数据、快照 |
+| `%USERPROFILE%\ApkStart\data`（Microsoft Store 版）或 `%APPDATA%\apkstart`（安装版 / 便携版） | 默认运行时与安卓数据位置；包括系统镜像、已安装应用、应用数据和快照 |
 | `%USERPROFILE%\ApkStartShared` | 与安卓 `/sdcard/ApkStartShared` 双向同步的共享文件夹 |
 
 卸载 Microsoft Store 版本不会自动删除上述目录；你可以随时手动删除。
@@ -27,7 +27,7 @@ ApkStart 是一个在本机运行的 Android 应用运行器。我们的原则�
 ### 3. 联网行为
 
 - **Microsoft Store 版**：安装包已内置全部运行时，首次启动只做本地解压，不下载任何可执行内容；应用更新由 Microsoft Store 负责。
-- **安装包 / 便携版**：仅在「检查更新」时访问 GitHub / Gitee 的 Release 列表；轻量版首次启动会从项目 Release 下载运行时压缩包。请求只包含版本号与下载所需的标准 HTTP 头。
+- **安装版 / 便携版**：启动后或主动检查时，向本分支的 GitHub Releases 查询软件更新。部署缺失的 Android 运行时时，可能从上游发行源、镜像站或 Google 官方 Android SDK 源下载运行时组件。
 - 安卓应用自身的网络访问由该应用决定，走 QEMU 用户态 NAT 复用主机网络，ApkStart 不做内容审查或转发留存。
 
 ### 4. 第三方
@@ -41,13 +41,13 @@ ApkStart 是一个在本机运行的 Android 应用运行器。我们的原则�
 ### 6. 变更与联系
 
 政策如有变更，会更新本页面并修改「最后更新」日期。
-问题请提交 issue 到 https://github.com/RoutineMiku/apkstart/issues
+问题请提交 issue 到 https://github.com/MoonlyCake/apkstart/issues
 
 ---
 
 ## English
 
-ApkStart is a locally-running Android app runner. Our principle is simple: **we do not collect, upload, or share your personal data.**
+Apk Start --Q is a locally running Android app runner maintained by MoonlyCake. Our principle is simple: **we do not collect, upload, or share your personal data.**
 
 - No account system, no identity data, no device identifiers, no advertising ID, no location.
 - No analytics, telemetry, crash-reporting, or advertising SDKs.
@@ -57,14 +57,14 @@ Local data (never leaves your device):
 
 | Path | Content |
 |---|---|
-| `%USERPROFILE%\ApkStart\data` | Android system image, installed apps, app data, snapshots |
+| `%USERPROFILE%\ApkStart\data` (Microsoft Store) or `%APPDATA%\apkstart` (installer / portable) | Default runtime and Android data locations, including system images, installed apps, app data, and snapshots |
 | `%USERPROFILE%\ApkStartShared` | Shared folder synced with `/sdcard/ApkStartShared` inside Android |
 
 Network behaviour:
 - **Microsoft Store build**: all runtime components are bundled; first launch only extracts locally. Updates are delivered by Microsoft Store.
-- **Installer / portable build**: GitHub and Gitee Release endpoints are contacted only when you check for updates; the lightweight build downloads the runtime package on first launch. Requests contain only the version and standard HTTP headers.
+- **Installer / portable build**: The app checks GitHub Releases for this fork after startup or when requested. Provisioning a missing Android runtime can download runtime components from upstream releases, mirrors, or the official Google Android SDK distribution.
 - Network access from Android apps is decided by those apps. Traffic uses QEMU user-mode NAT over the host network; ApkStart does not inspect or retain it.
 
 Third-party apps you run are provided by their own developers and governed by their own privacy policies.
 
-Contact: open an issue at https://github.com/RoutineMiku/apkstart/issues
+Contact: open an issue at https://github.com/MoonlyCake/apkstart/issues

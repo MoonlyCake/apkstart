@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/readme/hero.svg" alt="Apk Start --Q 1.0.5：让 Android 应用在 Windows 桌面上有个位置" width="100%">
+  <img src="docs/images/readme/hero.svg" alt="Apk Start --Q 1.0.6：让 Android 应用在 Windows 桌面上有个位置" width="100%">
 </p>
 
 <h3 align="center">把 APK 变成桌面上可以双击的窗口。</h3>
@@ -103,4 +103,4 @@ npm start
 
 欢迎在 [Issues](https://github.com/MoonlyCake/apkstart/issues) 反馈，附上 Windows 版本、复现步骤与必要的诊断摘要。开发约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-上游为 [RoutineMiku/apkstart](https://github.com/RoutineMiku/apkstart)，本项目遵循 [MIT 许可证](LICENSE)。随应用分发的 ApkStart Display 字体源自 Archivo，遵循 [SIL Open Font License 1.1](src/ui/assets/fonts/OFL-Archivo.txt)。
+本分支由 **MoonlyCake** 维护，基于上游 [RoutineMiku/apkstart](https://github.com/RoutineMiku/apkstart) 继续开发，遵循 [MIT 许可证](LICENSE)。随应用分发的 ApkStart Display 字体源自 Archivo，遵循 [SIL Open Font License 1.1](src/ui/assets/fonts/OFL-Archivo.txt)。

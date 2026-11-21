@@ -51,11 +51,11 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Electron 设置及启动画面（静音、独立配置）
+      - name: Electron 设置、启动画面及快捷方式（静音、独立配置）
         shell: pwsh
         run: |
           $electron = (Resolve-Path 'node_modules/electron/dist/electron.exe').Path
-          foreach ($test in 'settings-ui-test', 'splash-ui-test') {
+          foreach ($test in 'settings-ui-test', 'splash-ui-test', 'shortcut-brand-ui-test') {
             $base = Join-Path $env:RUNNER_TEMP "apkstart-$test"
             $argsList = @("test/$test.js", "--user-data-dir=`"$base`"", '--mute-audio')
             $proc = Start-Process -FilePath $electron -ArgumentList $argsList -WindowStyle Hidden -Wait -PassThru `

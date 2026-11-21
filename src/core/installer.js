@@ -12,8 +12,9 @@ const { isArmAbi, preferredArmAbi } = require('./native-abi');
 const { ZipFile } = require('./zip');
 const { parsePidList } = require('./adb');
 const { validPackageName } = require('./pkgname');
+const { appAumid } = require('./branding');
 const { runLaunchPolicy } = require('../application/launch-policy');
-const { iconToIco, writeShortcut, removeShortcut, safeFileName, shortcutExt } = require('./shortcut');
+const { iconToIco, writeShortcut, migrateAppShortcutBrand, removeShortcut, safeFileName, shortcutExt } = require('./shortcut');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -485,7 +486,7 @@ class Installer {
       description: `${app.label} — 由 ApkStart 运行`,
       cwd: this.ctx.cwd,
       // 每个应用一个 AUMID：任务栏上按应用分组，不会全挤到 ApkStart 里
-      appUserModelId: `RoutineMiku.ApkStart.${app.package}`.slice(0, 128),
+      appUserModelId: appAumid(app.package),
     });
 
     let first = null;
@@ -528,6 +529,10 @@ class Installer {
     const auto = store.getSettings().createShortcutOnInstall !== false;
     for (const app of store.getApps()) {
       if (!auto && !app.shortcutPath && !app.startMenuPath) continue;
+      const paths = this.shortcutPaths(app);
+      for (const existing of new Set([app.shortcutPath, app.startMenuPath, ...paths])) {
+        migrateAppShortcutBrand(existing, app.package);
+      }
       let dirty = false;
       if ((!app.icoPath || !fs.existsSync(app.icoPath)) && app.iconPath && fs.existsSync(app.iconPath)) {
         try {
@@ -541,7 +546,7 @@ class Installer {
           }
         } catch (_) { /* 图标补建失败不影响入口 */ }
       }
-      const missing = this.shortcutPaths(app).filter((p) => !fs.existsSync(p));
+      const missing = paths.filter((p) => !fs.existsSync(p));
       if (!missing.length && !dirty) continue;
       try {
         // 图标刚补出来时，即使 .lnk 存在也要重建，让快捷方式换上真实应用图标

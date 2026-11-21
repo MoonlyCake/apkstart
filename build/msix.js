@@ -13,9 +13,10 @@
  *   node build/msix.js                       # 用 dist/release/win-unpacked 打不签名的包
  *   node build/msix.js --stage <dir>         # 指定已解包的目录
  *   node build/msix.js --sign                # 顺手生成自签证书并签名（本地测试用）
- *   node build/msix.js --identity Name --publisher "CN=..." --display 名称
+ *   node build/msix.js --store --identity Name --publisher "CN=..." --publisherDisplay 发布者
  *
- * 环境变量也可以：APKSTART_MSIX_IDENTITY / APKSTART_MSIX_PUBLISHER / APKSTART_MSIX_DISPLAY
+ * 环境变量也可以：APKSTART_MSIX_IDENTITY / APKSTART_MSIX_PUBLISHER /
+ * APKSTART_MSIX_PUBLISHER_DISPLAY / APKSTART_MSIX_DISPLAY
  */
 const fs = require('fs');
 const os = require('os');
@@ -43,22 +44,48 @@ function msixVersion(v) {
   return `${p[0]}.${p[1]}.${p[2]}.0`;
 }
 
-// Partner Center → Product management → Product identity 里确认过的两个值。
-// 直接写成默认值：以前默认是占位 `CN=RoutineMiku`，任何人随手跑一次
-// `node build/msix.js` 就会把已经正确的包覆盖成一个商店必然拒收的包。
-const PLACEHOLDER_PUBLISHER = 'CN=RoutineMiku';
-const CONFIRMED_IDENTITY = 'RoutineMiku.ApkStart';
-const CONFIRMED_PUBLISHER = 'CN=58CA1DED-8AB3-4D0D-AF50-62C9B781AA4D';
-const IDENTITY = arg('identity') || process.env.APKSTART_MSIX_IDENTITY || CONFIRMED_IDENTITY;
-const PUBLISHER = arg('publisher') || process.env.APKSTART_MSIX_PUBLISHER || CONFIRMED_PUBLISHER;
-const PUBLISHER_DISPLAY = arg('publisherDisplay') || process.env.APKSTART_MSIX_PUBLISHER_DISPLAY || 'RoutineMiku';
-const DISPLAY = arg('display') || process.env.APKSTART_MSIX_DISPLAY || pkg.productName;
-const APP_ID = arg('appId') || 'ApkStart';
-const DO_SIGN = !!arg('sign', false);
+const localIdentity = { name: `${pkg.author}.ApkStart`, publisher: `CN=${pkg.author}` };
+const STORE = process.argv.includes('--store');
+const DO_SIGN = process.argv.includes('--sign');
+
+function packageIdentity() {
+  const field = (name, env) => {
+    const value = arg(name, env ? process.env[env] : null);
+    if (value === true) throw new Error(`--${name} 需要填写值`);
+    return value?.trim();
+  };
+  const name = field('identity', 'APKSTART_MSIX_IDENTITY');
+  const publisher = field('publisher', 'APKSTART_MSIX_PUBLISHER');
+  const publisherDisplay = field('publisherDisplay', 'APKSTART_MSIX_PUBLISHER_DISPLAY');
+
+  // 上游历史包身份归原发布者所有，不能用于本分支的新包。
+  if (name?.toLowerCase() === 'routinemiku.apkstart'
+    || /^cn=(routinemiku|58ca1ded-8ab3-4d0d-af50-62c9b781aa4d)$/i.test(publisher || '')
+    || publisherDisplay?.toLowerCase() === 'routinemiku') {
+    throw new Error('不能使用上游 Microsoft Store 的包身份或发布者。');
+  }
+  if (STORE && (!name || !publisher || !publisherDisplay
+    || (name.toLowerCase() === localIdentity.name.toLowerCase()
+      && publisher.toLowerCase() === localIdentity.publisher.toLowerCase()))) {
+    throw new Error('--store 需要从自己的 Partner Center 复制实际分配的包名、Publisher 和 PublisherDisplayName；本地测试身份不得提交。');
+  }
+  if (STORE && DO_SIGN) throw new Error('--store 不能与 --sign 一起使用：商店负责签名。');
+  return {
+    name: name || localIdentity.name,
+    publisher: publisher || localIdentity.publisher,
+    publisherDisplay: publisherDisplay || pkg.author,
+    display: field('display', 'APKSTART_MSIX_DISPLAY') || pkg.productName,
+    appId: field('appId') || 'ApkStart',
+  };
+}
+
+const xml = (value) => String(value).replace(/[&<>"']/g, (ch) => (
+  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[ch]
+));
 
 const STAGE = path.resolve(String(arg('stage')
   || path.join(ROOT, 'dist', 'release', 'win-unpacked')));
-const OUT_DIR = path.resolve(String(arg('out') || path.join(ROOT, 'dist', 'store')));
+const OUT_DIR = path.resolve(String(arg('out') || path.join(ROOT, 'dist', STORE ? 'store' : 'store-local')));
 
 /**
  * 选「载荷目录」：就是 MSIX 里 `app\` 下面那份 ApkStart.exe + resources。
@@ -185,15 +212,20 @@ function writeAssets(dir) {
 
 // ---------------- 清单 ----------------
 
-function manifest() {
+function manifest(identity = packageIdentity()) {
+  const { name, publisher, publisherDisplay, display, appId } = Object.fromEntries(
+    Object.entries(identity).map(([key, value]) => [key, xml(value)]),
+  );
+  const description = pkg.description ? xml(pkg.description) : display;
   return `<?xml version="1.0" encoding="utf-8"?>
 <!--
   ApkStart · Microsoft Store (MSIX) 清单
   由 build/msix.js 生成，不要手改；改模板请改 build/msix.js。
 
-  两个必须和 Partner Center 逐字一致的字段：
+  商店提交的以下字段必须和 Partner Center 逐字一致：
     Identity/@Name          ← Product identity → Package/Identity/Name
     Identity/@Publisher     ← Product identity → Package/Identity/Publisher
+    Properties/PublisherDisplayName ← Product identity → Package/Properties/PublisherDisplayName
   本地自签测试时，Publisher 必须等于自签证书的 Subject。
 -->
 <Package
@@ -203,15 +235,15 @@ function manifest() {
   IgnorableNamespaces="uap rescap">
 
   <Identity
-    Name="${IDENTITY}"
-    Publisher="${PUBLISHER}"
+    Name="${name}"
+    Publisher="${publisher}"
     Version="${msixVersion(VERSION)}"
     ProcessorArchitecture="x64" />
 
   <Properties>
-    <DisplayName>${DISPLAY}</DisplayName>
-    <PublisherDisplayName>${PUBLISHER_DISPLAY}</PublisherDisplayName>
-    <Description>${pkg.description || DISPLAY}</Description>
+    <DisplayName>${display}</DisplayName>
+    <PublisherDisplayName>${publisherDisplay}</PublisherDisplayName>
+    <Description>${description}</Description>
     <Logo>Assets\\StoreLogo.png</Logo>
   </Properties>
 
@@ -237,10 +269,10 @@ function manifest() {
   </Capabilities>
 
   <Applications>
-    <Application Id="${APP_ID}" Executable="app\\ApkStart.exe" EntryPoint="Windows.FullTrustApplication">
+    <Application Id="${appId}" Executable="app\\ApkStart.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
-        DisplayName="${DISPLAY}"
-        Description="${pkg.description || DISPLAY}"
+        DisplayName="${display}"
+        Description="${description}"
         BackgroundColor="${BG_HEX}"
         Square150x150Logo="Assets\\Square150x150Logo.png"
         Square44x44Logo="Assets\\Square44x44Logo.png">
@@ -337,7 +369,7 @@ const { assertStandalone } = require('./guard-standalone');
 
 // ---------------- 主流程 ----------------
 
-function stagePackage() {
+function stagePackage(identity) {
   const pick = resolvePayload();
   const appSrc = pick.dir;
   if (!fs.existsSync(path.join(appSrc, 'ApkStart.exe'))) {
@@ -375,24 +407,24 @@ function stagePackage() {
   console.log('生成商店图标…');
   const made = writeAssets(path.join(work, 'Assets'));
   for (const m of made) console.log(`  ${m}`);
-  fs.writeFileSync(path.join(work, 'AppxManifest.xml'), manifest(), 'utf8');
-  console.log(`清单：Identity=${IDENTITY} Publisher=${PUBLISHER} Version=${msixVersion(VERSION)}`);
+  fs.writeFileSync(path.join(work, 'AppxManifest.xml'), manifest(identity), 'utf8');
+  console.log(`清单：Identity=${identity.name} Publisher=${identity.publisher} Version=${msixVersion(VERSION)}`);
   return work;
 }
 
 function main() {
-  console.log(`ApkStart MSIX 打包  版本 ${VERSION} → ${msixVersion(VERSION)}`);
-  // 身份守卫：占位 Publisher 打出来的包商店一定拒收（0x800B0109 / 身份不匹配）。
-  // 光靠文档提醒没用 —— 默认值曾经就是占位值，一次随手重建就把好包覆盖掉了。
-  if (!String(PUBLISHER).toUpperCase().includes('58CA1DED') && !process.argv.includes('--allow-placeholder')) {
-    console.error(`\nPublisher 不是 Partner Center 确认过的值：${PUBLISHER}`);
-    console.error(`已确认值是 ${CONFIRMED_PUBLISHER}（Identity ${CONFIRMED_IDENTITY}）。`);
-    console.error('占位 Publisher 打出来的包上传时会被商店直接拒收。');
-    console.error('确实要打占位版（仅本地试验，不上架）就加 --allow-placeholder。\n');
-    process.exit(3);
+  let identity;
+  try {
+    identity = packageIdentity();
+  } catch (error) {
+    console.error(error.message);
+    process.exitCode = 3;
+    return;
   }
+  if (process.argv.includes('--print-manifest')) return process.stdout.write(manifest(identity));
+  console.log(`ApkStart MSIX 打包（${STORE ? '商店提交' : '仅本地测试'}）  版本 ${VERSION} → ${msixVersion(VERSION)}`);
   fs.mkdirSync(OUT_DIR, { recursive: true });
-  const work = stagePackage();
+  const work = stagePackage(identity);
 
   const makeappx = which('makeappx.exe');
   if (!makeappx) {
@@ -429,17 +461,17 @@ function main() {
     ex('powershell.exe', ps, { stdio: 'inherit', windowsHide: true });
   } catch (_) { /* 自检失败不影响产物 */ }
 
-  if (DO_SIGN) sign(out);
+  if (DO_SIGN) sign(out, identity.publisher);
   else {
-    console.log('\n未签名（Store 会用自己的证书重签，提交时不需要签名）。');
-    console.log('本地想装的话加 --sign 生成自签证书并签名。');
+    console.log(STORE ? '\n未签名（Store 会用自己的证书重签）。'
+      : '\n仅本地测试，不能上传商店；加 --sign 用自签证书试装。');
   }
   // stage 是 1.3 GB 的中间产物，留着没用还会让人以为「包里有两份」，
   // 打包成功后直接清掉（要排查就加 --keep-stage）。
   if (!process.argv.includes('--keep-stage')) {
     try {
       fs.rmSync(work, { recursive: true, force: true });
-      console.log('已清理中间目录 dist/store/.stage');
+      console.log(`已清理中间目录 ${work}`);
     } catch (_) { /* 被占用就留着，不影响产物 */ }
   }
   console.log(`\n提交前先读一遍 docs/store-msix.md。`);
@@ -449,7 +481,7 @@ function artifactName() {
   return `ApkStart_${msixVersion(VERSION)}_x64.msix`;
 }
 
-function sign(file) {
+function sign(file, subject) {
   const signtool = which('signtool.exe');
   if (!signtool) {
     console.error('\n找不到 signtool.exe，跳过签名。');
@@ -457,7 +489,7 @@ function sign(file) {
   }
   const pfx = path.join(OUT_DIR, 'ApkStart-test.pfx');
   const pwd = process.env.APKSTART_MSIX_PFX_PASSWORD || 'ApkStart!test';
-  const subject = PUBLISHER;   // 必须与清单里的 Publisher 逐字一致
+  const literal = (value) => `'${String(value).replace(/'/g, "''")}'`;
   if (!fs.existsSync(pfx)) {
     console.log(`\n生成自签证书（Subject=${subject}）…`);
     const ps = [
@@ -465,9 +497,9 @@ function sign(file) {
       `$c = New-SelfSignedCertificate -Type Custom -KeyUsage DigitalSignature`
       + ` -CertStoreLocation 'Cert:\\CurrentUser\\My'`
       + ` -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3','2.5.29.19={text}')`
-      + ` -Subject '${subject}' -FriendlyName 'ApkStart MSIX Test';`
-      + `$p = ConvertTo-SecureString -String '${pwd}' -Force -AsPlainText;`
-      + `Export-PfxCertificate -Cert ("Cert:\\CurrentUser\\My\\" + $c.Thumbprint) -FilePath '${pfx}' -Password $p | Out-Null;`
+      + ` -Subject ${literal(subject)} -FriendlyName 'ApkStart MSIX Test';`
+      + `$p = ConvertTo-SecureString -String ${literal(pwd)} -Force -AsPlainText;`
+      + `Export-PfxCertificate -Cert ("Cert:\\CurrentUser\\My\\" + $c.Thumbprint) -FilePath ${literal(pfx)} -Password $p | Out-Null;`
       + `"thumbprint=" + $c.Thumbprint`,
     ];
     try { run('powershell.exe', ps); } catch (e) { console.error(`生成证书失败：${e.message}`); return; }

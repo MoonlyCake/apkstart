@@ -1,6 +1,7 @@
-# Microsoft Store 提交材料（ApkStart 0.6.3）
+# 上游历史资料：Microsoft Store 提交材料（ApkStart 0.6.3）
 
-> 历史材料：这是旧版 ApkStart 0.6.3 的提交记录，不是 Apk Start --Q 的现行上架说明。
+> 历史材料：这是上游 ApkStart 0.6.3 的提交记录。本分支由 MoonlyCake 维护，
+> 现行流程见 [Apk Start --Q 上架操作单](store-upload-walkthrough.md)。
 
 > 这份文件是给 Partner Center 表单直接复制用的。包体、图标、清单由脚本产出，
 > 只有「注册账号 → 预留名称 → 上传 → 送审」必须在网页上人工完成。
@@ -389,24 +390,8 @@ Notes:
 
 ---
 
-## 8. 上传步骤（人工，约 15 分钟）
+## 8. 历史包身份
 
-1. 打开 <https://partner.microsoft.com/dashboard>，进入 **Apps and games → New product → MSIX or PWA app**。
-2. 预留名称 `ApkStart`，进入 **Product management → Product identity**，
-   复制 `Package/Identity/Name` 与 `Package/Identity/Publisher`。
-3. 身份值**已经是确认值**（`RoutineMiku.ApkStart` / `CN=58CA1DED-…`），
-   直接 `node build/msix.js` 打出来的就是对的；`build/msix.js` 有守卫，
-   Publisher 里没有 `58CA1DED` 会直接退出（退出码 3），不会再产出废包。
-   仅当 Partner Center 显示的值与此不同才需要覆盖：
-   ```powershell
-   node build/msix.js --identity "<Identity/Name>" --publisher "<Identity/Publisher>"
-   ```
-4. **Packages** → 上传 `dist/store/ApkStart_0.6.3.0_x64.msix`，等待校验通过。
-5. **Store listing** → 填第 2–5 节的内容、上传截图、选分类。
-6. **Pricing and availability** → Free，市场选中国 + 全球。
-7. **Submission options** → 粘贴第 6 节的 certification notes。
-8. **Age ratings** → 完成 IARC 问卷。
-9. 提交审核。首个包通常 1–3 个工作日。
-
-> 不要用 Store submission API 创建首个 submission：一旦用 API 建过，
-> 该 submission 就不能再回网页编辑，会进入不可恢复的 error 状态。
+当时用的是上游产品在 Partner Center 分配的身份
+`RoutineMiku.ApkStart` / `CN=58CA1DED-8AB3-4D0D-AF50-62C9B781AA4D`。
+这些值只用于说明历史产物，不能用于本分支的提交。

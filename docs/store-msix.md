@@ -3,8 +3,8 @@
 这个目录里的脚本和应用改动，目的是产出一个**「一次下载、装完即用」**的 Microsoft Store
 安装包：里面已经包含 Android 模拟器、platform-tools 和系统镜像，用户不需要任何联网部署。
 
-> 此处是 MSIX 构建说明，不代表 Apk Start --Q 已上架。GitHub Release 独立发版；
-> 现有 MSIX 身份保留用于兼容旧包，只有有权使用该产品身份的账号才能上传更新。
+> 此处是 MoonlyCake 维护的 Apk Start --Q 的 MSIX 构建说明，不代表已上架。
+> GitHub Release 独立发版；本分支不使用上游的商店身份，不能覆盖上游商店包。
 
 ---
 
@@ -44,7 +44,7 @@ node build/msix.js      # 自动把 build/runtime 复制进包，再打 MSIX
 `extraResources`，但不会去 CDN 拉工具集。如果 `build/runtime` 不存在，先跑
 `node build/prepare-runtime.js`（或 `npm run runtime`）。
 
-**B. 一条命令（走 electron-builder）**
+**B. 一条命令（走 electron-builder，仅本地测试）**
 
 ```powershell
 npm run build:appx
@@ -65,7 +65,7 @@ node build/msix.js --payload dist/release/win-unpacked
 node build/msix.js --sign
 ```
 
-产物在 `dist/store/ApkStart_<四段版本>_x64.msix`，脚本最后会用 ZipFile 自检包内是否
+本地构建产物在 `dist/store-local/ApkStart_<四段版本>_x64.msix`。脚本最后会用 ZipFile 自检包内是否
 有 `AppxManifest.xml` / `AppxBlockMap.xml` / `[Content_Types].xml`（这三个缺一个都装不上），
 并打印「运行时已内置」确认。
 
@@ -85,35 +85,29 @@ node build/msix.js --sign
   想单独装：<https://developer.microsoft.com/windows/downloads/windows-sdk/>
   （只勾 Windows SDK，不用装 Visual Studio）。
 
-  找不到时脚本会把 stage 目录留在 `dist/store/.stage`，并打印一条可以直接复制执行的
+  找不到时脚本会把 `.stage` 目录留在输出目录，并打印一条可以直接复制执行的
   `makeappx pack` 命令，不会白跑。
 
 ---
 
-## 3. 提交商店前必须改的两个值
+## 3. 提交商店需要独立的产品身份
 
-MSIX 清单里的 `Identity/@Name` 和 `Identity/@Publisher` 必须**逐字**等于
-Partner Center → **Product management → Product identity** 里给出的
-`Package/Identity/Name` 与 `Package/Identity/Publisher`，差一个字符都收不了。
+MSIX 清单的包名、Publisher、PublisherDisplayName 必须与 [Partner Center 的产品身份](https://learn.microsoft.com/windows/apps/publish/view-app-identity-details) **逐字一致**，显示名也要与已预留的产品名一致。
 
-当前默认值沿用原有商店身份，**不是 Apk Start --Q 的新商店产品身份**：
-
-```
-Identity Name      = RoutineMiku.ApkStart
-Identity Publisher = CN=58CA1DED-8AB3-4D0D-AF50-62C9B781AA4D
-PublisherDisplayName = RoutineMiku
-```
-
-三种改法，任选：
+默认是本地测试身份 `MoonlyCake.ApkStart` / `CN=MoonlyCake`，发布者显示为 MoonlyCake，
+不提交商店。拥有独立 Partner Center 产品以后，把该产品分配的值传给 `--store`：
 
 ```powershell
-# 1) 改 electron-builder.yml 的 appx.identityName / appx.publisher
-# 2) 改 build/msix.js 顶部的 IDENTITY / PUBLISHER 默认值
-# 3) 用环境变量或命令行参数覆盖（推荐，不动源码）
-node build/msix.js --identity "12345RoutineMiku.ApkStart" --publisher "CN=1a2b3c4d-1111-2222-3333-444455556666"
-$env:APKSTART_MSIX_IDENTITY="12345RoutineMiku.ApkStart"
-$env:APKSTART_MSIX_PUBLISHER="CN=1a2b3c4d-1111-2222-3333-444455556666"
+$env:APKSTART_MSIX_IDENTITY = Read-Host 'Package/Identity/Name'
+$env:APKSTART_MSIX_PUBLISHER = Read-Host 'Package/Identity/Publisher'
+$env:APKSTART_MSIX_PUBLISHER_DISPLAY = Read-Host 'Package/Properties/PublisherDisplayName'
+$env:APKSTART_MSIX_DISPLAY = Read-Host '预留的产品显示名'
+node build/msix.js --store --print-manifest  # 仅检查清单，不构建
+node build/msix.js --store                  # 产物输出到 dist/store
 ```
+
+也可用 `--identity`、`--publisher`、`--publisherDisplay` 和 `--display` 传入。
+缺少商店必填身份、使用本地测试身份或使用上游包身份，脚本会在打包前退出。
 
 ---
 
@@ -128,20 +122,20 @@ $env:APKSTART_MSIX_PUBLISHER="CN=1a2b3c4d-1111-2222-3333-444455556666"
 ```powershell
 node build/msix.js --sign          # 生成自签证书 + 尝试签名
 $version = node -p "require('./build/msix').msixVersion(require('./package.json').version)"
-$msix = "dist\store\ApkStart_${version}_x64.msix"
+$msix = "dist\store-local\ApkStart_${version}_x64.msix"
 # 如果上一步报 signtool 不可用，用 SDK 里的那一份手工签：
 & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe" `
-  sign /fd SHA256 /a /f dist\store\ApkStart-test.pfx /p 'ApkStart!test' `
+  sign /fd SHA256 /a /f dist\store-local\ApkStart-test.pfx /p 'ApkStart!test' `
   $msix
 
 # 管理员 PowerShell 里信任证书（一次即可）
 Import-PfxCertificate -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' `
-  -FilePath 'dist\store\ApkStart-test.pfx' `
+  -FilePath 'dist\store-local\ApkStart-test.pfx' `
   -Password (ConvertTo-SecureString 'ApkStart!test' -Force -AsPlainText)
 Add-AppxPackage -Path $msix
 ```
 
-卸载：`Get-AppxPackage *ApkStart* | Remove-AppxPackage`
+仅卸载本分支的本地测试包：`Get-AppxPackage -Name MoonlyCake.ApkStart | Remove-AppxPackage`
 
 自签证书的 Subject 必须和清单里的 `Publisher` 一致，否则报 `0x800B0109` / `0x80073CF3`。
 
@@ -173,7 +167,7 @@ Add-AppxPackage -Path $msix
 1. **注册开发者账号**：<https://storedeveloper.microsoft.com>
    （老入口 Partner Center 个人账号是一次性 $19；从上面这个新入口走流程据微软文档是免费的，
    代价是要做证件 + 自拍身份验证。以注册页当时显示的金额为准。）
-2. **预留应用名称** → 拿到 `Package/Identity/Name`、`Package/Identity/Publisher`。
+2. **预留应用名称** → 获取包名、Publisher、PublisherDisplayName。
 3. **上传包**：`.msix` / `.appx` / `.msixbundle` 都可以；Win10+ 推荐 `.msixupload`
    （带符号文件才有崩溃分析），但单 x64 的 `.appx` 直传也是被允许的。
    Store 接受上限 **25 GB/包**，我们 ~1.3 GB。

@@ -63,11 +63,12 @@ function parseRecords(dump) {
 }
 
 class NotifyBridge {
-  constructor({ getClient, getAppLabel, getAppIcon, onOpen }) {
+  constructor({ getClient, getAppLabel, getAppIcon, onOpen, showNotification = (publish) => publish() }) {
     this.getClient = getClient;
     this.getAppLabel = getAppLabel;
     this.getAppIcon = getAppIcon;
     this.onOpen = onOpen;
+    this.showNotification = showNotification;
     this.seen = new Set();
     this.timer = null;
     this.running = false;
@@ -117,18 +118,20 @@ class NotifyBridge {
 
   _show(n) {
     try {
-      if (!Notification.isSupported()) return;
       const label = this.getAppLabel ? this.getAppLabel(n.pkg) : n.pkg;
       const body = [n.title, n.text].filter(Boolean).join(' · ') || '新通知';
       const iconPath = this.getAppIcon ? this.getAppIcon(n.pkg) : '';
-      const note = new Notification({
-        title: label || '安卓应用',
-        body: body.slice(0, 260),
-        silent: false,
-        icon: iconPath ? nativeImage.createFromPath(iconPath) : undefined,
+      this.showNotification(() => {
+        if (!Notification.isSupported()) return;
+        const note = new Notification({
+          title: label || '安卓应用',
+          body: body.slice(0, 260),
+          silent: false,
+          icon: iconPath ? nativeImage.createFromPath(iconPath) : undefined,
+        });
+        note.on('click', () => { if (this.onOpen) this.onOpen(n.pkg); });
+        note.show();
       });
-      note.on('click', () => { if (this.onOpen) this.onOpen(n.pkg); });
-      note.show();
     } catch (_) { /* 通知失败不影响应用 */ }
   }
 }

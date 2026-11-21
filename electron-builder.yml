@@ -47,19 +47,12 @@ win:
   requestedExecutionLevel: asInvoker
 
 # ---------------- 微软商店（MSIX） ----------------
-# appx 目标不在默认构建列表里：它只有出商店包时才用（npm run build:appx），
-# 平时 npm run build:exe 仍然只出 NSIS 安装包。
-#
-# identityName / publisher 必须逐字等于 Partner Center →
-#   Product management → Product identity 里的
-#   Package/Identity/Name 与 Package/Identity/Publisher。
-# 下面这两个值是 2026-11-16 从 Partner Center 抄下来的确认值；
-# 换产品身份时改这里（或设 APKSTART_MSIX_IDENTITY / APKSTART_MSIX_PUBLISHER）。
-# 注意：占位 Publisher（CN=RoutineMiku）打出来的包商店会直接拒收。
+# appx 仅供本地测试；平时 npm run build:exe 仍然只出 NSIS 安装包。
+# 商店应走 build/msix.js --store，传入本分支自己的 Partner Center 身份。
 appx:
-  identityName: RoutineMiku.ApkStart
-  publisher: "CN=58CA1DED-8AB3-4D0D-AF50-62C9B781AA4D"
-  publisherDisplayName: RoutineMiku
+  identityName: MoonlyCake.ApkStart
+  publisher: "CN=MoonlyCake"
+  publisherDisplayName: MoonlyCake
   applicationId: ApkStart
   artifactName: ApkStart-${version}.${ext}
   # 全信任桌面应用唯一必需的能力。不要加 unvirtualizedResources /
