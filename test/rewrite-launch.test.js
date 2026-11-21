@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { runLaunchPolicy } = require('../src/application/launch-policy');
-const { AdbClient } = require('../src/core/adb');
+const { AdbClient, friendlyLaunchError } = require('../src/core/adb');
 const { Installer } = require('../src/core/installer');
 const store = require('../src/core/store');
 const { buildStoredZip, buildApkBytes } = require('./lib/make-apk');
@@ -120,20 +120,71 @@ test('an inner sighting followed only by ADB outages does not retry', async () =
   assert.deepEqual(info.firstSeen, []);
 });
 
-test('ADB reports a numeric inner PID via the optional hook without changing startApp result', async () => {
+test('legacy direct ADB callers still see numeric PID and receive the original startApp result', async () => {
   const client = new AdbClient({ adbPath: 'never-run', serial: 'test' });
-  let pidResponse = '42 57';
   let sightingCount = 0;
   client.resolveLauncher = async () => 'com.example.app/.Main';
-  client.shell = async (command) => command.startsWith('pidof ') ? pidResponse : 'Starting: Intent';
+  client.shell = async (command) => command.startsWith('pidof ') ? '42 57' : 'Starting: Intent';
   const opts = { freeform: false, onProcessSeen: () => { sightingCount += 1; } };
 
   assert.equal(await client.startApp('com.example.app', '.Main', opts), 'Starting: Intent');
   assert.equal(sightingCount, 1);
-  pidResponse = 'unrecognized output';
-  assert.equal(await client.startApp('com.example.app', '.Main', opts), 'Starting: Intent');
-  assert.equal(sightingCount, 1, 'non-PID output is not confirmed process evidence');
   assert.equal(await client.startApp('com.example.app', '.Main'), 'Starting: Intent');
+});
+
+test('legacy wait is inconclusive without numeric PID and never reads shared crash logs', async () => {
+  const client = new AdbClient({ adbPath: 'never-run', serial: 'test' });
+  client.shell = async (command) => {
+    assert.ok(command.startsWith('pidof '));
+    return 'ignored diagnostic text';
+  };
+  assert.deepEqual(await client.waitAppAlive('com.example.app', 2, assert.fail), {
+    ok: false, crash: '', uncertain: true,
+  });
+});
+
+test('rejected launch intents can fall back; unknown delivery from ADB does not replay', async () => {
+  const client = new AdbClient({ adbPath: 'never-run', serial: 'test' });
+  const calls = [];
+  client.resolveLauncher = async () => 'com.example.app/.Main';
+  client.shell = async (command) => {
+    calls.push(command);
+    if (command.startsWith('am start ')) return 'Error type 3\nError: Activity class does not exist.';
+    return '** No activities found to run, monkey aborted.';
+  };
+  await assert.rejects(
+    client.startApp('com.example.app', '.Main', { observeProcess: false }),
+    { code: 'APP_START_FAILED', raw: /No activities found/ },
+  );
+  assert.equal(calls.filter((command) => command.startsWith('am start ')).length, 2);
+  assert.equal(calls.filter((command) => command.startsWith('monkey -p com.example.app ')).length, 1);
+
+  const timeout = new Error('transport timed out');
+  calls.length = 0;
+  client.shell = async (command) => { calls.push(command); throw timeout; };
+  await assert.rejects(client.startApp('com.example.app', '.Main'), (error) => error === timeout);
+  assert.equal(calls.length, 1);
+});
+
+test('orientation-only mode updates display without sending a key; existing default is unchanged', async (t) => {
+  t.mock.method(store, 'getSettings', () => ({ display: { tabletMode: true, autoRotate: true } }));
+  const client = new AdbClient({ adbPath: 'never-run', serial: 'test' });
+  const commands = [];
+  client.shell = async (command) => { commands.push(command); return ''; };
+  assert.equal(await client.setOrientation(true, { sendBackKey: false }), true);
+  assert.ok(commands.some((command) => command.includes('wm set-ignore-orientation-request true')));
+  assert.ok(commands.some((command) => command.startsWith('wm density ')));
+  assert.ok(!commands.some((command) => command.includes('input keyevent')));
+  commands.length = 0;
+  assert.equal(await client.setOrientation(true), true);
+  assert.ok(commands.includes('input keyevent KEYCODE_BACK'));
+});
+
+test('readable launch errors recommend checking the actual image and never promise automatic switching', () => {
+  const message = friendlyLaunchError('DoBadTrampoline libndk_translation', 'com.example.app');
+  assert.match(message, /实际运行的镜像及 APK 架构/);
+  assert.match(message, /下载并重启运行时/);
+  assert.doesNotMatch(message, /自动|手动切换/);
 });
 
 test('repeated confirmed exits run only three starts and preserve app data', async () => {
@@ -222,7 +273,7 @@ function installerFixture(t, {
   function client(label, installed) {
     return {
       resetDisplayOverrides: async () => {},
-      setOrientation: async (landscape) => events.push(['orientation', label, landscape]),
+      setOrientation: async (landscape, opts) => events.push(['orientation', label, landscape, opts]),
       isInstalled: async (pkg, opts) => {
         assert.equal(pkg, packageName);
         assert.deepEqual(opts, { strictProbe: true });
@@ -244,8 +295,9 @@ function installerFixture(t, {
         assert.ok(cmd.startsWith('pidof ' + packageName + ' '), 'ordinary launch must only use the PID shell probe');
         return shellOutput;
       },
-      startApp: async (pkg) => {
+      startApp: async (pkg, activity, opts) => {
         assert.equal(pkg, packageName);
+        assert.equal(opts.observeProcess, false);
         events.push(['start', label]);
         if (label === 'base' && initialError) throw initialError;
       },
@@ -271,6 +323,7 @@ function installerFixture(t, {
   return {
     installer: new Installer(runtime, {}, { launchPolicy: (ports) => runLaunchPolicy(ports, timing()) }),
     packageName,
+    client: initial.client,
     events,
     updatedRecords,
   };
@@ -282,6 +335,7 @@ test('ordinary launch repairs verified missing cached data without granting perm
   assert.equal(updatedRecords[0].launchCount, 1);
   assert.deepEqual(events.map((e) => e[0]), ['install', 'invalidate', 'start', 'orientation', 'touch']);
   assert.deepEqual(events[0][3], { grantPermissions: false });
+  assert.deepEqual(events[3], ['orientation', 'base', true, { sendBackKey: false }]);
 });
 
 test('ordinary launch does not reinstall or claim success from unknown probe results', async (t) => {
@@ -317,28 +371,52 @@ for (const bundle of [false, true]) {
     });
 }
 
-test('target-owned ABI crash reports an actionable requirement without switching images or overwriting settings', async (t) => {
-  const initialError = Object.assign(new Error('launch failed'), {
-    code: 'APP_CRASHED',
-    crash: 'F/DEBUG   ( 789): pid: 123, tid: 123, name: sample >>> com.example.test <<<\n'
-      + 'F/DEBUG   ( 789): #00 pc /lib/libndk_translation.so (DoBadTrampoline)',
-  });
-  const { installer, packageName, events, updatedRecords } = installerFixture(t, { initialError });
-  await assert.rejects(installer.launch(packageName), {
-    code: 'APP_COMPAT_REQUIRED', cause: initialError, message: /本次启动未切换镜像/,
-  });
-  assert.deepEqual(events, [['start', 'base']]);
-  assert.deepEqual(updatedRecords, []);
+test('the real dispatcher and Installer wait on one policy for delayed PID despite stale or unrelated crash lines', async (t) => {
+  const { installer, packageName, client, updatedRecords } = installerFixture(t);
+  const logTail = 'E/AndroidRuntime( 100): Process: ' + packageName + ', PID: 100\n'
+    + 'E/AndroidRuntime( 100): previous launch UnsatisfiedLinkError\n'
+    + 'F/DEBUG( 200): Cmdline: com.example.other\n'
+    + 'F/DEBUG( 200): libndk_translation DoBadTrampoline';
+  const commands = [];
+  let pidProbes = 0;
+  client.startApp = AdbClient.prototype.startApp;
+  client.resolveLauncher = async () => packageName + '/.Main';
+  client.waitAppAlive = assert.fail;
+  client.shell = async (command) => {
+    commands.push(command);
+    if (command.startsWith('am start ')) return 'Starting: Intent';
+    if (command.startsWith('pidof ' + packageName + ' ')) {
+      pidProbes += 1;
+      return pidProbes < 5 ? '__APKSTART_PID_ABSENT__' : '62';
+    }
+    if (command.includes('logcat')) return logTail;
+    assert.fail('unexpected guest command: ' + command);
+  };
+  assert.deepEqual(await installer.launch(packageName), { ok: true, engine: 'base' });
+  assert.equal(updatedRecords.length, 1);
+  assert.equal(commands.filter((command) => command.startsWith('am start ')).length, 1);
+  assert.equal(pidProbes, 8);
+  assert.ok(!commands.some((command) => command.includes('logcat')));
 });
 
-test('mixed crash logs do not assign another app ABI failure to the target', async (t) => {
-  const initialError = Object.assign(new Error('launch failed'), {
-    code: 'APP_CRASHED',
-    crash: 'E/AndroidRuntime( 100): Process: com.example.test, PID: 100\n'
-      + 'E/AndroidRuntime( 200): Process: com.example.other, PID: 200\n'
-      + 'E/AndroidRuntime( 200): java.lang.UnsatisfiedLinkError: dlopen failed: libndk_translation',
+test('an ABI rejection from the target launch command yields a neutral recovery hint and preserves its cause', async (t) => {
+  const { installer, packageName, client, events, updatedRecords } = installerFixture(t);
+  const refusal = Object.assign(new Error('command rejected'), { stdout: 'Error: INSTALL_FAILED_NO_MATCHING_ABIS' });
+  client.startApp = AdbClient.prototype.startApp;
+  client.resolveLauncher = async () => packageName + '/.Main';
+  client.shell = async (command) => {
+    assert.ok(command.startsWith('am start '));
+    events.push(['start rejected']);
+    throw refusal;
+  };
+  await assert.rejects(installer.launch(packageName), (error) => {
+    assert.equal(error.code, 'APP_COMPAT_REQUIRED');
+    assert.equal(error.cause.code, 'NO_MATCHING_ABIS');
+    assert.equal(error.cause.cause, refusal);
+    assert.match(error.message, /下载兼容镜像并重启运行时/);
+    assert.doesNotMatch(error.message, /自动切换|手动切换|不丢失/);
+    return true;
   });
-  const { installer, packageName, events } = installerFixture(t, { initialError });
-  await assert.rejects(installer.launch(packageName), (err) => err === initialError);
-  assert.deepEqual(events, [['start', 'base']]);
+  assert.deepEqual(events, [['start rejected']]);
+  assert.deepEqual(updatedRecords, []);
 });

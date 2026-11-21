@@ -10,6 +10,7 @@ function createWindowAttachment(attach) {
       early ??= attempt();
       return early;
     },
+    settleEarly() { return early; },
     async finish() {
       return (early && await early) || await attempt();
     },

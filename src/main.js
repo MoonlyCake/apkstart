@@ -529,9 +529,13 @@ async function restartForOrientation(landscape, { reloadApp = true } = {}) {
  *   - 嵌入：SetParent 进我们自己的窗口，观感统一、标题栏带旋转按钮。
  *   由设置 display.windowEmbed 控制（true 才是嵌入）。
  */
-async function attachAppWindow() {
-  if (!appWin) return false;
+async function attachAppWindow(isCurrent = () => true) {
+  const target = appWin;
+  const window = target?.win;
+  if (!window) return false;
   const embedMode = displaySettings().windowEmbed === true;
+  const active = () => isCurrent() && target === appWin && target.win === window
+    && target.isOpen && (displaySettings().windowEmbed === true) === embedMode;
   if (!embedMode) {
     /**
      * 原生窗口接管要重试。
@@ -543,26 +547,29 @@ async function attachAppWindow() {
      * 而且再也接不上画面（日志里的 attach failed (detached): unknown）。
      */
     for (let i = 0; i < 4; i += 1) {
-      if (!appWin.isOpen) {
+      if (!active()) {
         appLog(`attach detached: 壳窗口已关闭（第 ${i + 1} 轮）`);
         return false;
       }
       // eslint-disable-next-line no-await-in-loop
-      const ok = await appWin.openDetached().catch((e) => {
-        appWin.lastEmbedError = (e && e.message) || 'threw';
+      const ok = await target.openDetached().catch((e) => {
+        target.lastEmbedError = (e && e.message) || 'threw';
         return false;
       });
+      if (!active()) return false;
       if (ok) return true;
-      appLog(`attach detached #${i + 1} 失败: ${appWin.lastEmbedError || 'unknown'}`);
+      appLog(`attach detached #${i + 1} 失败: ${target.lastEmbedError || 'unknown'}`);
       // 逐轮拉长等待：窗口代理的 show/layout 也可能正好撞上窗口重建
       // eslint-disable-next-line no-await-in-loop
-      await new Promise((r) => setTimeout(r, 400 + i * 600));
+      if (i < 3) await new Promise((r) => setTimeout(r, 400 + i * 600));
     }
     // 四轮都没露出来（远程桌面 / 显卡驱动异常 / 模拟器被 --no-window 起过）：
     // 与其留一屏黑或者一张永远转圈的等待页，不如先用嵌入把画面接上，
     // 并明确告诉用户这是兜底 —— 下次启动仍然优先原生窗口。
+    if (!active()) return false;
     appLog('attach detached: 重试全部失败，临时退回嵌入模式');
-    const fallback = await appWin.embed().catch(() => false);
+    const fallback = await target.embed().catch(() => false);
+    if (!active()) return false;
     if (fallback) {
       try {
         send('toast', { type: 'info', message: '模拟器原生窗口没能显示，本次临时用内置窗口接管画面' });
@@ -570,12 +577,14 @@ async function attachAppWindow() {
     }
     return fallback;
   }
-  const ok = await appWin.embed().catch(() => false);
-  if (!ok) {
-    setTimeout(() => { if (appWin.isOpen) appWin.embed().catch(() => {}); }, 1500);
-    setTimeout(() => { if (appWin.isOpen) appWin.embed().catch(() => {}); }, 4000);
+  // 绑定到本次启动和窗口；不留下会跨到下次启动的回调。
+  for (const delay of [0, 1500, 2500]) {
+    if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+    if (!active()) return false;
+    const ok = await target.embed().catch(() => false);
+    if (ok && active()) return true;
   }
-  return ok;
+  return false;
 }
 
 /**
@@ -1255,7 +1264,20 @@ async function launchOne(pkg) {
   const t0 = Date.now();
   const mark = (s) => appLog(`launch ${pkg} ${s} +${Date.now() - t0}ms`);
   const launchId = ++launchSequence;
-  const attachment = createWindowAttachment(attachAppWindow);
+  let attaching = true;
+  let discoveryTimer = null;
+  let discoveryPending = null;
+  let discoveringNative = true;
+  const isCurrent = () => attaching && launchId === launchSequence;
+  const stopDiscovery = () => {
+    discoveringNative = false;
+    if (discoveryTimer) clearTimeout(discoveryTimer);
+    return discoveryPending?.catch(() => {});
+  };
+  const attachment = createWindowAttachment(async () => {
+    await stopDiscovery();
+    return attachAppWindow(isCurrent);
+  });
   let watchingFirstFrame = false;
   // 启动动画统一收尾：早期 splash 窗口 + 应用窗口的 boot 遮罩一起淡出。
   // 幂等（onAppUp 首帧判定 / launch 结束兜底 / 定时保险丝都可能调它），并保证
@@ -1272,7 +1294,7 @@ async function launchOne(pkg) {
     if (typeof splashDone === 'function') splashDone();
   };
   const watchFirstFrame = async (attached) => {
-    if (!attached || watchingFirstFrame || launchId !== launchSequence) return;
+    if (!attached || watchingFirstFrame || !isCurrent()) return;
     watchingFirstFrame = true;
     let painted = true;
     try {
@@ -1281,7 +1303,7 @@ async function launchOne(pkg) {
         painted = await client.waitForAppFirstFrame(pkg, { timeoutMs: 20000 });
       }
     } catch (_) { /* 首帧探测失败时也收起过渡动画 */ }
-    if (launchId !== launchSequence) return;
+    if (!isCurrent()) return;
     mark(`first frame=${painted}`);
     finishBootAnimation();
   };
@@ -1314,23 +1336,22 @@ async function launchOne(pkg) {
     if (displaySettings().windowEmbed === false && appWin && appWin.isOpen) {
       let tries = 0;
       let rounds = 0;
-      const preAttach = async () => {
-        if (launchId !== launchSequence || bootAnimDone || !appWin?.isOpen) return;
-        rounds += 1;
-        // 硬上限：无论让路还是失败，最多跑 45 轮（约 1 分钟）就收手，
-        // 避免换向失败后这个定时器一直挂着空转。
-        if (rounds > 45) return;
-        // 正在换面板方向、准备重启运行时：这时候去接画面只会把刚亮起的
-        // 等待窗口藏掉，屏幕上就没东西了。让路，等重启完成再接手。
-        if (appWin.waitingForRestart) {
-          setTimeout(preAttach, 1500);
-          return;
-        }
+      const preAttach = () => {
+        if (!isCurrent() || !discoveringNative || !appWin?.isOpen) return;
+        if (++rounds > 45) return;
+        const target = appWin;
+        const window = target.win;
+        const active = () => isCurrent() && discoveringNative && appWin === target
+          && target.win === window && target.isOpen && displaySettings().windowEmbed === false;
+        if (!active()) return;
+        const schedule = () => { discoveryTimer = setTimeout(preAttach, 1500); };
+        if (target.waitingForRestart) { schedule(); return; }
         tries += 1;
-        // eslint-disable-next-line no-await-in-loop
-        const ok = await appWin.openDetached().catch(() => false);
-        if (ok) { appLog(`pre-attach detached ok（第 ${tries} 次）`); return; }
-        if (tries < 20) setTimeout(preAttach, 1500);
+        discoveryPending = target.openDetached().catch(() => false).then((ok) => {
+          if (!active()) return;
+          if (ok) appLog(`pre-attach detached ok（第 ${tries} 次）`);
+          else if (tries < 20) schedule();
+        });
       };
       preAttach();
     }
@@ -1357,7 +1378,7 @@ async function launchOne(pkg) {
         // 把刚锁好的方向覆盖掉 —— 这就是「平板/横屏模式下画面总是 90 度躺着」。
         // 等它稳定后补一次方向自愈（读 init/cur，只有真躺倒才写）。
         setTimeout(() => {
-          if (launchId !== launchSequence || appWin?.pkg !== pkg) return;
+          if (!isCurrent() || appWin?.pkg !== pkg) return;
           runtime._healOrientation?.().catch(() => {});
           // 顺带记下这个应用真正的方向（清单里全是 sensor 的应用只能这样学）
           learnAppOrientation(pkg).catch(() => {});
@@ -1452,6 +1473,9 @@ async function launchOne(pkg) {
     }
     return { ok: true, embedded };
   } catch (e) {
+    attaching = false;
+    await stopDiscovery();
+    await attachment.settleEarly();
     finishBootAnimation();
     appLog(`launch failed ${pkg}: ${e && (e.stack || e.message)}`);
     try { appWin.close({ keepApp: true }); } catch (_) { /* ignore */ }
@@ -2198,15 +2222,17 @@ function registerIpc() {
     const freeMB = doctor.freeDiskMB(runtime.provisioner.paths().root);
     const want = res.clampDataGB(gb, freeMB).gb;
     if (!want) return { ok: false, error: '目标容量不合法' };
-    try {
-      store.getApps();
-      store.saveSettings({ engine: { dataPartitionGB: want } });
-    } catch (error) {
-      return { ok: false, error: error.message };
-    }
-    const r = await runtime.resetAndroidData().catch((e) => ({ ok: false, error: e.message }));
-    appLog(`reset+resize -> ${want}GB: ${JSON.stringify(r)}`);
-    return { ok: !!(r && r.ok), wantGB: want, ...r };
+    return appOperations.run(`reset:resize:${want}`, async () => {
+      const r = await runtime.resetAndroidData().catch((e) => ({ ok: false, error: e.message }));
+      appLog(`reset+resize -> ${want}GB: ${JSON.stringify(r)}`);
+      if (!r.ok) return { ...r, wantGB: want };
+      try {
+        store.saveSettings({ engine: { dataPartitionGB: want } });
+        return { ...r, wantGB: want };
+      } catch (error) {
+        return { ...r, ok: false, wantGB: want, error: `安卓数据已重置，但未能保存新容量：${error.message}` };
+      }
+    });
   });
 
   // 数据分区（/data）容量：应用、游戏与它们的更新包都装在这里。
@@ -2274,7 +2300,7 @@ function registerIpc() {
 
   // 彻底重置安卓数据：清空 /data 用户分区 + 已装应用 + 快速启动快照，
   // AVD 还原成「刚装好系统」的干净状态。会真实删除数 GB 数据，UI 必须二次确认。
-  ipcMain.handle('runtime:resetData', async () => {
+  ipcMain.handle('runtime:resetData', () => appOperations.run('reset:android-data', async () => {
     try {
       const r = await runtime.resetAndroidData();
       if (!r.ok) return { ok: false, error: r.error };
@@ -2282,7 +2308,7 @@ function registerIpc() {
     } catch (e) {
       return { ok: false, error: e.message };
     }
-  });
+  }));
 
   // 修复虚拟机网络：重置 /data（保留应用清单，点开应用会自动重装）。
   // 典型场景：安卓里所有联网页面一直黑屏，其实是 wlan0 没起来、没有默认路由。

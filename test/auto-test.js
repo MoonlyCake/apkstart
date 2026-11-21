@@ -1244,7 +1244,9 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     const mainJs = fs.readFileSync(path.join(root, 'src', 'main.js'), 'utf8');
 
     // 存活窗口和首次进程回调由 rewrite-launch.test.js 按行为验证。
-    assert(/launchPolicy[\s\S]{0,480}onAppUp/.test(instJs), '启动策略要收到窗口接管回调');
+    const handoff = instJs.indexOf('await this.launchPolicy({');
+    const policyCall = instJs.slice(handoff, instJs.indexOf('\n      });', handoff));
+    assert(handoff >= 0 && /\bonAppUp,/.test(policyCall), '启动策略要收到窗口接管回调');
 
     // early attach 与失败后的最终补救由 rewrite-queue.test.js 按行为验证。
     assert(/onAppUp:\s*\(\)\s*=>/.test(mainJs), 'main.js 要传 onAppUp');
@@ -2305,11 +2307,11 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
   await test('多窗口：启动应用要先收起管理窗口再开应用窗口', () => {
     const root = path.join(__dirname, '..');
     const mainJs = fs.readFileSync(path.join(root, 'src', 'main.js'), 'utf8');
-    const launchIdx = mainJs.indexOf('async function runLaunch(');
-    const body = mainJs.slice(launchIdx, launchIdx + 2600);
+    const launchIdx = mainJs.indexOf('async function launchOne(');
+    const body = mainJs.slice(launchIdx, mainJs.indexOf('const r = await installer.launch', launchIdx));
     const hideIdx = body.indexOf('mainWindow.hide()');
     const openIdx = body.indexOf('openAppWindow(pkg');
-    assert(hideIdx > 0 && openIdx > 0, '两个调用都要在 runLaunch 里');
+    assert(hideIdx > 0 && openIdx > 0, '两个调用都要在 launchOne 里');
     assert(hideIdx < openIdx, 'mainWindow.hide() 必须在 openAppWindow 之前（否则会同时看到两个窗口）');
   });
 
@@ -2365,7 +2367,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(/appWin\.showWaiting\(/.test(mainJs), '重启换向前要重新亮出等待窗口');
     assert(/waitingForRestart/.test(appwin), '要有「正在等待重启」标记');
     // 启动阶段的 pre-attach 轮询看到标记必须让路，不能把等待窗口又 hide 掉
-    assert(/if \(appWin\.waitingForRestart\)/.test(mainJs), 'pre-attach 要让路');
+    assert(/if \(target\.waitingForRestart\) \{ schedule\(\); return; \}/.test(mainJs), 'pre-attach 要让路');
   });
 
   await test('标题要在 show 之前设，否则会闪上一个应用的名字', () => {

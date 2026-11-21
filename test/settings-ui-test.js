@@ -57,7 +57,7 @@ const OVERRIDES = {
   'doctor:selfCheck': () => ({ issues: [], accel: { ok: true }, free: 102400 }),
   'doctor:report': () => ({ ok: true, file: 'C:\\report.txt' }),
   'runtime:usage': () => ({ totalText: '8.2 GB', reclaimableText: '1.1 GB', count: 3 }),
-  'runtime:status': () => ({ mode: 'builtin', backend: 'builtin', backendLabel: '内置', installed: true, vmRunning: false, deviceOnline: false, ready: false, phase: 'idle', needsSetup: null, error: '', env: { adb: { ok: true }, emulator: { ok: true }, sysimg: { ok: true } }, accel: { ok: true }, network: null }),
+  'runtime:status': () => ({ mode: 'builtin', backend: 'builtin', backendLabel: '内置', installed: true, vmRunning: false, deviceOnline: false, ready: false, phase: 'idle', needsSetup: null, error: '', env: { adb: { ok: true }, emulator: { ok: true }, sysimg: { ok: true }, playImage: { ok: false, size: 0 } }, accel: { ok: true }, network: null }),
   'runtime:dataInfo': () => ({ avdDir: 'C:\\data\\avd', configuredGB: 6, actualGB: 6 }),
   'android:status': () => ({ running: false, wifi: true, airplane: false, anim: true, volume: 50, font: 1, density: 320 }),
   'drivers:list': () => ({ drivers: [], errors: [] }),
@@ -133,6 +133,9 @@ app.whenReady().then(async () => {
   await new Promise((r) => setTimeout(r, 900));
   const modalOpen = await evalJs(`document.getElementById('settingsMask').classList.contains('on')`);
   step('设置弹窗能打开', modalOpen);
+  const optionalImage = await evalJs(`!document.getElementById('setCompat').checked
+    && !document.getElementById('compatInstallField').hidden`);
+  step('未下载兼容镜像时，不开旧版开关也能找到下载入口', optionalImage);
 
   const navInfo = await evalJs(`(() => ({
     items: document.querySelectorAll('#setNav .set-nav-item').length,

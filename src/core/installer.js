@@ -88,35 +88,9 @@ async function probeAppPids(client, pkg, opts) {
   return pids;
 }
 
-function isCompatLaunchFailure(error, pkg, app) {
-  const crash = error?.crash;
-  if (error?.code !== 'APP_CRASHED' || typeof crash !== 'string') return false;
-
-  const owners = new Map();
-  const marker = (text) => /DoBadTrampoline|ndk_translation/i.test(text)
-    || (isArmOnly(app) && /UnsatisfiedLinkError|dlopen failed/i.test(text));
-  // The legacy filtered logcat tail contains multiple crash incidents. Match
-  // Process/Cmdline declarations and ABI diagnostics in the same tag/PID.
-  for (const line of crash.split(/\r?\n/)) {
-    const row = /^[FE]\/(AndroidRuntime|DEBUG|libc)\s*\(\s*(\d+)\):\s*(.*)$/i.exec(line);
-    const message = row ? row[3] : line.trim();
-    const declaration = /^(?:Process|Cmdline):\s*([.\w]+)(?=[:\s,;]|$)/i.exec(message)
-      || />>>\s*([.\w]+)(?=[:\s<]|$)/.exec(message);
-    if (!row) {
-      if (declaration?.[1] === pkg && marker(message)) return true;
-      continue;
-    }
-    const key = row[1] + ':' + row[2];
-    if (/^FATAL EXCEPTION/i.test(message)) owners.delete(key);
-    if (declaration) owners.set(key, declaration[1]);
-    if (owners.get(key) === pkg && marker(message)) return true;
-  }
-  return false;
-}
-
 function compatRequired(cause) {
   return Object.assign(new Error(
-    '当前安卓镜像可能不兼容此应用的原生库。本次启动未切换镜像。请优先使用适配当前镜像的 APK，或先备份应用数据，再到设置中手动切换兼容镜像。',
+    '当前安卓镜像可能不兼容此应用的原生库。本次启动未切换镜像。请核对镜像安装状态、实际运行的镜像及 APK 架构；如果尚未安装兼容镜像并确有需要，请先备份安卓数据，再下载兼容镜像并重启运行时。',
     { cause },
   ), { code: 'APP_COMPAT_REQUIRED' });
 }
@@ -629,14 +603,14 @@ class Installer {
     await restoreMissingCachedApp(this.runtime, rt.client, pkg, app, onLog);
     try {
       await this.launchPolicy({
-        start: (onProcessSeen) => rt.client.startApp(pkg, app?.activity, {
+        start: () => rt.client.startApp(pkg, app?.activity, {
           freeform: settings.freeform,
           bounds: app?.bounds || null,
-          onProcessSeen,
+          observeProcess: false,
         }),
         probe: (opts) => probeAppPids(rt.client, pkg, opts),
         // Starting an Activity can reset user-rotation; re-apply after each start.
-        onStarted: () => rt.client.setOrientation(!!settings.display?.landscape).catch(() => {}),
+        onStarted: () => rt.client.setOrientation(!!settings.display?.landscape, { sendBackKey: false }).catch(() => {}),
         onLog,
         onMark,
         onAppUp,
@@ -644,7 +618,7 @@ class Installer {
     } catch (error) {
       // Changing AOSP/Play images may require wiping guest data. Ordinary
       // launch reports the compatibility issue without making that change.
-      if (isCompatLaunchFailure(error, pkg, app)) throw compatRequired(error);
+      if (error?.code === 'NO_MATCHING_ABIS') throw compatRequired(error);
       throw error;
     }
     this.runtime.touch();

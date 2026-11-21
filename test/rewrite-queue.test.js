@@ -102,3 +102,25 @@ test('shortcut parsing rejects unsupported package names without entering silent
   assert.equal(parse(['ApkStart.exe', '--launch', 'com.good.app']).launch, 'com.good.app');
   assert.equal(parse(['ApkStart.exe', 'F:/空 格/game.xapk']).apk, 'F:/空 格/game.xapk');
 });
+
+test('bound attach retries cannot run against the next app window', async () => {
+  const fs = require('node:fs');
+  const vm = require('node:vm');
+  const source = fs.readFileSync(require.resolve('../src/main.js'), 'utf8');
+  const body = source.slice(source.indexOf('async function attachAppWindow('), source.indexOf('/**\n * 打开（或复用）'));
+  const delayed = deferred();
+  let attempts = 0;
+  let resume;
+  const appWin = { win: {}, isOpen: true, embed: async () => { attempts++; return false; } };
+  const attach = vm.runInNewContext(body + '\nattachAppWindow', {
+    appWin, displaySettings: () => ({ windowEmbed: true }),
+    setTimeout: (candidate) => { resume = candidate; delayed.resolve(); },
+  });
+  const result = attach();  // Explicit orientation rotation also calls it directly.
+  await delayed.promise;
+  assert.equal(attempts, 1);
+  appWin.win = {}; // Windows opened a different shell during the retry delay.
+  resume();
+  assert.equal(await result, false);
+  assert.equal(attempts, 1);
+});

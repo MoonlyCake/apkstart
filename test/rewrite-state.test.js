@@ -188,19 +188,21 @@ test('a failed atomic replace leaves destination and existing .tmp untouched', (
   assert.ok([...temporaryFiles].every((file) => !fs.existsSync(file)));
 });
 
-test('legacy null debug and welcome use defaults without rewriting until save', (t) => {
+test('legacy null settings groups use defaults without rewriting until save', (t) => {
   const { store, settings } = fixture(t);
   store.ensureDirs();
-  const legacy = '{"debug":null,"welcome":null,"custom":42}';
+  const legacy = '{"debug":null,"welcome":null,"drivers":null,"custom":42}';
   fs.writeFileSync(settings, legacy);
   const view = store.getSettings();
   assert.deepEqual(view.debug, store.DEFAULT_SETTINGS.debug);
   assert.deepEqual(view.welcome, store.DEFAULT_SETTINGS.welcome);
+  assert.deepEqual(view.drivers, store.DEFAULT_SETTINGS.drivers);
   assert.equal(read(settings), legacy);
   store.saveSettings({ notifyOnInstall: false });
   const actual = JSON.parse(read(settings));
   assert.deepEqual(actual.debug, store.DEFAULT_SETTINGS.debug);
   assert.deepEqual(actual.welcome, store.DEFAULT_SETTINGS.welcome);
+  assert.deepEqual(actual.drivers, store.DEFAULT_SETTINGS.drivers);
   assert.equal(actual.custom, 42);
   assert.equal(actual.notifyOnInstall, false);
 });
@@ -228,7 +230,15 @@ function resetFixture(t) {
   fs.writeFileSync(userdata, 'guest fixture');
   const config = path.join(avdDir, 'config.ini');
   fs.writeFileSync(config, 'config fixture');
-  const runtime = { vmRunning: false, provisioner: { paths: () => ({ avdHome }) } };
+  const runtime = {
+    vmRunning: false,
+    provisioner: { paths: () => ({ avdHome }) },
+    client: () => ({ isOnline: async () => false }),
+    emulatorPorts: async () => [],
+    emulator: { cancelSnapshotSave() {} },
+    _activeApps: new Set(),
+    _tombstoned: new Set(),
+  };
   return {
     ...f, userdata, avdDir, config, runtime,
     reset: () => f.Runtime.prototype.resetAndroidData.call(runtime),
@@ -248,18 +258,79 @@ test('a corrupt catalogue blocks reset before touching the fixture guest', async
   assert.equal(read(apps), '{"apps":');
 });
 
-test('reset rechecks the catalogue after waiting for the runtime to stop', async (t) => {
-  const { apps, runtime, reset, userdata } = resetFixture(t);
-  fs.writeFileSync(apps, '{"apps":[]}');
-  runtime.vmRunning = true;
-  runtime.stop = async () => {
-    fs.writeFileSync(apps, '{"apps":');
-    runtime.vmRunning = false;
-  };
-  const result = await reset();
+function adoptedGuest(t, { runtime, avdDir }, { name = 'apkstart', onKill = () => {} } = {}) {
+  const owner = 424242;
+  const lockDir = path.join(avdDir, 'hardware-qemu.ini.lock');
+  fs.mkdirSync(lockDir);
+  fs.writeFileSync(path.join(lockDir, 'pid'), String(owner));
+  let online = true;
+  const commands = [];
+  t.mock.method(process, 'kill', (pid, signal) => {
+    assert.equal(pid, owner);
+    assert.equal(signal, 0); // This is only a process-existence check.
+    if (!online) throw Object.assign(new Error('process gone'), { code: 'ESRCH' });
+    return true;
+  });
+  runtime.client = (serial) => ({
+    isOnline: async () => online,
+    exec: async (argv) => {
+      commands.push([serial, argv]);
+      if (serial !== 'emulator-5556') throw new Error('not the owned console');
+      if (argv[1] === 'avd') return { stdout: `${name}\r\nOK\r\n` };
+      assert.deepEqual(argv, ['emu', 'kill']);
+      online = false;
+      onKill();
+      return { stdout: 'OK: killing emulator' };
+    },
+  });
+  runtime.emulatorPorts = async () => [5554, 5556];
+  runtime.pidOnPort = async (port) => (port === 5556 ? owner : 123);
+  return commands;
+}
+
+test('reset safely stops the verified adopted guest even with no local VM handle', async (t) => {
+  const f = resetFixture(t);
+  const commands = adoptedGuest(t, f);
+  assert.equal(f.runtime.vmRunning, false);
+  assert.equal(await f.runtime.client().isOnline(), true);
+  const result = await f.reset();
+  assert.equal(result.ok, true);
+  assert.deepEqual(commands, [
+    ['emulator-5556', ['emu', 'avd', 'name']],
+    ['emulator-5556', ['emu', 'kill']],
+  ]);
+  assert.equal(fs.existsSync(f.userdata), false);
+});
+
+test('reset refuses a guest online without ownership evidence', async (t) => {
+  const f = resetFixture(t);
+  const exec = t.mock.fn();
+  f.runtime.emulatorPorts = async () => [5558];
+  f.runtime.client = () => ({ isOnline: async () => true, exec });
+  const result = await f.reset();
+  assert.equal(result.ok, false);
+  assert.match(result.error, /无法确认/);
+  assert.equal(exec.mock.callCount(), 0);
+  assert.equal(read(f.userdata), 'guest fixture');
+});
+
+test('reset refuses a mismatched console, even when the AVD lock PID matches', async (t) => {
+  const f = resetFixture(t);
+  const commands = adoptedGuest(t, f, { name: 'AndroidStudio_AVD' });
+  const result = await f.reset();
+  assert.equal(result.ok, false);
+  assert.deepEqual(commands, [['emulator-5556', ['emu', 'avd', 'name']]]);
+  assert.equal(read(f.userdata), 'guest fixture');
+});
+
+test('reset rechecks the catalogue after the verified runtime stops', async (t) => {
+  const f = resetFixture(t);
+  fs.writeFileSync(f.apps, '{"apps":[]}');
+  adoptedGuest(t, f, { onKill: () => fs.writeFileSync(f.apps, '{"apps":') });
+  const result = await f.reset();
   assert.equal(result.ok, false);
   assert.match(result.error, /apps\.json/);
-  assert.equal(read(userdata), 'guest fixture');
+  assert.equal(read(f.userdata), 'guest fixture');
 });
 
 test('reset reports a catalogue publication error after fixture disk deletion', async (t) => {
@@ -290,3 +361,37 @@ test('reset updates a valid catalogue and preserves the other fixture AVD files'
   assert.deepEqual(store.getApps(), []);
   assert.deepEqual(JSON.parse(read(apps)), { retained: 'legacy', apps: [] });
 });
+
+test('legacy null catalogue loads empty and saves a real array with envelope keys', (t) => {
+  const { store, apps } = fixture(t);
+  store.ensureDirs();
+  const legacy = '{"apps":null,"extra":42}';
+  fs.writeFileSync(apps, legacy);
+  assert.deepEqual(store.getApps(), []);
+  assert.equal(read(apps), legacy);
+  assert.throws(() => store.saveApps(null), { code: 'STATE_INVALID_SHAPE', path: apps });
+  assert.equal(read(apps), legacy);
+  store.upsertApp({ package: 'org.example.sample' });
+  assert.deepEqual(JSON.parse(read(apps)), { apps: [{ package: 'org.example.sample' }], extra: 42 });
+});
+
+for (const blockedName of ['userdata-qemu.img', 'snapshots']) {
+  test(`reset leaves the catalogue intact when removing ${blockedName} fails`, async (t) => {
+    const f = resetFixture(t);
+    const before = '{"apps":[{"package":"org.example.sample"}]}';
+    fs.writeFileSync(f.apps, before);
+    const blocked = path.join(f.avdDir, blockedName);
+    if (blockedName === 'snapshots') fs.mkdirSync(blocked);
+    const rm = fs.rmSync;
+    t.mock.method(fs, 'rmSync', (target, opts) => {
+      if (target === blocked) throw Object.assign(new Error('fixture file locked'), { code: 'EPERM' });
+      return rm(target, opts);
+    });
+    const result = await f.reset();
+    assert.equal(result.ok, false);
+    assert.match(result.error, /应用清单未清除/);
+    assert.ok(result.error.includes(blockedName));
+    assert.equal(read(f.apps), before);
+    assert.ok(fs.existsSync(blocked));
+  });
+}

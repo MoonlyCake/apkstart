@@ -207,14 +207,15 @@ function ensureDirs() {
 }
 
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
-const SETTINGS_GROUPS = ['drivers', 'engine', 'runtime', 'display'];
-const NULLABLE_LEGACY_GROUPS = ['welcome', 'debug'];
+const SETTINGS_GROUPS = ['engine', 'runtime', 'display'];
+const NULLABLE_LEGACY_GROUPS = ['drivers', 'welcome', 'debug'];
 const isSettingsDocument = (value) => isRecord(value)
   && SETTINGS_GROUPS.every((key) => !Object.hasOwn(value, key) || isRecord(value[key]))
   && NULLABLE_LEGACY_GROUPS.every((key) => !Object.hasOwn(value, key) || value[key] === null || isRecord(value[key]));
 const isAppRecord = (value) => isRecord(value) && typeof value.package === 'string' && value.package.length > 0;
+const isAppList = (value) => Array.isArray(value) && value.every(isAppRecord);
 const isAppsDocument = (value) => isRecord(value)
-  && (!Object.hasOwn(value, 'apps') || (Array.isArray(value.apps) && value.apps.every(isAppRecord)));
+  && (!Object.hasOwn(value, 'apps') || value.apps === null || isAppList(value.apps));
 
 function deepMerge(base, patch) {
   const entries = new Map(Object.entries(base));
@@ -226,7 +227,7 @@ function deepMerge(base, patch) {
 }
 
 function settingsFrom(raw) {
-  // 旧版欢迎页和自检都把 null 当作未配置；在内存里恢复默认值即可。
+  // 旧版驱动、欢迎页和自检把 null 当作未配置；在内存里恢复默认值即可。
   const overrides = { ...raw };
   for (const key of NULLABLE_LEGACY_GROUPS) if (overrides[key] === null) delete overrides[key];
   const s = deepMerge(structuredClone(DEFAULT_SETTINGS), overrides);
@@ -254,16 +255,15 @@ function readSettings() {
 }
 
 function readApps() {
-  // 旧版把缺省 apps 视作空清单；保留文件原有的扩展字段。
+  // 旧版把缺省 apps 或 null 视作空清单；保留文件原有的扩展字段。
   const current = readJsonFile(APPS_FILE, {}, isAppsDocument);
-  if (!Object.hasOwn(current.value, 'apps')) current.value.apps = [];
+  if (!Object.hasOwn(current.value, 'apps') || current.value.apps === null) current.value.apps = [];
   return current;
 }
 
 function writeApps(apps, current) {
-  const next = { ...current.value, apps };
-  assertShape(APPS_FILE, next, isAppsDocument);
-  writeJsonFile(APPS_FILE, next, current);
+  assertShape(APPS_FILE, apps, isAppList);
+  writeJsonFile(APPS_FILE, { ...current.value, apps }, current);
 }
 
 /**

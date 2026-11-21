@@ -107,11 +107,10 @@ Explorer 双击 .apk
      ├ installer.launch()                                  installer.js:385
      │   ├ runtime.ensure()（见 2.3）
      │   ├ beforeStart → prepareForeground()（沉浸式/关动画/收锁屏）
-     │   ├ 应用不在当前运行时里？从备份 APK 自动重装        installer.js:404
-     │   ├ grantRuntimePermissions()
+     │   ├ 确认应用缺失后从缓存恢复（含拆分包，不自动授权）
      │   └ startApp() + launchPolicy（25s 内观察同一 PID 稳定 4s）
      │        确认退出才重试，最多三次；ADB 断连或超时不清数据
-     │        崩溃带 evidence(APP_CRASHED) → 自动切兼容镜像重来
+     │        明确的 ABI 不匹配 → 提示检查兼容镜像，不自动切换
      ├ appWin.embed()：SetParent 把模拟器窗口嵌进来        appwin.js:213
      └ runtime.beginApp(pkg)：停其他 App、提优先级、开同步/通知  engine.js:901
 ```
