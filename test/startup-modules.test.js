@@ -396,8 +396,35 @@ test('updates resume a cached job first, skip MSIX and dev, and only check after
   background.scheduleUpdates(options);
   assert.equal(events[0], 'find');
   assert.equal(events.at(-1), 'apply');
+  await Promise.resolve();
   assert.deepEqual(clock.delays(), [[900, false]]);
   await clock.advance(8000);
   assert.equal(events.at(-1), 'quit');
   assert.ok(!events.includes('check'));
+});
+
+test('startup does not quit when the pending update helper fails to start', async () => {
+  const clock = createClock();
+  const events = [];
+  const background = createStartupBackground({ log: () => {}, send: (_ch, val) => events.push(val), ...clock });
+  const job = { version: '1.2.3' };
+  background.scheduleUpdates({
+    packaged: true,
+    updater: {
+      findResumableJob: () => job,
+      apply: async (value, opts) => {
+        assert.equal(value, job);
+        assert.equal(opts.resume, true);
+        throw new Error('helper failed');
+      },
+      check: async () => ({ hasUpdate: false }),
+    },
+    setInfo() {},
+    requestQuit() { assert.fail('must leave the current app open'); },
+  });
+  await Promise.resolve();
+  assert.deepEqual(events, [{ stage: 'error', percent: 0, message: 'helper failed' }]);
+  assert.deepEqual(clock.delays(), [[8000, true]]);
+  await clock.advance(8000);
+  assert.deepEqual(events.at(-1), { hasUpdate: false });
 });

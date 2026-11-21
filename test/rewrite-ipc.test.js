@@ -40,7 +40,7 @@ test('every preload invoke has exactly one production handler, including the spl
     close: () => calls.push('closed'),
   });
   const expected = [...new Set([...exposes(src('preload.js')), ...exposes(src('splash-preload.js'))])].sort();
-  assert.equal(expected.length, 122);
+  assert.equal(expected.length, 124);
   assert.deepEqual([...main.keys()].sort(), expected);
   assert.equal(main.get('splash:version')(), 'fixture');
   assert.equal(main.get('splash:isFirstRun')(), true);
@@ -112,6 +112,95 @@ test('application invocation preserves options and failed installation responses
   assert.equal(await handlers.get('app:stop')({ sender: {} }, 'com.example.app', options), options);
   assert.equal(await handlers.get('apk:install')({ sender: {} }, 'fixture.xapk'), failure);
   assert.deepEqual(calls, [['com.example.app', options], ['fixture.xapk']]);
+});
+
+test('uninstall does not turn a failing Android result into successful cleanup', async () => {
+  const fail = { ok: false, guestRemoved: false, error: 'Android is offline' };
+  const effects = [];
+  const handler = handlerFor({
+    appOperations: { run(key, action) { effects.push(key); return action(); } },
+    live: { installer: { uninstall: async (pkg) => (effects.push(pkg), fail) } },
+  }, 'app:uninstall');
+  assert.equal(await handler({}, 'com.example.karaoke'), fail);
+  assert.deepEqual(effects, ['uninstall:com.example.karaoke', 'com.example.karaoke']);
+});
+
+test('keymap arguments survive preload and clearing uses an explicit persisted empty map', async () => {
+  const pkg = 'com.example.karaoke';
+  const mapping = { key: 'F', action: 'tap', x: 0.5, y: 0.25 };
+  let bridge;
+  const handlers = captureHandlers({
+    keymapEngine: { setMap: (p, m) => entries.push([p, m]) },
+    KEYMAP_PRESETS: { fixture: { mappings: [mapping] } },
+    store: { saveSettings: (patch) => saved.push(patch.engine.keymaps[pkg]) },
+  });
+  const entries = [];
+  const saved = [];
+  const require = () => ({
+    contextBridge: { exposeInMainWorld: (_name, api) => { bridge = api; } },
+    ipcRenderer: { invoke: (channel, ...args) => handlers.get(channel)({}, ...args) },
+  });
+  vm.runInNewContext(src('preload.js'), { require });
+  assert.deepEqual(await bridge.keymap.applyPreset(pkg, 'fixture'), { ok: true, mappings: [mapping] });
+  assert.equal((await bridge.keymap.setMap(pkg, [{ key: 'W', action: 'keyevent', code: '4' }])).ok, false);
+  assert.deepEqual(await bridge.keymap.setMap(pkg, []), { ok: true });
+  assert.deepEqual(saved, [[mapping], []]);
+  assert.deepEqual(entries, [[pkg, [mapping]], [pkg, []]]);
+});
+
+test('malformed persisted keymaps never create input commands', () => {
+  const { lookup, toCommand } = require('../src/core/keymap');
+  assert.equal(lookup([null, { key: true }, { key: 'T' }], 'T').key, 'T');
+  assert.equal(toCommand({ action: 'keyevent', code: '4' }), '');
+  assert.equal(toCommand({ action: 'tap', x: NaN, y: 0 }, 720, 1280), '');
+  assert.equal(toCommand({ action: 'swipe', x1: 0, y1: 0.5, x2: 1, y2: 0.5, duration: 100.5 }, 720, 1280), '');
+  assert.equal(toCommand({ action: 'keyevent', code: 4 }), 'input keyevent 4');
+});
+
+test('directory opening is limited to the effective runtime and AVD paths and reports OS errors', async () => {
+  const opened = [];
+  const handler = handlerFor({
+    live: { runtime: { provisioner: { paths() { return { root: 'sdk', avdHome: 'actual-data' }; } } } },
+    fs: { existsSync: () => true },
+    shell: { openPath: async (dir) => { opened.push(dir); return 'Permission denied'; } },
+  }, 'runtime:openDirectory');
+  assert.equal((await handler({}, 'untrusted-path')).ok, false);
+  assert.deepEqual(await handler({}, 'avd'), { ok: false, error: 'Permission denied' });
+  assert.deepEqual(opened, ['actual-data']);
+});
+
+test('disk space gating uses the AVD volume and never turns a requested expansion into auto mode', async (t) => {
+  const observed = [];
+  let freeMB = 100;
+  t.mock.method(require('../src/core/doctor'), 'freeDiskMB', (dir) => {
+    observed.push(dir);
+    return freeMB;
+  });
+  const handler = handlerFor({
+    live: { runtime: {
+      provisioner: { paths() { return { root: 'sdk', avdHome: 'actual-data' }; } },
+      resizeDataPartition: () => assert.fail('no usable space for expansion'),
+    } },
+  }, 'runtime:setDataSize');
+  assert.equal((await handler({}, 8)).ok, false);
+  freeMB = 8192;
+  assert.equal((await handler({}, 32)).ok, false);
+  assert.deepEqual(observed, ['actual-data', 'actual-data']);
+});
+
+test('Windows window mode and size use host-only layout, not Android rotation', async () => {
+  const calls = [];
+  const handler = handlerFor({
+    store: { saveSettings: (patch) => ({ display: { portrait: '720x1280', ...patch.display } }) },
+    portraitSize: () => ({ width: 720, height: 1280 }),
+    live: { appWin: {
+      isOpen: true,
+      applyWindowSize: async (...a) => { calls.push(a); return true; },
+      setLandscape: () => assert.fail('must not rotate or restart Android'),
+    } },
+  }, 'display:set');
+  assert.equal((await handler({}, { mode: 'fullscreen' })).windowLayoutApplied, true);
+  assert.deepEqual(calls, [[{ width: 720, height: 1280 }, { fullscreen: true }]]);
 });
 
 test('runtime restart is a single lifecycle operation and still sends progress', async () => {

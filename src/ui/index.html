@@ -348,14 +348,14 @@
             观感更统一、自带旋转按钮，但在缩放/旋转/切换应用时容易掉帧并出现黑边。改动在下次打开应用时生效。</span>
         </div>
         <div class="field" id="portraitField">
-          <label>竖屏画面大小</label>
+          <label>Windows 窗口大小</label>
           <select id="setPortrait">
-            <option value="720x1280">小 · 720 × 1280</option>
-            <option value="900x1600">中 · 900 × 1600</option>
-            <option value="1080x1920">大 · 1080 × 1920</option>
-            <option value="1440x2560">超大 · 1440 × 2560</option>
+            <option value="720x1280">小</option>
+            <option value="900x1600">中</option>
+            <option value="1080x1920">大</option>
+            <option value="1440x2560">超大</option>
           </select>
-          <span class="sub">窗口模式下可拖动边框任意缩放；这里调的是 Android 内部渲染尺寸，越小越省性能。</span>
+          <span class="sub">按当前屏幕可用空间缩放窗口，不改安卓画质、不重启安卓。</span>
         </div>
       </div>
 
@@ -428,6 +428,7 @@
               <option value="720x1280">均衡 · 720 × 1280</option>
               <option value="1080x1920">高清 · 1080 × 1920</option>
             </select>
+            <span class="sub">仅调整安卓内部画质，不改变 Windows 窗口大小。大屏也可保留 720p 以节省性能。</span>
           </div>
           <div>
             <label>安卓数据分区（应用与游戏装这里）</label>
@@ -958,6 +959,17 @@
 <script src="panels/settings-display.js"></script>
 <script src="panels/settings-storage.js"></script>
 <script src="panels/settings.js"></script>
+<dialog id="keymapDialog" class="keymap-dialog" aria-labelledby="keymapTitle">
+  <form method="dialog">
+    <h2 id="keymapTitle">按键映射</h2>
+    <label for="keymapPreset">选择预设</label>
+    <select id="keymapPreset"></select>
+    <div class="keymap-dialog-actions">
+      <button class="btn ghost" value="cancel" autofocus>取消</button>
+      <button class="btn primary" id="keymapApply" value="apply">保存</button>
+    </div>
+  </form>
+</dialog>
 <script src="app.js"></script>
 </body>
 </html>

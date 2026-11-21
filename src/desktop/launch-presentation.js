@@ -4,9 +4,12 @@ const { createWindowAttachment } = require('../application/window-attachment');
 
 function createLaunchPresentation({
   pkg, getWindow, isCurrent, ownsWindow, isDetached, attach, firstFrame,
-  finishSplash, mark, log, schedule = setTimeout, cancel = clearTimeout,
+  finishSplash, mark, log, canShowWait = () => true, schedule = setTimeout, cancel = clearTimeout,
 }) {
   let finishing = false;
+  let splashFinished = false;
+  let attached = false;
+  let animationElapsed = false;
   let framePending = false;
   let discovering = true;
   let discoveryTimer;
@@ -23,23 +26,40 @@ function createLaunchPresentation({
     await stopDiscovery();
     return isCurrent() && await attach(isCurrent);
   });
-  const animationTimer = schedule(finishAnimation, 24000);
+  const animationTimer = schedule(() => {
+    animationElapsed = true;
+    finishAnimation();
+  }, 24000);
   animationTimer?.unref?.();
 
-  function finishAnimation() {
-    if (finishing) return;
-    finishing = true;
-    cancel(animationTimer);
-    if (!ownsWindow()) return;
-    const window = getWindow();
-    if (window?.isOpen) window.setState({ ready: true, tip: '' });
+  function finishOwnedSplash() {
+    if (splashFinished || !ownsWindow()) return;
+    splashFinished = true;
     finishSplash();
   }
 
-  async function watchFirstFrame(attached) {
-    if (!attached || framePending || finishing || !isCurrent()) return;
+  function finishAnimation() {
+    if (finishing || !ownsWindow() || !isCurrent()) return;
+    if (!attached) {
+      // The animation deadline is not evidence of a native surface.
+      if (canShowWait()) getWindow()?.showWaitSurface?.({ activate: false });
+      finishOwnedSplash();
+      return;
+    }
+    finishing = true;
+    cancel(animationTimer);
+    const window = getWindow();
+    if (window?.isOpen) window.setState({ ready: true, tip: '' });
+    finishOwnedSplash();
+  }
+
+  async function watchFirstFrame(confirmed) {
+    if (!confirmed || !isCurrent()) return;
+    attached = true;
+    if (animationElapsed) return finishAnimation();
+    if (framePending || finishing) return;
     framePending = true;
-    let painted = true;
+    let painted = false;
     try {
       painted = await firstFrame(pkg, { timeoutMs: 20000 });
     } catch (_) { /* Semantics: a missing frame probe does not hold the splash indefinitely. */ }
@@ -61,7 +81,7 @@ function createLaunchPresentation({
       const next = () => { discoveryTimer = schedule(probe, 1500); };
       if (target.waitingForRestart) { next(); return; }
       tries += 1;
-      discoveryPending = target.openDetached().catch(() => false).then((ok) => {
+      discoveryPending = target.openDetached(active).catch(() => false).then((ok) => {
         if (!active()) return;
         if (ok) log(`pre-attach detached ok（第 ${tries} 次）`);
         else if (tries < 20) next();
@@ -73,7 +93,7 @@ function createLaunchPresentation({
   function surfaceEmbeddedWindow() {
     const target = getWindow();
     const shell = target?.win;
-    if (!target?.isOpen || isDetached()) return;
+    if (!target?.isOpen || (target.detachedMode ?? isDetached())) return;
     try {
       shell.show();
       shell.setAlwaysOnTop(true);
@@ -90,17 +110,18 @@ function createLaunchPresentation({
     startDiscovery,
     startEarly() { attachment.startEarly().then(watchFirstFrame); },
     async finishAttachment() {
-      const attached = await attachment.finish();
-      if (!isCurrent()) return false;
-      watchFirstFrame(attached);
+      const confirmed = await attachment.finish();
+      if (!isCurrent() || !confirmed) return false;
+      watchFirstFrame(confirmed);
       surfaceEmbeddedWindow();
-      if (!attached) finishAnimation();
-      return attached;
+      return true;
     },
     async abort() {
+      finishing = true;
+      cancel(animationTimer);
       await stopDiscovery();
       await attachment.settleEarly();
-      finishAnimation();
+      finishOwnedSplash();
     },
   };
 }

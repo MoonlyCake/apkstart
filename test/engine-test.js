@@ -208,8 +208,17 @@ function assert(cond, msg) { if (!cond) throw new Error(msg || '断言失败'); 
     assert(absUrl('https://example.com/a.zip') === 'https://example.com/a.zip', '绝对地址被改写');
   });
 
-  await test('解析出的 emulator / 系统镜像地址都是可下载的绝对 URL', async () => {
+  await test('本地 SDK 索引夹具产生 emulator 和系统镜像的绝对下载地址', async () => {
+    const { SOURCES } = require('../src/core/provision');
     const p = new Provisioner(TMP);
+    const indexes = new Map([
+      [SOURCES.sdkIndex, '<repo><remotePackage path="emulator"><archives><archive><complete><url>emulator-windows_x64-16847572.zip</url></complete></archive></archives></remotePackage></repo>'],
+      [SOURCES.playImgIndex, '<repo><remotePackage path="system-images;android-34;google_apis_playstore;x86_64"><archives><archive><complete><url>x86_64-34_r14.zip</url></complete></archive></archives></remotePackage></repo>'],
+    ]);
+    p._fetchText = async (url) => {
+      assert(indexes.has(url), `测试不得请求远程索引: ${url}`);
+      return indexes.get(url);
+    };
     const emuUrl = await p.resolveEmulatorUrl();
     const imgUrl = await p.resolveSysimgUrl();
     for (const u of [emuUrl, imgUrl]) {

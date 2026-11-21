@@ -116,6 +116,7 @@ async function parseBundle(filePath, assertSpace = () => {}) {
 
 const PID_ABSENT = '__APKSTART_PID_ABSENT__';
 async function probeAppPids(client, pkg, opts) {
+  if (client.appProcessIds) return client.appProcessIds(pkg, opts);
   // pidof exits 1 when no process matches. Print that fact on the Android
   // side so adb offline/unauthorized/timeouts can never look like an exit.
   const cmd = 'pidof ' + pkg + ' 2>&1; rc=$?; if [ "$rc" -eq 1 ]; then echo '
@@ -132,6 +133,23 @@ function compatRequired(cause) {
     '当前安卓镜像可能不兼容此应用的原生库。本次启动未切换镜像。请核对镜像安装状态、实际运行的镜像及 APK 架构；如果尚未安装兼容镜像并确有需要，请先备份安卓数据，再下载兼容镜像并重启运行时。',
     { cause },
   ), { code: 'APP_COMPAT_REQUIRED' });
+}
+
+async function assertGuestLease(runtime, guest) {
+  const sameGeneration = () => guest.generation === undefined || guest.generation === runtime.guestGeneration;
+  if (!sameGeneration() || (guest.revalidate && !await guest.revalidate()) || !sameGeneration()) {
+    throw new Error('安卓运行时已切换，未确认操作完成');
+  }
+}
+
+function hostPathKey(file) {
+  const value = path.resolve(file);
+  return process.platform === 'win32' ? value.toLowerCase() : value;
+}
+
+function managedFile(file, directory) {
+  return typeof file === 'string' && path.isAbsolute(file)
+    && hostPathKey(path.dirname(file)) === hostPathKey(directory);
 }
 
 async function restoreMissingCachedApp(runtime, client, pkg, app, onLog, assertReady) {
@@ -303,6 +321,7 @@ class Installer {
 
   /** 安装本体 + 落盘元数据 + 快捷方式；失败时带一次自动修复重试 */
   async finishInstall(rt, meta, filePath, bundle, onProgress) {
+    await assertGuestLease(this.runtime, rt);
     let client = rt.client;
     const existing = store.getApp(meta.package);
     // 装完之后旧 quickboot 快照里的磁盘状态就过期了，留着会导致「装好的应用重启后又不见了」
@@ -320,9 +339,11 @@ class Installer {
         const rt2 = await this.switchToCompat(onProgress);
         onProgress({ stage: 'install', message: '已切换兼容镜像，正在重新安装…' });
         try {
+          await assertGuestLease(this.runtime, rt2);
           if (bundle) await rt2.client.installMultiple(bundle.files);
           else await installSingleApk(rt2.client, filePath, { meta, onLog });
-          client = rt2.client;
+          rt = rt2;
+          client = rt.client;
         } catch (e2) {
           // 已经切到兼容镜像仍失败：这次必须说实话，别再说「正在重试」。
           const raw2 = (e2 && e2.message) || String(e2 || '');
@@ -338,6 +359,7 @@ class Installer {
         throw e;
       }
     }
+    await assertGuestLease(this.runtime, rt);
     bundle?.cleanup(); // 安装 / ABI 重试已结束，先释放分片空间，再备份原包。
     this.runtime.touch();
 
@@ -382,6 +404,7 @@ class Installer {
       if (resolved) launchActivity = resolved;
     } catch (_) { /* 保留 APK 解析结果 */ }
 
+    await assertGuestLease(this.runtime, rt);
     const app = {
       package: meta.package,
       label: meta.label,
@@ -531,20 +554,59 @@ class Installer {
   }
 
   async uninstall(pkg, { removeShortcut: rm = true } = {}) {
-    const app = store.getApp(pkg);
-    const rt = await this.runtime.ensure();
-    if (rt.ok) await rt.client.uninstall(pkg).catch(() => {});
-    if (app && rm) {
-      removeShortcut(app.shortcutPath);
-      removeShortcut(app.startMenuPath);
+    if (!validPackageName(pkg)) return { ok: false, code: 'INVALID_PACKAGE', error: '无效的安卓应用包名' };
+    try {
+      const rt = await this.runtime.ensure();
+      if (!rt?.ok) throw new Error(rt?.error || '安卓未就绪');
+      await assertGuestLease(this.runtime, rt);
+      const registered = await rt.client.isRegisteredPackage(pkg);
+      if (typeof registered !== 'boolean') throw new Error('Android 未返回明确的应用登记状态');
+      await assertGuestLease(this.runtime, rt);
+      if (registered) {
+        if (await rt.client.uninstall(pkg) !== true) throw new Error('Android 未确认卸载成功');
+        await assertGuestLease(this.runtime, rt);
+        if (await rt.client.isRegisteredPackage(pkg) !== false) throw new Error('Android 仍登记此应用');
+        await assertGuestLease(this.runtime, rt);
+      }
+    } catch (error) {
+      return { ok: false, code: 'GUEST_UNINSTALL_UNCONFIRMED',
+        error: `${error.message || '未确认安卓卸载成功'}。已保留本地记录和备份。` };
     }
+
+    let app;
+    const shared = new Set();
+    try {
+      app = store.getApp(pkg);
+      if (app) {
+        // Older versions can give same-named apps the same shortcut. Preserve shared assets.
+        for (const other of store.getApps().filter((entry) => entry.package !== pkg)) {
+          for (const file of [other.shortcutPath, other.startMenuPath, other.iconPath, other.icoPath, other.apkPath]) {
+            if (file) shared.add(hostPathKey(file));
+          }
+        }
+        // Commit catalog first so an I/O failure does not also destroy the user's backup.
+        store.removeApp(pkg);
+      }
+    } catch (error) {
+      return { ok: false, code: 'LOCAL_CATALOG_WRITE_FAILED', guestRemoved: true,
+        error: `安卓已卸载，但无法更新本地记录，已保留备份。${error.message || ''}` };
+    }
+    const leftovers = [];
     if (app) {
-      try { if (app.iconPath && fs.existsSync(app.iconPath)) fs.unlinkSync(app.iconPath); } catch (_) {}
-      try { if (app.icoPath && fs.existsSync(app.icoPath)) fs.unlinkSync(app.icoPath); } catch (_) {}
-      try { if (app.apkPath && fs.existsSync(app.apkPath)) fs.unlinkSync(app.apkPath); } catch (_) {}
+      if (rm) {
+        for (const file of new Set([app.shortcutPath, app.startMenuPath])) {
+          if (file && !shared.has(hostPathKey(file)) && !removeShortcut(file)) leftovers.push('快捷方式');
+        }
+      }
+      for (const [file, root, label] of [[app.iconPath, store.ICON_DIR, '图标'], [app.icoPath, store.ICON_DIR, '图标'],
+        [app.apkPath, store.APK_DIR, '安装包备份']]) {
+        if (!managedFile(file, root) || shared.has(hostPathKey(file))) continue;
+        try { fs.rmSync(file, { force: true }); } catch (_) { leftovers.push(label); }
+      }
     }
-    store.removeApp(pkg);
-    return true;
+    if (leftovers.length) return { ok: false, code: 'LOCAL_CLEANUP_INCOMPLETE', guestRemoved: true,
+      error: `安卓已卸载，但本地${[...new Set(leftovers)].join('、')}清理未完成。` };
+    return { ok: true };
   }
 
   async launch(pkg, {
@@ -585,56 +647,20 @@ class Installer {
       if (replaced?.ok === false) throw new Error(replaced.error || '无法切换安卓面板');
       if (replaced && replaced.client) rt = replaced;
     }
+    await assertGuestLease(this.runtime, rt);
     assertReady();
-    // 清掉旧版本可能残留在 /data 里的 wm size / density 覆盖与自动旋转设置。
-    // 这些覆盖是持久化的，不清理的话每次启动画面都会被转 90° 躺倒、留黑边、
-    // 鼠标点击也无法对应（用户反馈的「旋转黑边 / 未填满 / 点不动同意」）。
-    await rt.client.resetDisplayOverrides(!!(store.getSettings().display || {}).landscape).catch(() => {});
-    // 冷启动时顺手做过网络体检：没网就直接说清楚。否则用户只会看到「这个应用一直黑屏」，
-    // 完全想不到是虚拟机没网（联网页面拿不到数据就是一块黑底）。
-    // 关键修复：Wi-Fi 关联往往比 sys.boot_completed 晚几十秒，红果一进去就拉首页数据，
-    // 没网时首页渲染成整块黑底 —— 这就是「点同意并继续后一直黑屏」的真正原因。
-    // 所以拉起应用前先等网络就绪（最多 90 秒），宁可多等几秒也不要给用户一块黑屏。
-    // 拉起来之前先看一眼网络：**只等，不重启**。
-    // 之前这里调的是 ensureNetwork()，网络慢时会「停掉虚拟机 → 冷启动」，
-    // 结果 adb 设备在安装途中消失，直接变成「红果打不开」。
-    // 启动路径上绝不能做这种破坏性动作，等不到就先启动，大不了页面暂时加载慢。
-    if (rt.engine === 'emulator' || rt.engine === 'builtin') {
-      let net = await this.runtime.waitForNetwork({ onLog, timeoutMs: 20000 }).catch(() => null);
+    const builtin = rt.engine === 'emulator' || rt.engine === 'builtin';
+    // Runtime only uses a lease-scoped network probe/CLI, not Android Settings UI.
+    // Run it alongside display preparation; a limited wait should not strand offline apps.
+    const [, net] = await Promise.all([
+      rt.client.resetDisplayOverrides(!!(store.getSettings().display || {}).landscape).catch(() => {}),
+      builtin ? this.runtime.waitForNetwork({ onLog, timeoutMs: 7000 }).catch(() => null) : null,
+    ]);
+    await assertGuestLease(this.runtime, rt);
+    if (builtin) {
       assertReady();
-      if (net && net.ok) {
-        onLog(`虚拟机网络就绪（${net.ip || ''}）`);
-      } else {
-        // 等不到网络时，做一次**非破坏性**的补救：把「已保存但不会自动连」
-        // 的 AndroidWifi 点一下。它不重启虚拟机、不碰用户数据，只是拉起设置页
-        // 点一条已保存的热点，所以放在启动路径上是安全的。
-        // 实机上「虚拟机一直没网」绝大多数就是这个原因（见 emulator.repairWifi）。
-        onLog('虚拟机连不上 Wi-Fi，正在尝试重新连接…');
-        try {
-          // 注意：repairWifi 挂在 engine（this.runtime）上，不在 rt 上。
-          // rt 是 ensure() 的返回对象 { ok, client, engine, ... }，里面只有 client；
-          // 写成 rt.repairWifi 会是 undefined，一调就抛 TypeError 被 catch 吞掉，
-          // 表现就是「日志打了正在重连，但 1 毫秒后就说还是没网」。
-          const fixed = await this.runtime.repairWifi().catch(() => false);
-          if (fixed) {
-            net = await this.runtime.waitForNetwork({ onLog, timeoutMs: 15000 }).catch(() => null);
-            assertReady();
-            if (net && net.ok) {
-              onLog(`虚拟机网络已恢复（${net.ip || ''}）`);
-              // 关键：把「网络已连上」这个状态立刻存进快照。
-              // 不存的话下次开机还是从「没网」的旧快照恢复，每次都要再花十几秒重连。
-              // 用 forceSnapshotSave 是因为马上要启动应用，永远等不到「空闲」。
-              try { this.runtime.forceSnapshotSave?.(3000); } catch (_) { /* 存不下不影响启动 */ }
-            }
-          }
-        } catch (e) {
-          // 不要把异常吞得无声无息：这条日志就是「重连到底跑没跑」的唯一证据。
-          onLog(`自动重连 Wi-Fi 失败：${e.message}`);
-        }
-        if (!net || !net.ok) {
-          onLog('虚拟机网络还没就绪，先启动应用（联网页面可能稍后才加载出来）');
-        }
-      }
+      if (net?.ok) onLog(`虚拟机网络已验证${net.ip ? `（${net.ip}）` : ''}`);
+      else onLog('未确认安卓可以上网，仍会打开应用；联网页面可能不可用。');
     }
     assertReady();
     const settings = store.getSettings();
@@ -642,7 +668,8 @@ class Installer {
     assertReady();
     try {
       await this.launchPolicy({
-        start: () => {
+        start: async () => {
+          await assertGuestLease(this.runtime, rt);
           assertReady();
           return rt.client.startApp(pkg, app?.activity, {
             freeform: settings.freeform,
@@ -655,7 +682,8 @@ class Installer {
         // Starting an Activity can reset user-rotation; re-apply after each start.
         onStarted: () => {
           assertReady();
-          return rt.client.setOrientation(!!settings.display?.landscape, { sendBackKey: false }).catch(() => {});
+          // Display size/DPI are already prepared; reassert rotation after the app starts.
+          return rt.client.setOrientation(!!settings.display?.landscape, { sendBackKey: false, orientationOnly: true }).catch(() => {});
         },
         onLog,
         onMark,

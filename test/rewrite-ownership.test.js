@@ -112,7 +112,7 @@ test('Windows adb console extra CR does not hide the owned AVD or accept a forei
 
 function fakeRuntime() {
   const runtime = Object.create(Runtime.prototype);
-  Object.defineProperty(runtime, 'settings', { value: { engine: {}, runtime: { installed: false } } });
+  Object.defineProperty(runtime, 'settings', { value: { engine: { headless: false }, runtime: { installed: false } } });
   runtime.emuSerial = 'emulator-5554';
   runtime.emulator = { port: 5554, running: () => false };
   runtime.inspectEmulatorOwnership = async () => ({ state: 'absent' });
@@ -150,7 +150,10 @@ test('owned guest reuse requires package-ready guest and fresh proof before prep
   } });
   runtime.client = (serial) => { assert.equal(serial, client.serial); return client; };
   runtime.prepare = async (value) => { assert.equal(value, client); prepared++; };
-  assert.equal((await runtime.ensure()).ok, false);
+  const starting = await runtime.ensure();
+  assert.equal(starting.ok, false);
+  assert.equal(starting.code, 'ANDROID_STARTING');
+  assert.equal(prepared, 0);
   response = '1\r\npackage:/system/framework/framework-res.apk\r\n';
   stillOwned = false;
   assert.equal((await runtime.ensure()).ok, false);
@@ -159,6 +162,177 @@ test('owned guest reuse requires package-ready guest and fresh proof before prep
   assert.equal(runtime.emuSerial, client.serial);
   assert.equal(runtime.emulator.port, 5556);
   assert.equal(prepared, 1);
+});
+
+test('an owned native transport in authorization is reported without connecting a TCP alias', async () => {
+  const runtime = fakeRuntime();
+  const native = 'emulator-5556';
+  runtime.inspectEmulatorOwnership = async () => ({ state: 'owned', emulator: {
+    port: 5556, pid, serial: native, revalidate: async () => true,
+  } });
+  runtime.client = (serial) => {
+    assert.equal(serial, native);
+    return {
+      serial,
+      shell: async () => { throw new Error('device unauthorized'); },
+      deviceState: async () => 'unauthorized',
+      exec: async () => assert.fail('attempted to connect an alias instead of handling authorization'),
+    };
+  };
+
+  const result = await runtime.ensure();
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'ADB_UNAUTHORIZED');
+  assert.match(result.error, /允许 USB 调试/);
+  assert.equal(result.client, undefined);
+});
+
+test('offline native ADB is not replaced with a competing TCP transport', async () => {
+  const runtime = fakeRuntime();
+  const native = 'emulator-5556';
+  runtime.inspectEmulatorOwnership = async () => ({ state: 'owned', emulator: {
+    port: 5556, pid, serial: native, revalidate: async () => true,
+  } });
+  runtime.client = (serial) => {
+    assert.equal(serial, native);
+    return {
+      serial,
+      shell: async () => { throw new Error('device offline'); },
+      deviceState: async () => 'offline',
+      exec: async () => assert.fail('offline transport must not get a competing connection'),
+    };
+  };
+
+  const result = await runtime.ensure();
+  assert.equal(result.ok, false);
+  assert.notEqual(result.code, 'ADB_UNAUTHORIZED');
+  assert.equal(result.client, undefined);
+});
+
+test('authorization handoff prepares only the exact proven existing guest after approval', async () => {
+  const runtime = fakeRuntime();
+  const native = 'emulator-5556';
+  const trace = [];
+  const owned = { port: 5556, pid, serial: native, revalidate: async () => true };
+  let approved = false;
+  const client = {
+    serial: native,
+    shell: async (cmd) => {
+      assert.equal(cmd, 'getprop sys.boot_completed; pm path android');
+      if (!approved) throw new Error('device unauthorized');
+      return '1\npackage:/system/framework/framework-res.apk';
+    },
+    deviceState: async () => approved ? 'device' : 'unauthorized',
+    exec: async () => assert.fail('authorization handoff must keep the existing transport'),
+  };
+  runtime.inspectEmulatorOwnership = async () => ({ state: 'owned', emulator: owned });
+  runtime.client = (serial) => { assert.equal(serial, native); return client; };
+  runtime.presentAdbConsent = async (identity) => {
+    assert.equal(identity, owned);
+    trace.push('present');
+    approved = true;
+    return async () => { trace.push('close'); };
+  };
+  runtime.prepare = async (value) => {
+    assert.equal(value, client);
+    assert.ok(approved);
+    trace.push('prepare');
+  };
+
+  const result = await runtime.ensure();
+  assert.equal(result.ok, true);
+  assert.equal(result.client, client);
+  assert.deepEqual(trace, ['present', 'close', 'prepare']);
+  assert.ok(!runtime._adbConsentPending);
+});
+
+test('a previously proven guest cannot be adopted if the authorization window returns after ownership changes', async () => {
+  const runtime = fakeRuntime();
+  const native = 'emulator-5556';
+  let known = true;
+  let cleaned = false;
+  const owned = { port: 5556, pid, serial: native, revalidate: async () => known };
+  runtime.inspectEmulatorOwnership = async () => ({ state: 'owned', emulator: owned });
+  runtime.client = (serial) => {
+    assert.equal(serial, native);
+    return {
+      serial,
+      shell: async () => {
+        assert.ok(known, 'must not probe a new guest on the old serial');
+        throw new Error('device unauthorized');
+      },
+      deviceState: async () => 'unauthorized',
+    };
+  };
+  runtime.presentAdbConsent = async (identity) => {
+    assert.equal(identity, owned);
+    known = false;
+    return async () => { cleaned = true; };
+  };
+
+  const result = await runtime.ensure();
+  assert.equal(result.ok, false);
+  assert.equal(result.client, undefined);
+  assert.equal(cleaned, true);
+});
+
+test('existing guest authorization times out and closes a late-arriving window handle', async () => {
+  const runtime = fakeRuntime();
+  const owned = { port: 5556, pid, serial: 'emulator-5556', revalidate: async () => true };
+  let show;
+  let hidden = false;
+  runtime.presentAdbConsent = async () => new Promise((resolve) => { show = resolve; });
+  let probes = 0;
+  runtime.reuseProbe = async () => { probes += 1; return true; };
+
+  assert.equal(await runtime._waitForExistingAdbConsent(owned, {}, () => {}, { waitMs: 25 }), 'authorization-timeout');
+  assert.ok(!runtime._adbConsentPending);
+  assert.equal(runtime._existingAdbConsent, null);
+  show(async () => { hidden = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(hidden, true);
+  assert.equal(probes, 0);
+});
+
+test('status does not read ADB or report ready for an unknown guest on the expected port', async () => {
+  const runtime = fakeRuntime();
+  Object.defineProperty(runtime, 'backend', { value: { id: 'builtin', label: 'Builtin' } });
+  runtime.inspectEmulatorOwnership = async () => ({ state: 'unknown' });
+  runtime.provisioner = { checkEnv: async () => ({
+    emulator: { ok: true }, sysimg: { ok: true }, adb: { ok: true }, qemu: { ok: true },
+  }) };
+  runtime.client = () => assert.fail('status must not probe an unowned guest');
+  const status = await runtime.status();
+  assert.equal(status.ready, false);
+  assert.equal(status.deviceOnline, false);
+  assert.notEqual(status.phase, 'ready');
+});
+
+test('status drops the transport result if guest ownership changes during the ADB read', async () => {
+  const runtime = fakeRuntime();
+  Object.defineProperty(runtime, 'backend', { value: { id: 'builtin', label: 'Builtin' } });
+  runtime.provisioner = { checkEnv: async () => ({
+    emulator: { ok: true }, sysimg: { ok: true }, adb: { ok: true }, qemu: { ok: true },
+  }) };
+  let known = true;
+  let shellProbes = 0;
+  runtime._networkEndpoint = async () => ({
+    client: {
+      async deviceState() {
+        known = false;
+        return 'device';
+      },
+      async shell() {
+        shellProbes += 1;
+        return '1\npackage:/system/framework/framework-res.apk';
+      },
+    },
+    revalidate: async () => known,
+  });
+  const status = await runtime.status();
+  assert.equal(status.deviceOnline, false);
+  assert.equal(status.ready, false);
+  assert.equal(shellProbes, 0);
 });
 
 test('ownership lost during guest preparation does not publish a client', async () => {
@@ -181,13 +355,14 @@ test('late ADB recovery only connects to the independently verified paired port'
   const commands = [];
   let ownsAdb = false;
   runtime.inspectEmulatorOwnership = async () => ({ state: 'owned', emulator: {
-    port: 5556, serial: 'emulator-5556', revalidate: async ({ adbPort }) => adbPort && ownsAdb,
+    port: 5556, serial: 'emulator-5556', revalidate: async ({ adbPort } = {}) => !adbPort || ownsAdb,
   } });
   runtime.client = (serial) => ({ serial,
     async shell() {
       if (serial === 'emulator-5556') throw new Error('missing transport');
       return '1\npackage:/system/framework/framework-res.apk';
     },
+    async deviceState() { return serial === 'emulator-5556' ? 'no-device' : 'device'; },
     async exec(args) { commands.push(args); },
   });
   runtime.prepare = async () => {};
@@ -196,6 +371,32 @@ test('late ADB recovery only connects to the independently verified paired port'
   ownsAdb = true;
   assert.equal((await runtime.ensure()).client.serial, '127.0.0.1:5557');
   assert.deepEqual(commands, [['connect', '127.0.0.1:5557']]);
+});
+
+test('TCP recovery neither probes nor returns a replacement guest after losing the paired port', async () => {
+  const runtime = fakeRuntime();
+  let ownsAdb = true;
+  runtime.inspectEmulatorOwnership = async () => ({ state: 'owned', emulator: {
+    port: 5556, pid, serial: 'emulator-5556', revalidate: async ({ adbPort } = {}) => !adbPort || ownsAdb,
+  } });
+  runtime.client = (serial) => ({
+    serial,
+    async shell() {
+      assert.equal(serial, 'emulator-5556', 'must not send shell to replacement guest');
+      throw new Error('missing transport');
+    },
+    async deviceState() {
+      assert.equal(serial, 'emulator-5556', 'must not query replacement guest');
+      return 'no-device';
+    },
+    async exec(args) {
+      assert.deepEqual(args, ['connect', '127.0.0.1:5557']);
+      ownsAdb = false;
+    },
+  });
+  const result = await runtime.ensure();
+  assert.equal(result.ok, false);
+  assert.equal(result.client, undefined);
 });
 
 test('stop refuses an unscoped device and passes the verified identity to lower stop', async () => {

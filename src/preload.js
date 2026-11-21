@@ -1,7 +1,7 @@
 'use strict';
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
-const invoke = (channel, payload) => ipcRenderer.invoke(channel, payload);
+const invoke = (channel, ...args) => ipcRenderer.invoke(channel, ...args);
 
 contextBridge.exposeInMainWorld('apkstart', {
   info: () => invoke('app:info'),
@@ -40,6 +40,7 @@ contextBridge.exposeInMainWorld('apkstart', {
   runtimeResetData: () => invoke('runtime:resetData'),
   runtimeRepairNetwork: () => invoke('runtime:repairNetwork'),
   runtimeCheckNetwork: () => invoke('runtime:checkNetwork'),
+  runtimeOpenDirectory: (kind) => invoke('runtime:openDirectory', kind),
   leftoversScan: () => invoke('leftovers:scan'),
   leftoversClean: (items) => invoke('leftovers:clean', items),
   startupInfo: () => invoke('app:startupInfo'),
@@ -107,6 +108,7 @@ contextBridge.exposeInMainWorld('apkstart', {
   assocStatus: () => invoke('assoc:status'),
   assocRegister: () => invoke('assoc:register'),
   assocUnregister: () => invoke('assoc:unregister'),
+  assocOpenDefaultSettings: () => invoke('assoc:openDefaultSettings'),
 
   syncShared: () => invoke('share:sync'),
   openSharedDir: () => invoke('share:open'),

@@ -16,6 +16,7 @@ const store = require('./store');
 const { Provisioner } = require('./provision');
 const { EmulatorEngine } = require('./emulator');
 const doctor = require('./doctor');
+const { tabletDensityFor } = require('./display');
 const { isImageName } = require('./userdata');
 const container = require('./container');
 const { RuntimeLifecycle } = require('../application/runtime-lifecycle');
@@ -33,6 +34,12 @@ const QEMU_ADB_PORT = 5555;
 const QEMU_SERIAL = `127.0.0.1:${QEMU_ADB_PORT}`;
 const OWNER_UNKNOWN = '无法确认运行中的安卓模拟器属于 ApkStart。请先关闭 ApkStart 的安卓窗口后重试。';
 const ADB_CONSENT_MESSAGE = '请在安卓模拟器窗口点「允许 USB 调试」。确认后 ApkStart 会自动继续。';
+const NETWORK_STATUS_TTL = 15000;
+const ADB_CONSENT_TIMEOUT = 90000;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const disconnectedWifi = (r) => ['wifi-not-connected', 'no-default-network'].includes(r?.reason);
+const networkGuestKey = (guest, generation) => guest?.identity
+  ? `${guest.identity.pid}:${guest.identity.generation}` : guest?.process ?? generation;
 
 function waitForGuestExit(proc, timeout = 3000) {
   if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve(true);
@@ -68,8 +75,7 @@ class Runtime {
     this._freeformReady = false;
     this._client = null;
     this._bootLog = [];
-    // 最近一次网络体检结果。状态栏要显示「网络正常/未联网」，但状态是高频轮询的，
-    // 不能每次都去 guest 里跑一遍 shell；这里只缓存结论，过期（>5 分钟）就不采信。
+    // 最近一次经过归属校验的网络体检结果。只为状态栏短暂缓存，不替代启动前的实测。
     this._lastNetwork = null;
     this.emuSerial = EMU_SERIAL;   // 端口是动态挑的，serial 跟着变
     /**
@@ -158,13 +164,18 @@ class Runtime {
 
   /**
    * 给状态栏用的网络快照（最近一次体检结论）。
-   * 超过 5 分钟就不采信：中间可能断过网，宁可显示「未知」也不要骗用户说还行。
+   * 缓存不能比实际默认网络活得更久：过期直接显示「检查中/未知」。
    */
-  _networkSnapshot() {
+  _networkSnapshot(guest) {
     const n = this._lastNetwork;
-    if (!n) return null;
-    if (Date.now() - n.at > 5 * 60 * 1000) return null;
-    return { ok: n.ok, ip: n.ip, reason: n.reason };
+    const key = networkGuestKey(guest, this.guestGeneration);
+    if (n && n.ownerKey === key && Date.now() - n.at < NETWORK_STATUS_TTL) {
+      const { ownerKey, ...result } = n;
+      return result;
+    }
+    return this._netProbing?.key === key
+      ? { ok: false, checking: true, reason: 'checking' }
+      : { ok: false, reason: 'unknown' };
   }
 
   /**
@@ -172,26 +183,27 @@ class Runtime {
    * 状态栏要显示网络状态，但 status() 是高频轮询的，不能每次都去 guest 里跑 shell。
    * 所以第一次（或过期后）在后台跑一遍，结论缓存进 _lastNetwork，下一次轮询就能显示。
    */
-  _probeNetworkInBackground() {
+  _probeNetworkInBackground(guest) {
     const generation = this.guestGeneration;
-    if (this._netProbing === generation || this._networkTransitioning()) return;
+    const key = networkGuestKey(guest, generation);
+    if (this._netProbing?.key === key || this._networkTransitioning()) return;
     const n = this._lastNetwork;
-    if (n && Date.now() - n.at < 60000) return;  // 一分钟内刚查过，别重复
-    this._netProbing = generation;
-    this.checkNetwork()
+    if (n?.ownerKey === key && Date.now() - n.at < NETWORK_STATUS_TTL) return;
+    const probe = this._netProbing = { key };
+    this.checkNetwork({ guest })
       .then((r) => {
-        if (generation !== this.guestGeneration || this._networkTransitioning()) return;
-        this._lastNetwork = { ok: !!(r && r.ok), ip: (r && r.ip) || '', reason: (r && r.reason) || '', at: Date.now() };
+        if (generation !== this.guestGeneration || this._networkTransitioning() || this._netProbing !== probe
+          || r.reason === 'guest-changed') return;
+        this._lastNetwork = { ...r, at: Date.now(), ownerKey: key };
       })
-      .catch(() => { /* 查不到就保持原样，下一轮再试 */ })
-      .finally(() => { if (this._netProbing === generation) this._netProbing = undefined; });
+      .catch(() => { /* 陈旧快照自动过期，下一次轮询再试。 */ })
+      .finally(() => { if (this._netProbing === probe) this._netProbing = undefined; });
   }
 
   async status() {
     const backend = this.backend;
     const env = await this.provisioner.checkEnv();
     const s = this.settings;
-    const client = this.client();
     const result = {
       mode: s.engine.mode,
       backend: backend.id,
@@ -222,7 +234,7 @@ class Runtime {
       authorizationRequired: !!this._adbConsentPending,
       authorizationMessage: this._adbConsentPending ? ADB_CONSENT_MESSAGE : '',
       serial: this.emuSerial,
-      network: this._networkSnapshot(),
+      network: null,
       autoProfile: this.emulator.profile ? doctor.describeProfile(this.emulator.profile) : '',
       diagnosis: this.emulator.lastDiagnosis || null,
       attempts: this.emulator.attempts || [],
@@ -236,22 +248,45 @@ class Runtime {
       return result;
     }
 
-    if (result.authorizationRequired) return result;
+    if (result.authorizationRequired || result.vmStarting || result.installing) {
+      if (!result.authorizationRequired && !result.installing) result.phase = 'booting';
+      return result;
+    }
+    const generation = this.guestGeneration;
+    const current = () => generation === this.guestGeneration && !this._networkTransitioning();
     try {
-      result.deviceOnline = await client.deviceState() === 'device';
-      // ADB 的 transport 就绪不代表 Android 开机或包管理器已就绪。
-      result.ready = result.deviceOnline && !result.vmStarting && !result.installing
-        && await this.reuseProbe(client) === true && !this.vmStarting && !this.installing;
-      if (result.ready) {
+      const guest = current() ? await this._networkEndpoint() : null;
+      const valid = async () => current() && !!guest && await guest.revalidate() && current();
+      if (await valid()) {
+        const client = guest.client;
+        const state = await client.deviceState();
+        if (!await valid()) return { ...result, needsSetup: 'boot', phase: 'booting' };
+        result.vmRunning = true;
+        result.deviceOnline = state === 'device';
+        if (state === 'unauthorized') {
+          result.authorizationRequired = true;
+          result.authorizationMessage = ADB_CONSENT_MESSAGE;
+          result.phase = 'adb-unauthorized';
+          return result;
+        }
+        // 同名串口或 transport 在线都不能发布 ready；先验证当前 AVD，再验证 framework 与 PM。
+        result.ready = result.deviceOnline && await this.reuseProbe(client) === true
+          && await valid() && !this.vmStarting && !this.installing;
+        if (!result.ready) return { ...result, deviceOnline: result.deviceOnline && await valid(),
+          needsSetup: 'boot', phase: 'booting' };
         const [android, sdk, ff] = await Promise.all([
           client.androidVersion().catch(() => ''),
           client.sdkInt().catch(() => 0),
           client.shell('settings get global enable_freeform_support').catch(() => '0'),
         ]);
+        if (!await valid() || this.vmStarting || this.installing) {
+          return { ...result, ready: false, deviceOnline: false, phase: 'booting' };
+        }
         result.android = android;
         result.sdk = sdk;
         result.freeform = String(ff).trim() === '1' || this._freeformReady;
-        this._probeNetworkInBackground();
+        this._probeNetworkInBackground(guest);
+        result.network = this._networkSnapshot(guest);
       }
     } catch (e) {
       result.error = e.message;
@@ -443,7 +478,6 @@ class Runtime {
         headless: this.settings.engine.headless !== false,
         onLog,
         probe,
-        networkProbe: (startupSerial, options) => this._checkNetwork({ ...options, startupSerial }),
         stopOwnedAttempt: (port) => this.stopOwnedAttempt(port),
         onAuthorizationRequired,
       });
@@ -468,12 +502,15 @@ class Runtime {
       this.lastActivity = Date.now();
       this.emuSerial = identity.serial;
       const client = this.client(this.emuSerial);
+      if (!await identity.revalidate()) return { ok: false, code: 'OWNER_UNKNOWN', error: OWNER_UNKNOWN };
       await this.prepare(client);
+      if (!await identity.revalidate()) return { ok: false, code: 'OWNER_UNKNOWN', error: OWNER_UNKNOWN };
       const performance = this.settings.engine.priorityMode === 'performance';
       await this.setGuestPriority(performance ? 'normal' : 'below', identity).catch(() => {});
       // 快照改成「空闲时再存」：立刻存要写 1~3GB，会和用户刚点开的应用抢磁盘 I/O
       this._armSnapshotSave(20000);
-      return { ok: true, client, engine: 'emulator', serial: this.emuSerial, profile: st.profile, network: st.network || null };
+      return { ok: true, client, revalidate: () => identity.revalidate(), engine: 'emulator',
+        serial: this.emuSerial, profile: st.profile, network: st.network || null };
     } catch (e) {
       // 把自动重试/诊断结论原样抛给 UI，避免再包一层含糊的「启动失败」
       return { ok: false, error: e.message, diagnosis: e.diagnosis, report: e.report, attempts: e.attempts };
@@ -629,10 +666,12 @@ class Runtime {
           : 'Android 已引导但系统服务未就绪（可能停在首次开机设置界面，请在虚拟机窗口里完成向导）',
       };
     }
-    if (!await this.trackedQemuClient()) return { ok: false, error: 'QEMU 已断开，未连接到未知设备。' };
+    const revalidate = () => this._ownsQemuAdb(proc);
+    if (!await revalidate()) return { ok: false, error: 'QEMU 已断开，未连接到未知设备。' };
     await this.prepare(client);
+    if (!await revalidate()) return { ok: false, error: 'QEMU 已断开，未连接到未知设备。' };
     this.emuSerial = QEMU_SERIAL;
-    return { ok: true, client };
+    return { ok: true, client, revalidate };
   }
 
   /**
@@ -770,7 +809,7 @@ class Runtime {
     if (!shouldStop) this._retireGuest();
     const ownership = await this.inspectEmulatorOwnership();
     if (shouldStop) {
-      if (!shouldStop()) return false;
+      if (!await shouldStop()) return false;
       this._retireGuest();
     }
     const identity = ownership.emulator;
@@ -952,31 +991,89 @@ class Runtime {
   async adoptExisting({ onLog = () => {} } = {}) {
     const result = await this.inspectEmulatorOwnership();
     if (result.state === 'absent') return null;
-    if (result.state !== 'owned') return { ok: false, error: OWNER_UNKNOWN };
+    const unknown = { ok: false, code: 'OWNER_UNKNOWN', error: OWNER_UNKNOWN };
+    if (result.state !== 'owned') return unknown;
     const { emulator } = result;
+    if (!await emulator.revalidate()) return unknown;
     let client = this.client(emulator.serial);
     let probe = await this.reuseProbe(client);
+    const stateOf = (endpoint) => Promise.resolve().then(() => endpoint.deviceState()).catch(() => 'unknown');
+    if (!await emulator.revalidate()) return unknown;
+    let state = probe === null ? await stateOf(client) : 'device';
     let tcp = false;
     // adb server 可能晚于模拟器启动，非默认端口不会自动登记。只补连已证明属于
     // 同一 PID 的端口，不重启 adb server，也不用 TCP 别名发控制台命令。
-    if (probe === null && await emulator.revalidate({ adbPort: true })) {
+    if (probe === null && state === 'no-device' && await emulator.revalidate({ adbPort: true })) {
       tcp = true;
       const serial = `127.0.0.1:${emulator.port + 1}`;
       client = this.client(serial);
       await client.exec(['connect', serial], { withSerial: false, timeout: 4500 }).catch(() => {});
-      if (!await emulator.revalidate({ adbPort: true })) return { ok: false, error: OWNER_UNKNOWN };
+      if (!await emulator.revalidate({ adbPort: true })) return unknown;
       probe = await this.reuseProbe(client);
+      if (!await emulator.revalidate({ adbPort: true })) return unknown;
+      state = probe === null ? await stateOf(client) : 'device';
     }
-    if (probe !== true) {
-      return { ok: false, error: 'ApkStart 的安卓运行时尚未就绪。请稍后重试；若停在调试授权对话框，请先在安卓窗口确认。' };
+    const revalidate = () => emulator.revalidate({ adbPort: tcp });
+    if (!await revalidate()) return unknown;
+    if (state === 'unauthorized') {
+      const consent = await this._waitForExistingAdbConsent(emulator, client, onLog, { adbPort: tcp });
+      if (consent === 'owner-changed' || !await revalidate()) return unknown;
+      if (consent !== 'ready') {
+        return { ok: false, code: 'ADB_UNAUTHORIZED', reason: consent,
+          error: consent === 'authorization-cancelled' ? '已取消等待安卓调试授权。'
+            : '安卓尚未授权本机的 ADB 调试连接。请在安卓窗口确认「允许 USB 调试」。' };
+      }
+      probe = true;
     }
-    if (!await emulator.revalidate({ adbPort: tcp })) return { ok: false, error: OWNER_UNKNOWN };
+    if (probe === false) return { ok: false, code: 'ANDROID_STARTING', error: '安卓仍在引导，包管理器尚未就绪。' };
+    if (probe !== true) return { ok: false, code: 'ADB_OFFLINE', error: '已确认运行时归属，但 ADB 暂未连接。请等待安卓启动。' };
     await this.prepare(client);
-    if (!await emulator.revalidate({ adbPort: tcp })) return { ok: false, error: OWNER_UNKNOWN };
+    if (!await revalidate()) return unknown;
     this.emuSerial = client.serial;
     this.emulator.port = emulator.port;
     onLog(`已复用 ApkStart 的安卓运行时（${client.serial}）`);
-    return { ok: true, client, engine: 'emulator', reused: true };
+    return { ok: true, client, revalidate, engine: 'emulator', reused: true };
+  }
+
+  /** 已有实例的授权不使用 TCP 别名重连，不重启，也不把归属判断当作授权。 */
+  async _waitForExistingAdbConsent(identity, client, onLog, { adbPort = false, waitMs = ADB_CONSENT_TIMEOUT } = {}) {
+    if (this.settings.engine.headless === true || typeof this.presentAdbConsent !== 'function') return 'unauthorized';
+    const wait = new AbortController();
+    this._existingAdbConsent = wait;
+    const active = () => !wait.signal.aborted;
+    const revalidate = () => identity.revalidate({ adbPort });
+    const expired = new Promise((resolve) => wait.signal.addEventListener('abort', () => resolve(wait.signal.reason), { once: true }));
+    const timer = setTimeout(() => wait.abort('authorization-timeout'), waitMs);
+    let hide;
+    const close = async (fn) => { if (fn) await Promise.resolve().then(fn).catch(() => {}); };
+    const observe = async () => {
+      if (!await revalidate() || !active()) return 'owner-changed';
+      const release = await this.presentAdbConsent(identity);
+      if (typeof release !== 'function') return 'unauthorized';
+      if (!active()) { await close(release); return 'unauthorized'; }
+      hide = release;
+      if (!await revalidate() || !active()) return 'owner-changed';
+      this._adbConsentPending = true;
+      onLog('等待 ADB 授权：请在当前安卓窗口点「允许 USB 调试」。');
+      while (active()) {
+        if (!await revalidate() || !active()) return 'owner-changed';
+        if (await this.reuseProbe(client) === true && active()) {
+          return await revalidate() && active() ? 'ready' : 'owner-changed';
+        }
+        if (active()) await Promise.race([sleep(1000), expired]);
+      }
+      return 'unauthorized';
+    };
+    try { return await Promise.race([observe().catch(() => 'unauthorized'), expired]); }
+    finally {
+      clearTimeout(timer);
+      wait.abort('authorization-cancelled');
+      if (this._existingAdbConsent === wait) {
+        this._existingAdbConsent = null;
+        this._adbConsentPending = false;
+      }
+      await close(hide);
+    }
   }
 
   /** 一次 shell 同时验证真实连接、开机完成和包管理器就绪。 */
@@ -1002,6 +1099,10 @@ class Runtime {
   _retireGuest() {
     this._guestGeneration = this.guestGeneration + 1;
     this._lastNetwork = null;
+    this._client?.disposeInput?.();
+    this._client = null;
+    this._freeformReady = false;
+    this._chineseReady = false;
   }
 
   _networkTransitioning() {
@@ -1013,7 +1114,11 @@ class Runtime {
       ensure: async (options) => {
         const result = await this._ensureInner(options);
         // Publish the guest lease before the next queued operation can stop it.
-        return result?.ok ? { ...result, generation: this.guestGeneration } : result;
+        if (!result?.ok) return result;
+        const generation = this.guestGeneration;
+        if (!result.revalidate) return { ...result, generation };
+        const current = () => generation === this.guestGeneration && !this._networkTransitioning();
+        return { ...result, generation, revalidate: async () => current() && await result.revalidate() && current() };
       },
       stop: (options) => this._stopInner(options),
     });
@@ -1021,7 +1126,10 @@ class Runtime {
 
   ensure(options) { return this.lifecycle.ensure(options); }
 
-  stop(options) { return this.lifecycle.stop(options); }
+  stop(options) {
+    this._existingAdbConsent?.abort('authorization-cancelled');
+    return this.lifecycle.stop(options);
+  }
 
   restart({ graceful = true, onLog } = {}) {
     return this.lifecycle.restart({ graceful, onLog });
@@ -1055,15 +1163,18 @@ class Runtime {
   async _ensureInner({ onLog = () => {} } = {}) {
     const adopted = await this.adoptExisting({ onLog });
     if (adopted) return adopted;
-    if (this.emulator.running()) return { ok: false, error: OWNER_UNKNOWN };
+    if (this.emulator.running()) return { ok: false, code: 'OWNER_UNKNOWN', error: OWNER_UNKNOWN };
     if (this.vmProc) {
+      const proc = this.vmProc;
       const client = await this.trackedQemuClient();
       if (!client || await this.reuseProbe(client) !== true || this.installing) {
         return { ok: false, error: 'QEMU 尚未就绪，请先在安卓窗口完成启动或关闭后重试。' };
       }
       this.emuSerial = client.serial;
       await this.prepare(client);
-      return { ok: true, client, engine: 'builtin', reused: true };
+      const revalidate = () => this._ownsQemuAdb(proc);
+      if (!await revalidate()) return { ok: false, code: 'OWNER_UNKNOWN', error: OWNER_UNKNOWN };
+      return { ok: true, client, revalidate, engine: 'builtin', reused: true };
     }
 
     const s = this.settings;
@@ -1082,7 +1193,8 @@ class Runtime {
     if (env.emulator.ok && env.sysimg.ok) {
       try {
         const r = await this._boot({ env, onLog });
-        if (r.ok) return { ok: true, client: r.client, engine: 'emulator', profile: r.profile, network: r.network || null };
+        if (r.ok) return { ok: true, client: r.client, revalidate: r.revalidate, engine: 'emulator',
+          profile: r.profile, network: r.network || null };
         return {
           ok: false, error: r.error, env,
           diagnosis: r.diagnosis, report: r.report, attempts: r.attempts, exitCode: r.exitCode,
@@ -1106,7 +1218,7 @@ class Runtime {
 
     try {
       const r = await this._boot({ env, onLog });
-      if (r.ok) return { ok: true, client: r.client, engine: 'builtin' };
+      if (r.ok) return { ok: true, client: r.client, revalidate: r.revalidate, engine: 'builtin' };
       return { ok: false, error: r.error };
     } catch (e) {
       return { ok: false, error: e.message };
@@ -1139,13 +1251,19 @@ class Runtime {
    * 只在真的不一致时写 settings，正常情况下每 60 秒只有一次只读 shell。
    */
   async _healOrientation() {
-    if (!this.emulator || !this.emulator.running()) return;
-    const wantLand = !!this.settings.display.landscape;
+    if (!this.emulator?.running() || this._networkTransitioning()) return;
+    const generation = this.guestGeneration;
+    const display = this.settings.display || {};
+    const wantLand = !!display.landscape;
     const panelLand = typeof this.emulator.panelLandscape === 'function'
       ? this.emulator.panelLandscape() : null;
     // 面板方向和设置不一致 → 该重启，不是这里能修的（runLaunch.beforeStart 会处理）
     if (panelLand !== null && panelLand !== wantLand) return;
-    const c = this.client();
+    const guest = await this._emulatorGuest();
+    const current = () => generation === this.guestGeneration && !this._networkTransitioning();
+    const verified = async () => current() && !!guest && await guest.revalidate() && current();
+    if (!await verified()) return;
+    const c = guest.client;
     const out = await c.shell('dumpsys window displays', { timeout: 12000 }).catch(() => '');
     const init = /init=(\d+)x(\d+)/.exec(out);
     const cur = /cur=(\d+)x(\d+)/.exec(out);
@@ -1153,25 +1271,29 @@ class Runtime {
     const initLand = Number(init[1]) > Number(init[2]);
     const curLand = Number(cur[1]) > Number(cur[2]);
     if (initLand !== curLand) {
-      // 真躺倒了：重新锁方向 + 忽略应用方向请求 + 恢复 density
+      // 修正方向时不重写密度；用户的密度设置有独立的校验路径。
       this.log(`方向自愈：init=${init[1]}x${init[2]} cur=${cur[1]}x${cur[2]} 已躺倒，重新收敛`);
-      await c.resetDisplayOverrides(wantLand).catch(() => {});
-      await c.setOrientation(wantLand, { sendBackKey: false }).catch(() => {});
+      if (await verified()) {
+        await c.setOrientation(wantLand, { sendBackKey: false, orientationOnly: true }).catch(() => {});
+      }
       return;
     }
     // 没躺倒 ≠ 状态就对。平板排版依赖两个易丢的运行时状态：
     //   - mSetIgnoreOrientationRequest（横屏时必须为 true，否则面板会被应用方向带歪）
-    //   - wm density 覆盖为 190（720 宽 → sw606dp ≥ 600dp 才走平板排版）
+    //   - 平板密度按已运行面板的短边缩放；用户手选密度优先。
     // 这两项一旦丢失，会退回手机形态 —— 正是「平板模式不稳定」的表现。
     // 这里做一次轻量校验，缺哪个补哪个（都是幂等命令，正常情况不写）。
-    const densityWanted = (this.settings.display || {}).tabletMode !== false ? 190 : null;
+    const densityWanted = Number(display.density) > 0 || display.tabletMode !== false
+      ? tabletDensityFor(Number(init[1]), Number(init[2]), display.density) : null;
     let ignoreOk = true;
     if (wantLand) {
+      if (!await verified()) return;
       const win = await c.shell('dumpsys window | grep -oE "mSetIgnoreOrientationRequest=(true|false)"', { timeout: 8000 }).catch(() => '');
       ignoreOk = /mSetIgnoreOrientationRequest=true/.test(String(win));
     }
     let densityOk = true;
     if (densityWanted) {
+      if (!await verified()) return;
       const dens = await c.shell('wm density', { timeout: 6000 }).catch(() => '');
       // 「Override density: N」行存在且等于目标值才算对
       const m = /Override density:\s*(\d+)/.exec(String(dens));
@@ -1179,14 +1301,14 @@ class Runtime {
     }
     if (!ignoreOk || !densityOk) {
       this.log(`显示状态收敛：ignore-orientation=${ignoreOk} density=${densityOk} → 补齐`);
-      if (!ignoreOk) await c.shell('wm set-ignore-orientation-request true', { timeout: 8000 }).catch(() => {});
+      if (!ignoreOk && await verified()) await c.shell('wm set-ignore-orientation-request true', { timeout: 8000 }).catch(() => {});
       // density 只在**没有应用在前台**时才补。
       // 改密度会触发配置变更 + Activity 重建，而缓存了 DisplayMetrics 的应用
       // （墨读）会按旧密度重算一遍 dp，画面缩成左上角一小块、右边全是空白 ——
       // 用户看到的就是「墨读没有填满窗口」。有应用在跑时留给下一次启动路径，
       // installer.launch 的 resetDisplayOverrides 会在 am start 之前设好。
       if (!densityOk) {
-        if (this.sessionActivity?.isIdle !== false) {
+        if (this.sessionActivity?.isIdle !== false && await verified()) {
           await c.shell(`wm density ${densityWanted}`, { timeout: 8000 }).catch(() => {});
         } else {
           this.log(`density=${densityWanted} 缺失但有应用在前台：跳过，等下次启动时设置（避免画面缩水）`);
@@ -1206,12 +1328,7 @@ class Runtime {
       await this._healOrientation().catch(() => {});
       const limit = (s.engine.idleShutdownMinutes || 0) * 60000;
       if (!limit) return;
-      // 接管来的模拟器没有本地 proc 句柄，vmRunning 会是 false：
-      // 以前这里直接 return，导致容器永不回收。改成同时看 adb 是否在线。
-      if (!this.vmRunning) {
-        const online = await this.client().isOnline().catch(() => false);
-        if (!online) return;
-      }
+      // 接管来的实例也可回收，但必须通过真实归属校验，不能只看同名 ADB。
       await this._stopIfIdle(limit);
     }, 60000);
     if (this._watchdog.unref) this._watchdog.unref();
@@ -1224,14 +1341,17 @@ class Runtime {
       && !this.installing && this.sessionActivity?.isIdle !== false && Date.now() - lastActivity >= limit;
     if (!stillIdle()) return false;
     try {
-      const resumed = await this.client().runningPackages({ strict: true });
-      if (!stillIdle()) return false;
+      const guest = await this._networkEndpoint();
+      const permit = async () => stillIdle() && !!guest && await guest.revalidate() && stillIdle();
+      if (!await permit()) return false;
+      const resumed = await guest.client.runningPackages({ strict: true });
+      if (!await permit()) return false;
       if (resumed.some((pkg) => !IDLE_SYSTEM_PACKAGES.has(pkg))) {
         this.touch();
         return false;
       }
       // The probe is a snapshot; an app may have opened while this stop was queued.
-      return await this.lifecycle.maintain(() => stillIdle() ? this._stopInner({ shouldStop: stillIdle }) : false);
+      return await this.lifecycle.maintain(async () => await permit() ? this._stopInner({ shouldStop: permit }) : false);
     } catch (_) {
       return false; // Unreadable Android activity state is not an idle result.
     }
@@ -1278,7 +1398,16 @@ class Runtime {
     });
   }
 
-  usage() { return require('./layers').summary(this.provisioner.paths().root); }
+  usage() {
+    const { root, avdHome, sysImgRoot, avdDirConflict } = this.provisioner.paths();
+    return { ...require('./layers').summary(root, { avdHome, sysImgRoot }), avdDirConflict: avdDirConflict || null };
+  }
+
+  _avdPathConflict() {
+    const conflict = this.provisioner?.paths?.()?.avdDirConflict;
+    return conflict && { ok: false, code: 'AVD_DIR_CONFLICT', avdDirConflict: conflict,
+      error: `安卓数据仍在 ${conflict.current}，但设置请求 ${conflict.requested}。请先在设置中确认数据目录，未更改磁盘。` };
+  }
 
   /** 预览只读；实际回收时不能清理任何仍可能被运行时使用的文件。 */
   cleanup(options = {}) {
@@ -1293,6 +1422,10 @@ class Runtime {
     const blocked = { ok: false, error: '无法确认安卓运行时已关闭；请先停止运行时，再进行清理。' };
     let stoppedVm = false;
     if (apply) {
+      if (includeSnapshots) {
+        const conflict = this._avdPathConflict();
+        if (conflict) return conflict;
+      }
       if (busy()) return blocked;
       if (occupied()) {
         if (!includeSnapshots || !await this._stopInner()) return blocked;
@@ -1300,27 +1433,45 @@ class Runtime {
       }
       // stop 期间状态可能变化；这里重读后同步执行删除，不保留过期的盘点状态。
       if (busy() || occupied()) return blocked;
+      if (includeSnapshots) {
+        const conflict = this._avdPathConflict();
+        if (conflict) return conflict;
+      }
     }
-    const report = require('./layers').prune(this.provisioner.paths().root, {
-      apply, aggressive, keepSnapshots: !includeSnapshots,
+    const { root, avdHome, sysImgRoot } = this.provisioner.paths();
+    const report = require('./layers').prune(root, {
+      avdHome, sysImgRoot, apply, aggressive, keepSnapshots: !includeSnapshots,
     });
-    return { ...report, ok: true, apply, stoppedVm };
+    const failed = report.failed || [];
+    return { ...report, ok: !failed.length, apply, stoppedVm,
+      ...(failed.length ? { error: `有 ${failed.length} 项无法清理，未把部分失败报为成功。` } : {}) };
   }
 
   /** 停稳虚拟机与就地扩容共用生命周期队列；启动不能插在中间。 */
   resizeDataPartition(dataMB) {
     return this.lifecycle.maintain(async () => {
-      if (!dataMB) {
+      if (dataMB === 0) {
         store.saveSettings({ engine: { dataPartitionGB: 0 } });
         return { ok: true, auto: true, ...this.emulator.dataInfo() };
       }
+      if (!Number.isInteger(dataMB) || dataMB < 0) return { ok: false, error: '数据分区容量无效。' };
+      const conflict = this._avdPathConflict();
+      if (conflict) return conflict;
       const occupied = this.vmRunning || ['live', 'unknown'].includes(this.avdOwner().state);
       if (occupied && !await this._stopInner()) {
         return { ok: false, error: '无法确认旧安卓运行时已关闭，未调整数据分区。' };
       }
-      store.saveSettings({ engine: { dataPartitionGB: Math.round(dataMB / 1024) } });
+      const changed = this._avdPathConflict();
+      if (changed) return changed;
       const result = this.emulator.resizeDataPartition(dataMB);
-      return { ...result, stopped: occupied, ...this.emulator.dataInfo() };
+      const verification = () => ({ ...this.emulator.dataInfo(), ...result, stopped: occupied });
+      if (result.ok !== true) return verification();
+      try {
+        store.saveSettings({ engine: { dataPartitionGB: Math.round(dataMB / 1024) } });
+        return verification();
+      } catch (error) {
+        return { ...verification(), ok: false, error: `数据分区已调整，但未能保存容量设置：${error.message}` };
+      }
     });
   }
 
@@ -1334,6 +1485,8 @@ class Runtime {
    */
   resetAndroidData({ dataPartitionGB } = {}) {
     return this.lifecycle.maintain(async () => {
+      const conflict = this._avdPathConflict();
+      if (conflict) return conflict;
       const result = await this._resetAndroidData();
       if (!result.ok || dataPartitionGB === undefined) return result;
       try {
@@ -1460,221 +1613,157 @@ class Runtime {
     if (!startupSerial && this.vmProc) {
       const proc = this.vmProc;
       if (!await this._ownsQemuAdb(proc)) return null;
-      return { client: this.client(QEMU_SERIAL), revalidate: () => this._ownsQemuAdb(proc) };
+      return { process: proc, client: this.client(QEMU_SERIAL), revalidate: () => this._ownsQemuAdb(proc) };
     }
     return this._emulatorGuest(startupSerial);
   }
 
-  checkNetwork() { return this._checkNetwork(); }
+  checkNetwork(options = {}) { return this._checkNetwork({ verifyInternet: true, ...options }); }
 
-  async _checkNetwork({ startupSerial, waitMs, interval } = {}) {
+  async _checkNetwork({ startupSerial, waitMs, interval, verifyInternet, guest: leasedGuest, canContinue = () => true } = {}) {
     const generation = this.guestGeneration;
-    const current = () => generation === this.guestGeneration && (!!startupSerial || !this._networkTransitioning());
+    const current = () => canContinue() && generation === this.guestGeneration
+      && (!!startupSerial || !this._networkTransitioning());
     const replaced = { ok: false, reason: 'guest-changed' };
     if (!current()) return replaced;
-    const guest = await this._networkEndpoint(startupSerial);
+    const guest = leasedGuest || await this._networkEndpoint(startupSerial);
     if (!current()) return replaced;
     if (!guest) return { ok: false, reason: 'device-offline' };
     const canProbe = async () => current() && await guest.revalidate() && current();
-    const result = await this.emulator.checkNetwork(guest.client, { waitMs, interval, canProbe });
+    if (!await canProbe()) return replaced;
+    const result = await this.emulator.checkNetwork(guest.client, { waitMs, interval, verifyInternet, canProbe });
     return result.reason !== 'guest-changed' && await canProbe() ? result : replaced;
   }
 
-  async repairWifi() {
+  async repairWifi({ guest: leasedGuest, canContinue = () => true } = {}) {
     const generation = this.guestGeneration;
-    const current = () => generation === this.guestGeneration && !this._networkTransitioning();
+    const current = () => canContinue() && generation === this.guestGeneration && !this._networkTransitioning();
     if (!current()) return false;
-    const guest = await this._networkEndpoint();
+    const guest = leasedGuest || await this._networkEndpoint();
     if (!guest) return false;
     const canMutate = async () => current() && await guest.revalidate() && current();
     if (!await canMutate()) return false;
-    const repaired = await this.emulator.repairWifi(guest.client, { canMutate }).catch(() => false);
-    return repaired && await canMutate();
+    const key = networkGuestKey(guest, generation);
+    if (this._wifiRepairTask?.key === key) return this._wifiRepairTask.promise;
+    const task = this._wifiRepairTask = { key, promise: null };
+    task.promise = (async () => {
+      const repaired = await this.emulator.repairWifi(guest.client, { canMutate }).catch(() => false);
+      return repaired && await canMutate();
+    })();
+    try { return await task.promise; }
+    finally { if (this._wifiRepairTask === task) this._wifiRepairTask = null; }
   }
 
   /**
-   * 等待虚拟机联网。
-   *
-   * 实测：`sys.boot_completed` 只代表系统起来了，Wi-Fi 关联 + DHCP 还要再等
-   * 十几秒到一分多钟才会拿到 10.0.2.16。红果这类应用一进去就拉首页数据，
-   * 没网时页面渲染成一整块黑底（隐私弹窗是本地页面所以正常显示），
-   * 用户看到的就是「点同意并继续之后一直黑屏」。所以拉起应用前先等网络就绪。
-   *
-   * @returns {Promise<{ok:boolean,reason:string,ip?:string,gateway?:string}>}
+   * A fresh probe gates the network result, not the lifetime of an offline-capable app.
+   * On a true disconnected guest Wi-Fi, make at most one safe repair attempt in this guest.
    */
-  async waitForNetwork({ timeoutMs = 90000, onLog = () => {} } = {}) {
+  async waitForNetwork({
+    timeoutMs = 20000, onLog = () => {}, manualRepair = false, now = Date.now, pause = sleep,
+  } = {}) {
     const generation = this.guestGeneration;
     const changed = () => generation !== this.guestGeneration || this._networkTransitioning();
     const replaced = { ok: false, reason: 'guest-changed' };
-    const done = (r) => {
-      // An old ADB response can arrive after stop even if the next guest reuses that serial.
-      if (changed()) return replaced;
-      this._lastNetwork = { ok: !!(r && r.ok), ip: (r && r.ip) || '', reason: (r && r.reason) || '', at: Date.now() };
-      return r;
-    };
-    // 速度优化：热启动 / 旋转重启后，启动路径上会连续调用本函数
-    // （restartForOrientation 等一次、installer.launch 又等一次）。
-    // 网络就绪是稳定的，8 秒内刚确认过就直接用结论，省掉整轮 adb 往返
-    // （每次 isOnline + checkNetwork 都是两次 shell，实测要几百毫秒到 1 秒）。
-    // 窗口取 8 秒：足够覆盖连续调用，又不会在真的断网后长时间骗用户。
-    // 注意 stop() 会清掉 _lastNetwork，所以重启后不会误用关机前的旧状态。
-    if (changed()) return replaced;
-    const cached = this._lastNetwork;
-    if (cached && cached.ok && Date.now() - cached.at < 8000) return cached;
-    const t0 = Date.now();
-    let last = null;
-    let lastNotice = 0;
-    let offlineSince = 0;
-    let notConnectedStreak = 0;
-    while (Date.now() - t0 < timeoutMs) {
-      if (changed()) return replaced;
-      last = await this.checkNetwork().catch(() => null);
-      if (changed() || last?.reason === 'guest-changed') return replaced;
-      if (last?.reason === 'device-offline') {
-        // 刚重启的虚拟机会有一段时间连 adb 都还没上线，不能一看到 offline 就放弃
-        // （之前就是这样：重置数据后立刻返回 device-offline，判定「修复失败」）。
-        if (!offlineSince) offlineSince = Date.now();
-        if (Date.now() - offlineSince > 45000) return done({ ok: false, reason: 'device-offline' });
-      } else {
-        offlineSince = 0;
-        if (last && last.ok) return done(last);
-        // `wifi-not-connected` 是「Wi-Fi 压根没关联上」，不是「关联了还在等 DHCP」。
-        // 这种状态下死等超时纯属浪费：本轮开机它不会自己连上（实机上 AndroidWifi
-        // 常落成「已保存但不会自动连接」）。连续几次都是这个原因就提前收工，
-        // 让调用方赶紧去做真正有效的重连，别把 20 秒耗在原地。
-        // 取 3 次（≈9 秒）而不是 2 次：刚开机时 Wi-Fi 本来就要几秒关联，
-        // 判太早会去点设置页，反而打断它自己连上的过程。
-        if (last && last.reason === 'wifi-not-connected') {
-          notConnectedStreak += 1;
-          if (notConnectedStreak >= 3) return done(last);
-        } else {
-          notConnectedStreak = 0;
-        }
-      }
-      if (Date.now() - lastNotice > 10000) {
-        lastNotice = Date.now();
-        onLog(`正在等待安卓虚拟机联网… ${Math.round((Date.now() - t0) / 1000)}s`);
-      }
-      // eslint-disable-next-line no-await-in-loop
-      await new Promise((r) => setTimeout(r, 3000));
-    }
-    return done(last || { ok: false, reason: 'timeout' });
-  }
-
-  /**
-   * 修复「安卓虚拟机没有网络」。
-   * 绝大多数情况只是 Wi-Fi 关联比开机完成慢，重启并等一会儿就能好，
-   * **不需要**清掉用户数据；只有在等待超时后才提示用户走「重置安卓数据」。
-   *
-   * @returns {Promise<{ok:boolean, network?:object, boot?:boolean, error?:string}>}
-   */
-  /**
-   * 确保虚拟机联网：先等，等不到就冷启动一次（绕开可能「没网」的快照）再等。
-   * 这是「红果点同意后黑屏」的根治手段：应用一定要在网络就绪后才启动。
-   *
-   * @returns {Promise<{ok:boolean,reason?:string,ip?:string,gateway?:string}>}
-   */
-  async ensureNetwork({ onLog = () => {}, firstWaitMs = 25000, secondWaitMs = 90000 } = {}) {
-    let net = await this.waitForNetwork({ onLog, timeoutMs: firstWaitMs });
-    if (net?.ok || net?.reason === 'guest-changed') return net;
-    // 先试便宜的办法：把「已保存但不会自动连」的 AndroidWifi 点一下。
-    // 这一步比冷启动、比清数据都轻几个数量级——不重启虚拟机、不动用户数据。
-    // 实机上这才是绝大多数「虚拟机没网」的真正原因（见 emulator.repairWifi 注释）。
-    if (!this._wifiRepairTried) {
-      this._wifiRepairTried = true;
-      onLog('虚拟机连不上 Wi-Fi，正在尝试重新连接…');
-      try {
-        const fixed = await this.repairWifi();
-        if (fixed) {
-          net = await this.waitForNetwork({ onLog, timeoutMs: 15000 });
-          if (net && net.ok) {
-            onLog(`网络已恢复（${net.ip || ''}），正在保存可用状态，下次直接就好。`);
-            try { await this.saveOwnedSnapshot(90000); } catch (_) { /* ignore */ }
-            return net;
-          }
-        }
-      } catch (_) { /* 修复失败就走下面的重路径 */ }
-    }
-    // 冷启动很贵（几十秒），一个进程里只做一次：否则每次点开应用都要重来一遍，
-    // 用户感受到的就是「点开要等好几分钟」。
-    if (this._netColdBootTried) return net;
-    this._netColdBootTried = true;
-    onLog('网络仍未就绪，正在冷启动一次虚拟机（不加载快照）后重试…');
+    const timeoutResult = { ok: false, reason: 'timeout' };
+    const expired = Symbol('network-deadline');
+    const start = now();
+    const deadline = start + timeoutMs;
+    let timedOut = false;
+    let resolveDeadline;
+    const limit = new Promise((resolve) => { resolveDeadline = resolve; });
+    const timer = setTimeout(() => { timedOut = true; resolveDeadline(expired); }, timeoutMs);
+    const canContinue = () => !timedOut && !changed() && now() < deadline;
+    const within = (value) => Promise.race([value, limit]);
+    let last = timeoutResult;
     try {
-      const boot = await this.lifecycle.restart({
-        graceful: false, onLog, beforeBoot: () => this.emulator.forceColdBootOnNextStart(),
-      });
-      if (!boot.ok) return { ok: false, reason: boot.reason === 'stop-failed' ? 'owner-still-running' : 'boot-failed' };
-    } catch (e) {
-      return { ok: false, reason: e.message };
-    }
-    net = await this.waitForNetwork({ onLog, timeoutMs: secondWaitMs });
-    if (net && net.ok) {
-      // 网络正常后立刻存快照，下次恢复时网卡状态一起还原
-      try { await this.saveOwnedSnapshot(90000); } catch (_) { /* ignore */ }
-    }
-    return net;
-  }
+      if (changed()) return replaced;
+      if (!canContinue()) return timeoutResult;
+      const guest = await within(this._networkEndpoint());
+      if (changed()) return replaced;
+      if (guest === expired) return timeoutResult;
+      if (!guest) return { ok: false, reason: 'device-offline' };
 
-  /**
-   * 修复「安卓虚拟机没有网络」。
-   * 只重连 Wi-Fi 或冷启动。重置数据必须另走显式确认的操作。
-   *
-   * @returns {Promise<{ok:boolean, network?:object, boot?:boolean, wiped?:boolean, error?:string}>}
-   */
-  async repairNetwork({ onLog = () => {} } = {}) {
-    try {
-      // 阶梯式修复，从最便宜的开始，能不丢数据就绝不丢：
-      //   1) 重新连一次 Wi-Fi（不重启、不动数据）
-      //   2) 冷启动（不加载快照，仍不动数据）
-      onLog('正在修复虚拟机网络：先尝试重新连接 Wi-Fi（不影响已装应用）…');
-      if (!this.vmRunning) {
-        const boot0 = await this.ensure({ onLog });
-        if (!boot0 || !boot0.ok) {
-          return { ok: false, error: (boot0 && boot0.error) || '虚拟机没能启动', boot: false };
-        }
-      }
-      this._wifiRepairTried = true;
-      let fixed = false;
-      try { fixed = await this.repairWifi(); } catch (_) { fixed = false; }
-      if (fixed) {
-        const net1 = await this.waitForNetwork({ onLog, timeoutMs: 30000 });
-        if (net1 && net1.ok) {
-          try { await this.saveOwnedSnapshot(90000); } catch (_) { /* ignore */ }
-          onLog(`网络已恢复（${net1.ip || ''}），已存好可用快照。`);
-          return { ok: true, network: net1, boot: true, wiped: false };
-        }
-      }
-      // 第 2 步：冷启动，绕开可能「没网」的快照
-      onLog('重新连接没成功，正在冷启动一次虚拟机（不加载快照，数据保留）…');
-      const boot = await this.lifecycle.restart({
-        graceful: false, onLog,
-        beforeBoot: async () => {
-          await new Promise((r) => setTimeout(r, 2500));
-          this.emulator.forceColdBootOnNextStart();
-        },
-      });
-      if (!boot || !boot.ok) {
-        return { ok: false, error: (boot && boot.error) || '虚拟机没能启动', boot: false };
-      }
-      const network = await this.waitForNetwork({ onLog, timeoutMs: 90000 });
-      if (network && network.ok) {
-        try { await this.saveOwnedSnapshot(90000); } catch (_) { /* ignore */ }
-        onLog(`网络已恢复（${network.ip || ''}），已存好可用快照。`);
-        return { ok: true, network, boot: true, wiped: false };
-      }
-
-      // 自动诊断也会调用这个入口，不能把网络失败变成清空用户数据。
-      return {
-        ok: false, network, boot: true, wiped: false,
-        error: '网络仍未恢复，安卓数据未改动。请先检查 Windows 网络、防火墙或代理；确需重置时，请备份后单独选择「重置安卓数据」。',
+      const repairKey = networkGuestKey(guest, generation);
+      const done = (r) => {
+        if (changed()) return replaced;
+        if (!timedOut) this._lastNetwork = { ...r, at: Date.now(), ownerKey: repairKey };
+        return r;
       };
+      const sample = (verifyInternet) => within(
+        this.checkNetwork({ guest, verifyInternet, canContinue }).catch(() => ({ ok: false, reason: 'probe-failed' })),
+      );
+      let lastNotice = start;
+      let disconnectedSamples = 0;
+      let triedWifi = false;
+      let verifyInternet = false;
+      let fallbackTried = false;
+      while (canContinue()) {
+        let seen = await sample(verifyInternet);
+        if (changed() || seen?.reason === 'guest-changed') return replaced;
+        if (seen === expired) return last;
+        last = seen;
+        if (last.ok) return done(last);
+        verifyInternet = false;
+        if (last.reason === 'internet-unverified' && !fallbackTried && deadline - now() > 1000) {
+          // Older Android validation settings can leave an inconclusive verdict; probe once.
+          fallbackTried = verifyInternet = true;
+          continue;
+        }
+        disconnectedSamples = disconnectedWifi(last) ? disconnectedSamples + 1 : 0;
+        if (disconnectedSamples >= 2 && !triedWifi && (manualRepair || this._autoWifiRepairKey !== repairKey)) {
+          triedWifi = true;
+          this._autoWifiRepairKey = repairKey;
+          onLog('安卓没有接入默认网络，正在尝试重新连接模拟器自带的 AndroidWifi…');
+          const repaired = await within(this.repairWifi({ guest, canContinue }));
+          if (changed()) return replaced;
+          if (repaired === expired || !canContinue()) return last;
+          // A successful command is only a request. Probe again for usable internet.
+          seen = await sample(true);
+          if (changed() || seen?.reason === 'guest-changed') return replaced;
+          if (seen === expired) return last;
+          last = seen;
+          if (last.ok) return done(last);
+        }
+        if (last.reason === 'device-offline') break;
+        if (now() - lastNotice >= 10000) {
+          lastNotice = now();
+          onLog('仍在检查安卓默认网络与互联网连通性…');
+        }
+        if (canContinue()) await within(pause(Math.min(1250, deadline - now())));
+      }
+      return done(last);
+    } finally {
+      timedOut = true;
+      clearTimeout(timer);
+    }
+  }
+
+  /** 网络验证和连接修复都不应自动冷启动，更不应该清除数据。 */
+  async ensureNetwork({ onLog = () => {}, firstWaitMs = 20000 } = {}) {
+    return this.waitForNetwork({ onLog, timeoutMs: firstWaitMs });
+  }
+
+  async repairNetwork({ onLog = () => {}, timeoutMs = 20000 } = {}) {
+    try {
+      let booted = false;
+      if (!await this._networkEndpoint()) {
+        const boot = await this.ensure({ onLog });
+        if (!boot?.ok) return { ok: false, boot: false, wiped: false, code: boot?.code,
+          error: boot?.error || '虚拟机没能启动' };
+        booted = true;
+      }
+      const network = await this.waitForNetwork({ onLog, timeoutMs, manualRepair: true });
+      if (network.ok) return { ok: true, network, boot: booted, wiped: false };
+      return { ok: false, network, boot: booted, wiped: false,
+        error: network.reason === 'guest-changed' ? '安卓运行时已切换，已取消这次网络修复。'
+          : '未确认安卓虚拟机可访问互联网。没有重启运行时或清除安卓数据。' };
     } catch (e) {
       return { ok: false, error: e.message };
     }
   }
 
   dispose() {
+    this._existingAdbConsent?.abort('authorization-cancelled');
     if (this._watchdog) clearInterval(this._watchdog);
     if (this._client && this._client.disposeInput) this._client.disposeInput();
     // 后端适配层只有自带运行时；dispose 只做自己的清理，不会去动任何外部模拟器

@@ -46,22 +46,34 @@ async function runLaunchPolicy({
       throw error;
     }
     onMark('am start #' + attempt + ' ok');
-    await onStarted();
+    assertCurrent();
 
+    const observe = async (timeout) => {
+      try {
+        return { pids: await probe({ timeout }), error: null };
+      } catch (error) {
+        return { pids: null, error };
+      }
+    };
+    // The first read-only PID sample need not wait for guest display preparation.
+    // Do not publish that sample until preparation completes and the lease is checked.
     const deadline = now() + observeMs;
+    const [firstSample] = await Promise.all([
+      observe(Math.min(probeMs, observeMs)),
+      Promise.resolve().then(onStarted),
+    ]);
+    assertCurrent();
+
+    let first = firstSample;
     let sightings = new Map();
     let consecutiveAbsent = 0;
     let lastProbeError = null;
     let exited = false;
     while (now() < deadline) {
       assertCurrent();
-      let pids = null;
-      try {
-        pids = await probe({ timeout: Math.min(probeMs, Math.max(1, Math.floor(deadline - now()))) });
-        lastProbeError = null;
-      } catch (error) {
-        lastProbeError = error;
-      }
+      const { pids, error } = first || await observe(Math.min(probeMs, Math.max(1, Math.floor(deadline - now()))));
+      first = null;
+      lastProbeError = error;
       assertCurrent();
       const time = now();
       if (time > deadline) break;
@@ -89,7 +101,8 @@ async function runLaunchPolicy({
           return;
         }
       }
-      const pause = Math.min(pollMs, deadline - now());
+      const nextStabilityCheck = sightings.size ? Math.min(...sightings.values()) + stableMs : Infinity;
+      const pause = Math.min(pollMs, deadline - now(), nextStabilityCheck - now());
       if (pause > 0) await sleep(pause);
     }
 

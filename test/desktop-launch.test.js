@@ -2,8 +2,12 @@
 
 const { EventEmitter } = require('node:events');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const test = require('node:test');
+const vm = require('node:vm');
 const { createLaunchPresentation } = require('../src/desktop/launch-presentation');
+const { createDesktopShutdown } = require('../src/desktop/shutdown');
 const { createAgentSession } = require('../src/desktop/agent-session');
 const { WinAgent } = require('../src/core/agent');
 
@@ -15,7 +19,7 @@ function deferred() {
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
-function launchFixture({ detached = false, attach, firstFrame, openDetached }) {
+function launchFixture({ detached = false, attach, firstFrame, openDetached, canShowWait }) {
   const calls = [];
   const timers = new Map();
   let current = true;
@@ -30,6 +34,7 @@ function launchFixture({ detached = false, attach, firstFrame, openDetached }) {
   const window = {
     win: shell('original'), isOpen: true,
     openDetached: openDetached || (() => Promise.resolve(false)),
+    showWaitSurface: (options) => calls.push(['wait', options]),
     setState: (state) => calls.push(['state', state]),
   };
   owner = ownerAtStart = window.win;
@@ -39,6 +44,7 @@ function launchFixture({ detached = false, attach, firstFrame, openDetached }) {
     isCurrent: () => current && owner === ownerAtStart,
     ownsWindow: () => owner === ownerAtStart,
     isDetached: () => detached,
+    canShowWait,
     attach,
     firstFrame,
     finishSplash: () => calls.push(['splash']),
@@ -136,7 +142,7 @@ test('native discovery pauses during repaneling and abort cancels a pending retr
   assert.equal(probes, 1);
   fixture.closeSession();
   await presentation.abort();
-  assert.deepEqual(calls, [['state', { ready: true, tip: '' }], ['splash']]);
+  assert.deepEqual(calls, [['splash']]);
   assert.equal(timers.size, 0);
 });
 
@@ -157,6 +163,119 @@ test('startup timeout retires an incomplete animation once without waiting for t
   assert.deepEqual(calls.filter(([kind]) => kind === 'splash' || kind === 'state'),
     [['state', { ready: true, tip: '' }], ['splash']]);
   assert.equal(timers.size, 0);
+});
+
+test('animation deadline releases the cover, not readiness, when no surface exists', async () => {
+  for (const allowed of [true, false]) {
+    const { presentation, fire, calls } = launchFixture({
+      detached: true,
+      attach: async () => false,
+      firstFrame: async () => assert.fail('frame probe without a confirmed surface'),
+      canShowWait: () => allowed,
+    });
+    fire(24000);
+    assert.equal(await presentation.finishAttachment(), false);
+    await presentation.abort();
+    assert.deepEqual(calls, allowed ? [['wait', { activate: false }], ['splash']] : [['splash']]);
+  }
+});
+
+test('a detached preference does not suppress a verified embedded fallback', async () => {
+  let window;
+  const fixture = launchFixture({
+    detached: true,
+    attach: async () => { window.detachedMode = false; return true; },
+    firstFrame: () => Promise.resolve(false),
+  });
+  window = fixture.window;
+  assert.equal(await fixture.presentation.finishAttachment(), true);
+  assert.deepEqual(fixture.calls.slice(0, 4), [
+    ['original', 'show'], ['original', 'top', true], ['original', 'move'], ['original', 'focus'],
+  ]);
+  await fixture.presentation.abort();
+});
+
+test('desktop quit waits for native park and ignores repeat quit events while pending', async () => {
+  const parked = deferred();
+  const calls = [];
+  const shutdown = createDesktopShutdown({
+    stopBackground: () => calls.push('background'),
+    parkWindow: async () => { calls.push('park'); await parked.promise; calls.push('parked'); },
+    disposeAgent: () => calls.push('dispose'),
+    releaseRuntime: () => calls.push('release'),
+    closeDecoder: () => calls.push('decoder'),
+    quit: () => calls.push('quit'),
+    log: (error) => assert.fail(error),
+  });
+  const event = { preventDefault: () => calls.push('blocked') };
+  const completion = shutdown.beforeQuit(event);
+  await tick();
+  assert.deepEqual(calls, ['blocked', 'background', 'park']);
+  assert.equal(shutdown.beforeQuit(event), completion);
+  assert.equal(shutdown.ready, false);
+  parked.resolve();
+  await completion;
+  assert.equal(shutdown.ready, true);
+  shutdown.beforeQuit(event);
+  assert.deepEqual(calls, ['blocked', 'background', 'park', 'blocked', 'parked', 'dispose', 'release', 'decoder', 'quit']);
+});
+
+const mainSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
+
+test('a guest app with no window returns a presentation failure and no launched event', async () => {
+  const calls = [];
+  const ticket = { pkg: 'com.fixture.app' };
+  const anchor = mainSource.indexOf('async function launchOne(pkg)');
+  const end = mainSource.indexOf('/**', anchor);
+  const launch = vm.runInNewContext(`${mainSource.slice(anchor, end)}; launchOne`, {
+    quitting: false,
+    runtime: { guestGeneration: 17 },
+    appSessions: {
+      isCurrent: (value) => value === ticket,
+      waitForTurn: async () => {},
+      activate: async () => assert.fail('activate without a verified surface'),
+      discard: () => calls.push('discard'),
+    },
+    createLaunchPresentation: () => ({
+      startDiscovery: () => {}, finishAttachment: async () => false, abort: async () => {},
+    }),
+    mainWindow: null,
+    appWin: { waitForPark: async () => {}, close: async () => calls.push('close'), lastEmbedError: 'no-emu' },
+    attachAppWindow: () => {},
+    openAppWindow: async () => ticket,
+    desktopAgent: { arm: async () => {} },
+    installer: { launch: async () => ({ generation: 17, engine: 'emulator' }) },
+    startupSplash: null,
+    appLog: () => {},
+    showWindow: () => calls.push('manager'),
+    send: (channel) => calls.push(channel),
+  });
+  const result = await launch(ticket.pkg);
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'APP_WINDOW_UNAVAILABLE');
+  assert.deepEqual(calls, ['discard', 'close', 'manager', 'toast']);
+});
+
+test('bundled discovery does not rewrite manual 4096 MB, cores, GPU, or a valid external runtime', () => {
+  const anchor = mainSource.indexOf('function bootstrapBundledRuntime()');
+  const end = mainSource.indexOf('// 冒烟截图', anchor);
+  const bundled = 'C:\\package\\runtime';
+  for (const runtime of [bundled, 'D:\\custom\\resources\\runtime']) {
+    const writes = [];
+    const settings = { runtime: { dir: runtime }, engine: { memoryMB: 4096, cores: 6, gpuMode: 'swiftshader_indirect', autoMemory: false } };
+    const bootstrap = vm.runInNewContext(`${mainSource.slice(anchor, end)}; bootstrapBundledRuntime`, {
+      app: { isPackaged: true }, process: { execPath: 'C:\\package\\ApkStart.exe', resourcesPath: 'C:\\package\\resources' },
+      path: path.win32, bundledRuntimeDir: '',
+      fs: {
+        existsSync: (file) => file.startsWith(bundled) || file === path.win32.join(runtime, 'emulator', 'emulator.exe'),
+        readdirSync: (dir) => [dir.endsWith('system-images') ? 'android-34' : dir.endsWith('android-34') ? 'google_apis_playstore' : 'x86_64'],
+      },
+      store: { DATA_DIR: 'C:\\data', getSettings: () => settings, saveSettings: (patch) => writes.push(patch) },
+      appLog: () => {},
+    });
+    bootstrap();
+    assert.deepEqual(writes, []);
+  }
 });
 
 test('a replacement native agent is scoped before use; stale agents cannot affect it or route input', async () => {

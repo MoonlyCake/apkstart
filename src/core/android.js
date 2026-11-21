@@ -1,4 +1,5 @@
 'use strict';
+const { validPackageName } = require('./pkgname');
 /**
  * 安卓系统设置：不需要进安卓桌面，也不用装第三方工具，
  * 直接通过 adb 把常用的系统开关做成 ApkStart 设置页里的按钮。
@@ -49,14 +50,18 @@ class AndroidSettings {
     return rt.client;
   }
 
-  async _sh(commands) {
-    const c = await this.client();
-    const script = commands.map((x) => `${x}; `).join('');
+  async _sh(commands, client) {
+    const c = client ?? await this.client();
+    // Do not let a later successful command hide failure of an earlier setting write.
+    const script = commands.join(' && ');
     return c.shell(script, { timeout: 20000 });
   }
 
   /** 读一批当前状态，供设置页显示 */
   async status() {
+    // Opening Settings is a read: never start an Android VM just to fill in controls.
+    const guest = await this.runtime._networkEndpoint();
+    if (!guest || !await guest.revalidate()) throw new Error('安卓运行时未就绪');
     const out = await this._sh([
       'echo "wifi=$(settings get global wifi_on)"',
       'echo "air=$(settings get global airplane_mode_on)"',
@@ -65,18 +70,23 @@ class AndroidSettings {
       'echo "animw=$(settings get global window_animation_scale)"',
       'echo "sdk=$(getprop ro.build.version.sdk)"',
       `echo "vol=$(${volumeCmd('--get')} 2>/dev/null | grep -m1 'volume is')"`,
-    ]);
+    ], guest.client);
+    if (!await guest.revalidate()) throw new Error('安卓运行时已更换，请重试');
     const get = (k) => {
-      const m = new RegExp(`${k}=([^\\r\\n]*)`).exec(String(out));
+      const m = new RegExp(`^${k}=([^\\r\\n]*)`, 'm').exec(String(out));
       return m ? m[1].trim() : '';
     };
+    if (!/^[012]$/.test(get('wifi')) || !/^[01]$/.test(get('air')) || !/^\d+$/.test(get('sdk'))) {
+      throw new Error('尚未读到安卓系统设置');
+    }
     const anim = get('animw');
+    const vol = parseVolume(get('vol'));
     return {
-      wifi: get('wifi') === '1',
+      wifi: get('wifi') !== '0',
       airplane: get('air') === '1',
       fontScale: Number(get('font')) || 1,
       density: Number(get('density')) || 0,
-      volume: volumePercent(parseVolume(get('vol'))),
+      volume: vol ? volumePercent(vol) : null,
       animationsOff: anim === '0.0' || anim === '0',
       sdk: Number(get('sdk')) || 0,
     };
@@ -143,29 +153,36 @@ class AndroidSettings {
       'settings put global animator_duration_scale 0',
       'settings put global activity_manager_constants max_cached_processes=32',
     ];
+    if (pkg && !validPackageName(pkg)) return { ok: false, error: '无效的安卓包名' };
     if (pkg) cmds.push(`dumpsys deviceidle whitelist +${pkg}`);
     await this._sh(cmds);
     return { ok: true };
   }
 
   async open(action) {
-    const a = ACTIONS[action] || ACTIONS.settings;
+    const a = Object.hasOwn(ACTIONS, action) ? ACTIONS[action] : ACTIONS.settings;
     const c = await this.client();
-    await c.shell(`am start -a ${a}`, { timeout: 15000 });
+    const out = await c.shell(`am start -a ${a}`, { timeout: 15000 });
+    if (/^\s*(?:Error:|Error type|Exception)/im.test(out)) {
+      return { ok: false, error: '安卓没有打开所选设置页面。' };
+    }
     return { ok: true };
   }
 
   /** 应用运行时权限一览 + 授权 */
-  async permissions(pkg) {
-    const c = await this.client();
+  async permissions(pkg, client) {
+    if (!validPackageName(pkg)) throw new Error('无效的安卓包名');
+    const c = client ?? await this.client();
     const dump = await c.shell(`dumpsys package ${pkg}`, { timeout: 20000 });
+    if (!dump || /unable to find package|unknown package/i.test(dump)) throw new Error('安卓中找不到该应用');
     const lines = String(dump).split(/\r?\n/);
-    let inRuntime = false;
+    let headingIndent = null;
     const rows = [];
     for (const line of lines) {
-      if (/^\s*runtime permissions:/.test(line)) { inRuntime = true; continue; }
-      if (!inRuntime) continue;
-      if (/^\s{0,6}\S/.test(line)) break;
+      const heading = /^(\s*)runtime permissions:/.exec(line);
+      if (heading) { headingIndent = heading[1].length; continue; }
+      if (headingIndent == null || !line.trim()) continue;
+      if (/^\s*/.exec(line)[0].length <= headingIndent) break;
       const m = /^\s+([A-Za-z0-9_.]+):\s*granted=(\w+)/.exec(line);
       if (m) rows.push({ name: m[1], granted: m[2] === 'true' });
     }
@@ -173,14 +190,21 @@ class AndroidSettings {
   }
 
   async grantAll(pkg) {
+    if (!validPackageName(pkg)) return { ok: false, error: '无效的安卓包名' };
     const c = await this.client();
-    const rows = await this.permissions(pkg);
+    const rows = await this.permissions(pkg, c);
     const denied = rows.filter((r) => !r.granted).map((r) => r.name);
+    if (!denied.length) return { ok: true, granted: 0 };
     for (const p of denied) {
       // eslint-disable-next-line no-await-in-loop
       await c.shell(`pm grant ${pkg} ${p}`, { timeout: 8000 }).catch(() => {});
     }
-    return { ok: true, granted: denied.length };
+    const confirmed = new Set((await this.permissions(pkg, c)).filter((r) => r.granted).map((r) => r.name));
+    const granted = denied.filter((p) => confirmed.has(p)).length;
+    if (granted < denied.length) {
+      return { ok: false, granted, error: `有 ${denied.length - granted} 项权限未授予，请在安卓设置中检查。` };
+    }
+    return { ok: true, granted };
   }
 }
 

@@ -1,7 +1,9 @@
 'use strict';
 
+const { validPackageName } = require('../../core/pkgname');
+
 function createAppsHandlers({
-  appLog, dialog, fs, live, parseApk, runInstall, runLaunch, send, shell, stopApp, store,
+  appLog, appOperations, dialog, fs, live, parseApk, runInstall, runLaunch, send, shell, stopApp, store,
   wantLandscapeFor,
 }) {
   return {
@@ -10,8 +12,11 @@ function createAppsHandlers({
       store.getSettings(); // Keep existing validation of settings before listing.
       let running = [];
       try {
-        const c = live.runtime.client();
-        if (await c.isOnline()) running = await c.runningPackages();
+        const guest = await live.runtime._networkEndpoint();
+        if (guest && await guest.revalidate() && await guest.client.isOnline()) {
+          const packages = await guest.client.runningPackages();
+          if (await guest.revalidate()) running = packages;
+        }
       } catch (_) { /* 运行时未启动时忽略 */ }
       return apps
         .map((a) => ({
@@ -55,8 +60,8 @@ function createAppsHandlers({
     'app:stop': async (_e, pkg, opts = {}) => stopApp(pkg, opts),
 
     'app:uninstall': async (_e, pkg) => {
-      await live.installer.uninstall(pkg);
-      return { ok: true };
+      if (!validPackageName(pkg)) return { ok: false, error: '无效的安卓包名' };
+      return appOperations.run(`uninstall:${pkg}`, () => live.installer.uninstall(pkg));
     },
 
     'app:shortcut': async (_e, pkg) => {
@@ -68,10 +73,13 @@ function createAppsHandlers({
     },
 
     'app:clearData': async (_e, pkg) => {
-      const rt = await live.runtime.ensure();
-      if (!rt.ok) throw new Error(rt.error);
-      await rt.client.clearData(pkg);
-      return { ok: true };
+      if (!validPackageName(pkg)) return { ok: false, error: '无效的安卓包名' };
+      return appOperations.run(`clear-data:${pkg}`, async () => {
+        const rt = await live.runtime.ensure();
+        if (!rt.ok) return { ok: false, error: rt.error };
+        await rt.client.clearData(pkg);
+        return { ok: true };
+      });
     },
 
     'app:pin': async (_e, { pkg, pinned }) => {

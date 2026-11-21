@@ -22,6 +22,7 @@ const { resolveZipEntry } = require('../src/core/zip');
 const store = require('../src/core/store');
 const { findUninstaller, Updater } = require('../src/core/updater');
 const { Provisioner } = require('../src/core/provision');
+const { writeUpdatePayload } = require('./helpers/update-fixture');
 
 let passed = 0;
 let failed = 0;
@@ -135,10 +136,9 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'apkstart-hardening-'));
     const u = new Updater({ currentVersion: '0.5.3', exePath: exe, isPackaged: true, dataDir });
 
     const payload = path.join(u.updateDir, '0.5.4', 'payload');
-    fs.mkdirSync(payload, { recursive: true });
-    fs.writeFileSync(path.join(payload, 'ApkStart.exe'), 'new');
+    writeUpdatePayload(payload, '0.5.4');
     assert.equal(u.findResumableJob(), null, '没有就绪标记不应复用');
-    u._markPayloadReady(payload, '0.5.4');
+    await u._markPayloadReady(payload, '0.5.4');
     const job = u.findResumableJob();
     assert.ok(job && job.version === '0.5.4', '应找回 0.5.4 的续做任务');
 
@@ -150,19 +150,19 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'apkstart-hardening-'));
     fs.writeFileSync(u._readyFile(payload), JSON.stringify({ ...marker, version: '0.5.2' }));
     assert.equal(u.findResumableJob(), null, '标记版本不符不能复用');
   });
-  test('apply 脚本用字节数校验替换成功，且保留失败载荷、有双路径重启', () => {
+  await atest('apply 先校验所有暂存文件，并用错误退出码区分失败', async () => {
     const dataDir = path.join(TMP, 'upd-apply');
     const exe = path.join(dataDir, 'ApkStart.exe');
     fs.mkdirSync(dataDir, { recursive: true });
     fs.writeFileSync(exe, 'old');
     const u = new Updater({ currentVersion: '0.5.3', exePath: exe, isPackaged: true, dataDir });
     const payload = path.join(u.updateDir, '0.5.4', 'payload');
-    fs.mkdirSync(payload, { recursive: true });
-    fs.writeFileSync(path.join(payload, 'ApkStart.exe'), 'new-version-bytes');
+    writeUpdatePayload(payload, '0.5.4');
+    await u._markPayloadReady(payload, '0.5.4');
     const script = u.apply({ mode: 'zip', payload, version: '0.5.4' }, { spawn: false });
-    assert.ok(/\(Get-Item \$target\)\.Length -eq \$expected/.test(script), '必须按字节数验证新 exe');
-    assert.ok(/keeping payload for next launch/.test(script), '复制失败必须保留载荷供续做');
-    assert.ok(/Start-Process -FilePath/.test(script) && /cmd\.exe/.test(script), '重启必须有兜底路径');
+    assert.ok(script.includes('Assert-File $to $file.sha256 $file.size'), '必须校验所有暂存文件');
+    assert.ok(script.includes('if (!$applyOK) { exit 1 }'), '更新失败返回错误状态');
+    assert.ok(script.includes('Start-Process -FilePath $exe'), '更新后需重启');
   });
 
   console.log(`\n结果：${passed} 通过，${failed} 失败\n`);

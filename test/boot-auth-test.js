@@ -344,9 +344,10 @@ const adbDevices = (line) => `List of devices attached\n${line}\n`;
       androidVersion: async () => '11',
       sdkInt: async () => 30,
     });
+    rt._networkEndpoint = async () => ({ client: rt.client(), revalidate: async () => true });
     rt.vmStarting = true;
     assert.equal((await rt.status()).phase, 'booting');
-    assert.equal((await rt.status()).deviceOnline, true);
+    assert.equal((await rt.status()).deviceOnline, false); // in-flight guest has not been accepted
     assert.equal((await rt.status()).ready, false);
     rt._adbConsentPending = true;
     const pending = await rt.status();
@@ -356,6 +357,7 @@ const adbDevices = (line) => `List of devices attached\n${line}\n`;
     assert.equal(pending.ready, false);
     rt.vmStarting = false;
     rt._adbConsentPending = false;
+    assert.equal((await rt.status()).deviceOnline, true);
     assert.equal((await rt.status()).ready, false); // package manager not ready
     packageReady = true;
     assert.equal((await rt.status()).phase, 'ready');

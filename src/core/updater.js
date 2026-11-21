@@ -16,6 +16,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const { createHash } = require('crypto');
 const { spawn } = require('child_process');
 const { download, downloadParallel, sha256File } = require('./download');
 const { ZipFile, resolveZipEntry } = require('./zip');
@@ -25,9 +26,29 @@ const {
 } = require('./update-channel');
 const inc = require('./incremental');
 
-/** PowerShell 单引号字符串：内部的 ' 要写成 '' */
-function psq(s) {
-  return `'${String(s).replace(/'/g, "''")}'`;
+const READY = '.apkstart-ready';
+const APPLIED = '.apkstart-apply-attempted';
+const FAILURE = '.apkstart-apply-failure';
+const SHA256 = /^[a-f0-9]{64}$/i;
+
+function safeRelative(rel) {
+  return typeof rel === 'string' && rel.split('/').every((part) => part
+    && !/[<>:"|?*\\\x00-\x1f]/.test(part) && !/[. ]$/.test(part));
+}
+
+/** Update payloads must be regular, self-contained files; never follow junctions out of them. */
+function listPayloadFiles(payload, base = '', items = new Map()) {
+  const dir = path.join(payload, base);
+  if (!fs.lstatSync(dir).isDirectory()) throw new Error('更新载荷目录无效');
+  for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (!base && item.name === READY) continue;
+    const rel = base ? `${base}/${item.name}` : item.name;
+    if (!safeRelative(rel)) throw new Error('更新包文件名无效');
+    if (item.isDirectory()) listPayloadFiles(payload, rel, items);
+    else if (item.isFile()) items.set(rel, fs.lstatSync(path.join(payload, rel)).size);
+    else throw new Error('更新包包含非普通文件');
+  }
+  return items;
 }
 
 /** 在目录第一层里按名字（大小写不敏感）找文件，返回实际名字或 null */
@@ -184,17 +205,18 @@ class Updater {
         });
       },
     });
+    if (total > 0 && fs.statSync(file).size !== total) throw new Error('安装包长度与发布记录不符');
 
     if (isZip) {
       fs.rmSync(out, { recursive: true, force: true });
       fs.mkdirSync(out, { recursive: true });
       await this._extract(file, out);
-      this._markPayloadReady(out, it.version);
+      await this._markPayloadReady(out, it.version);
       this.onProgress({ stage: 'ready', percent: 100, message: '更新包已解压完成' });
       return { mode: 'zip', payload: out, version: it.version };
     }
     this.onProgress({ stage: 'ready', percent: 100, message: '安装包已下载完成' });
-    return { mode: 'setup', payload: file, version: it.version };
+    return { mode: 'setup', payload: file, version: it.version, sha256: await sha256File(file) };
   }
 
   /**
@@ -238,18 +260,14 @@ class Updater {
 
     const payload = path.join(dir, 'app-payload');
     // 上次下载解压成功但替换失败：直接复用（和完整包的 .apkstart-ready 同理）
-    if (this._payloadReady(payload, it.version, 'app')) {
+    if (this._payloadReady(payload, it.version, 'app', manifest.app.files)) {
       this.onProgress({ stage: 'ready', percent: 100, message: '已有下载好的增量包，直接复用' });
       return { mode: 'app', payload, version: it.version, manifest };
     }
     fs.rmSync(payload, { recursive: true, force: true });
     fs.mkdirSync(payload, { recursive: true });
     await this._extract(appFile, payload);
-    // 逐文件校验：防止不完整或不匹配的代码层落盘。
-    const bad = await inc.verifyExtracted({ payload, files: manifest.app.files });
-    if (bad.length) throw new Error(`增量代码包有 ${bad.length} 个文件校验不通过`);
-
-    this._markPayloadReady(payload, it.version, 'app');
+    await this._markPayloadReady(payload, it.version, 'app', manifest.app.files);
     this.onProgress({ stage: 'ready', percent: 100, message: '增量包已校验完成' });
     return { mode: 'app', payload, version: it.version, manifest };
   }
@@ -280,29 +298,67 @@ class Updater {
   }
 
   /** 载荷就绪标记文件：解压完整落盘后才写，供跨进程复用判断 */
-  _readyFile(payload) { return path.join(payload, '.apkstart-ready'); }
+  _readyFile(payload) { return path.join(payload, READY); }
 
-  _markPayloadReady(payload, version, mode = 'zip') {
-    try {
-      fs.writeFileSync(this._readyFile(payload), JSON.stringify({ channel: CHANNEL, version, at: Date.now(), mode }), 'utf8');
-    } catch (_) { /* 标记写不了就下次重下，不影响正确性 */ }
+  _checkPayloadStructure(payload, version, mode, entries) {
+    const pkg = `${inc.APP_DIR}/package.json`;
+    const m = JSON.parse(fs.readFileSync(path.join(payload, pkg), 'utf8'));
+    if (m.version !== version || !safeRelative(m.main) || !entries.get(`${inc.APP_DIR}/${m.main}`)) {
+      throw new Error('更新包缺少正确版本的应用入口');
+    }
+    if (mode === 'app') {
+      if ([...entries.keys()].some((p) => !p.startsWith(`${inc.APP_DIR}/`))) {
+        throw new Error('增量更新包含有应用目录以外的文件');
+      }
+    } else {
+      const exe = path.basename(this.exePath || 'ApkStart.exe');
+      if (!entries.get(exe) || !entries.get('resources.pak') || !entries.get('icudtl.dat')) {
+        throw new Error('更新包缺少 Electron 运行文件');
+      }
+    }
   }
 
-  _payloadReady(payload, version, mode = 'zip') {
-    try {
-      if (!fs.existsSync(this._readyFile(payload))) return false;
-      const m = JSON.parse(fs.readFileSync(this._readyFile(payload), 'utf8'));
-      if (m.channel !== CHANNEL || m.version !== version || m.mode !== mode) return false;
-      if (mode === 'app') {
-        // 增量载荷没有 exe；它的「主文件」是 resources/app/package.json
-        return fs.existsSync(path.join(payload, 'resources', 'app', 'package.json'));
+  async _markPayloadReady(payload, version, mode = 'zip', expected) {
+    const entries = listPayloadFiles(payload);
+    this._checkPayloadStructure(payload, version, mode, entries);
+    if (expected && Object.keys(expected).length !== entries.size) throw new Error('增量包文件数与清单不符');
+    const files = [];
+    for (const [rel, size] of entries) {
+      const sha256 = await sha256File(path.join(payload, rel));
+      if (expected && (expected[rel]?.size !== size || expected[rel]?.sha256?.toLowerCase() !== sha256)) {
+        throw new Error('增量包文件与发布清单不符');
       }
-      // 完整载荷：程序主 exe 必须在。没有说明解压中断/被杀软删过。
-      const exeName = path.basename(this.exePath || 'ApkStart.exe');
-      return !!findInDir(payload, exeName);
-    } catch (_) {
-      return false;
+      files.push({ rel, size, sha256 });
     }
+    fs.writeFileSync(this._readyFile(payload), JSON.stringify({ schema: 2, channel: CHANNEL, version, mode, files }), 'utf8');
+  }
+
+  _readPayload(payload, version, mode, expected) {
+    if (!fs.lstatSync(this._readyFile(payload)).isFile()) throw new Error('更新载荷清单不是普通文件');
+    const raw = fs.readFileSync(this._readyFile(payload));
+    const m = JSON.parse(raw);
+    if (m.schema !== 2 || m.channel !== CHANNEL || m.version !== version || m.mode !== mode || !Array.isArray(m.files)) {
+      throw new Error('更新载荷没有当前版本的完整文件清单');
+    }
+    if (expected && Object.keys(expected).length !== m.files.length) throw new Error('增量包文件数与清单不符');
+    const entries = listPayloadFiles(payload);
+    this._checkPayloadStructure(payload, version, mode, entries);
+    for (const { rel, size, sha256 } of m.files) {
+      if (!safeRelative(rel) || !SHA256.test(sha256) || !Number.isSafeInteger(size) || entries.get(rel) !== size) {
+        throw new Error('已下载的更新载荷不完整');
+      }
+      if (expected && (expected[rel]?.size !== size || expected[rel]?.sha256?.toLowerCase() !== sha256)) {
+        throw new Error('增量包文件与发布清单不符');
+      }
+      entries.delete(rel);
+    }
+    if (entries.size) throw new Error('更新载荷有不在文件清单中的内容');
+    return { digest: createHash('sha256').update(raw).digest('hex'), files: m.files };
+  }
+
+  _payloadReady(payload, version, mode = 'zip', expected) {
+    try { this._readPayload(payload, version, mode, expected); return true; }
+    catch (_) { return false; }
   }
 
   /**
@@ -317,6 +373,8 @@ class Updater {
         .filter((n) => versionFromTag(n) === n && cmpVer(n, this.current) > 0)
         .sort((a, b) => cmpVer(b, a));
       for (const v of versions) {
+        // An automatic restart must never replay a job whose helper has already been attempted.
+        if (fs.existsSync(path.join(this.updateDir, v, APPLIED))) continue;
         // 完整包载荷
         const payload = path.join(this.updateDir, v, 'payload');
         if (this._payloadReady(payload, v)) return { mode: 'zip', payload, version: v };
@@ -331,156 +389,100 @@ class Updater {
     return null;
   }
 
+  takeApplyFailure() {
+    try {
+      const versions = fs.readdirSync(this.updateDir)
+        .filter((v) => versionFromTag(v) === v && cmpVer(v, this.current) > 0)
+        .sort((a, b) => cmpVer(b, a));
+      for (const version of versions) {
+        const file = path.join(this.updateDir, version, FAILURE);
+        if (!fs.existsSync(file)) continue;
+        fs.unlinkSync(file);
+        return { version, error: `更新至 v${version} 未完成。可在设置中手动重试，详情见更新日志。` };
+      }
+    } catch (_) { /* Missing cache or an inaccessible marker must not block startup. */ }
+    return null;
+  }
+
   /**
-   * 生成并启动「替换 + 重启」脚本，然后调用方负责退出应用。
-   * @param {{mode:'zip'|'app'|'setup', payload:string, version:string}} job
-   * @param {{waitPid?:number, spawn?:boolean}} [opts] 测试时可指定别的 pid / 不真启动
+   * Start the staged Windows apply helper; the caller quits only after it has spawned.
+   * With spawn:false return the generated script for isolated tests.
    */
   apply(job, opts = {}) {
-    const exe = this.exePath;
-    const dir = this.installDir;
-    const logFile = path.join(this.updateDir, 'update.log');
-    fs.mkdirSync(this.updateDir, { recursive: true });
-    const waitPid = opts.waitPid || process.pid;
-
-    const lines = [
-      `$ErrorActionPreference = 'SilentlyContinue'`,
-      `$log = ${psq(logFile)}`,
-      `function Note($m) { Add-Content -Path $log -Value ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $m) }`,
-      `Note 'updater start'`,
-      `$applyOk = $true`,
-      // 等本进程真正退出（最多 90 秒），否则 exe/dll 仍被占用
-      `try { Wait-Process -Id ${waitPid} -Timeout 90 } catch { }`,
-      `Start-Sleep -Milliseconds 700`,
-    ];
-
-    if (job.mode === 'zip') {
-      // issue #98：旧脚本只测「目标 exe 是否存在」——它本来就存在，于是 copy
-      // 失败也被当成成功，接着删掉载荷、重启旧版本 → 下次开机又检测到更新 → 死循环。
-      // 改成：复制前先把目标 exe 改名成 .old，复制后确认新 exe 真的落盘且字节数
-      // 与载荷一致；失败则回滚 .old，并**保留载荷**交给下次启动续做。
-      const exeName = path.basename(exe);
-      lines.push(
-        `$src = ${psq(job.payload)}`,
-        `$dst = ${psq(dir)}`,
-        `$exeName = ${psq(exeName)}`,
-        `$target = Join-Path $dst $exeName`,
-        `$srcExe = Join-Path $src $exeName`,
-        `$expected = (Get-Item $srcExe).Length`,
-        `$backup = "$target.old"`,
-        `$hasBackup = $false`,
-        `if (Test-Path $target) {`,
-        `  try { Move-Item -LiteralPath $target -Destination $backup -Force; $hasBackup = $true } catch { Note "backup failed: $_" }`,
-        `}`,
-        `$ok = $false`,
-        `for ($i = 1; $i -le 12; $i++) {`,
-        `  Copy-Item -Path (Join-Path $src '*') -Destination $dst -Recurse -Force`,
-        `  if ((Test-Path $target) -and ((Get-Item $target).Length -eq $expected)) { $ok = $true; Note "copy pass $i ok"; break }`,
-        `  Note "copy pass $i failed, retry"; Start-Sleep -Milliseconds 600`,
-        `}`,
-        `if (-not $ok) {`,
-        `  Note 'copy FAILED - keeping payload for next launch'`,
-        `  $applyOk = $false`,
-        `  if ($hasBackup) { try { Move-Item -LiteralPath $backup -Destination $target -Force } catch {} }`,
-        `} else {`,
-        `  if ($hasBackup) { try { Remove-Item -LiteralPath $backup -Force } catch {} }`,
-        // 只有确认复制成功，才清掉载荷与就绪标记；否则留给 findResumableJob 续做。
-        `  try { Remove-Item -LiteralPath (Join-Path $src '.apkstart-ready') -Force } catch {}`,
-        `  Remove-Item -Path $src -Recurse -Force`,
-        `}`,
-      );
-    } else if (job.mode === 'app') {
-      // 增量替换：只覆盖 resources\app（我们的 JS / 资源 / node_modules）。
-      // Electron 外壳（exe / dll / locales）一律不动 —— 所以更新从 ~100MB 降到几 MB。
-      // 同样先改名备份 + 校验新 package.json 版本，失败回滚并保留载荷供续做。
-      const appRel = path.join('resources', 'app');
-      lines.push(
-        `$src = ${psq(job.payload)}`,
-        `$dst = ${psq(dir)}`,
-        `$appRel = ${psq(appRel)}`,
-        `$appDst = Join-Path $dst $appRel`,
-        `$appSrc = Join-Path $src $appRel`,
-        `$pkgDst = Join-Path $appDst 'package.json'`,
-        `$backup = "$appDst.old"`,
-        `$hasBackup = $false`,
-        `if (Test-Path $appDst) {`,
-        `  try { Move-Item -LiteralPath $appDst -Destination $backup -Force; $hasBackup = $true } catch { Note "app backup failed: $_" }`,
-        `}`,
-        `$ok = $false`,
-        `for ($i = 1; $i -le 12; $i++) {`,
-        `  New-Item -ItemType Directory -Force -Path $appDst | Out-Null`,
-        `  Copy-Item -Path (Join-Path $appSrc '*') -Destination $appDst -Recurse -Force`,
-        `  if (Test-Path $pkgDst) {`,
-        `    try {`,
-        `      $pv = (Get-Content -LiteralPath $pkgDst -Raw | ConvertFrom-Json).version`,
-        `      if ($pv -eq ${psq(job.version)}) { $ok = $true; Note "app copy pass $i ok"; break }`,
-        `    } catch { Note "app version check: $_" }`,
-        `  }`,
-        `  Note "app copy pass $i failed, retry"; Start-Sleep -Milliseconds 500`,
-        `}`,
-        `if (-not $ok) {`,
-        `  Note 'app copy FAILED - rollback and keep payload'`,
-        `  $applyOk = $false`,
-        // 增量替换真失败了（不是瞬时占用）：留个标记，下次启动强制走完整包，
-        // 避免resumable 无限重放同一个坏载荷 —— 这是 issue #98 死循环的增量版。
-        `  try { New-Item -ItemType File -Force -Path ${psq(path.join(this.updateDir, job.version, '.apkstart-force-full'))} | Out-Null } catch {}`,
-        `  if (Test-Path $appDst) { try { Remove-Item -LiteralPath $appDst -Recurse -Force } catch {} }`,
-        `  if ($hasBackup) { try { Move-Item -LiteralPath $backup -Destination $appDst -Force } catch {} }`,
-        `} else {`,
-        `  if ($hasBackup) { try { Remove-Item -LiteralPath $backup -Recurse -Force } catch {} }`,
-        `  try { Remove-Item -LiteralPath (Join-Path $src '.apkstart-ready') -Force } catch {}`,
-        `}`,
-      );
-    } else {
-      lines.push(
-        `Note 'run installer'`,
-        `$p = Start-Process -FilePath ${psq(job.payload)} -ArgumentList '/S' -PassThru -Wait`,
-        `Note ("installer exit " + $p.ExitCode)`,
-        `Start-Sleep -Milliseconds 800`,
-      );
+    if (!job || versionFromTag(job.version) !== job.version || cmpVer(job.version, this.current) <= 0
+        || !['zip', 'app', 'setup'].includes(job.mode)) {
+      throw new Error('更新任务无效或不比当前版本新');
     }
+    const dir = path.resolve(this.updateDir, job.version);
+    const payload = path.resolve(job.payload);
+    const mode = job.mode;
+    let expected;
+    let files;
+    if (mode === 'setup') {
+      if (path.dirname(payload) !== dir || !/^ApkStart[^\\/]+\.exe$/i.test(path.basename(payload))
+          || !SHA256.test(job.sha256 || '') || !fs.lstatSync(payload).isFile()) {
+        throw new Error('缺少已校验的安装包');
+      }
+      expected = job.sha256;
+    } else {
+      if (payload !== path.join(dir, mode === 'app' ? 'app-payload' : 'payload')) {
+        throw new Error('更新载荷目录与任务不符');
+      }
+      const proof = this._readPayload(payload, job.version, mode);
+      expected = proof.digest;
+      files = proof.files;
+    }
+    const waitPid = opts.waitPid ?? process.pid;
+    if (!Number.isSafeInteger(waitPid) || waitPid < 0) throw new Error('更新进程 ID 无效');
 
-    lines.push(
-      // issue #98：只 Start-Process 一次、失败就无声无息 → 用户看到「关了但没重启」。
-      // 加 -WorkingDirectory（便携版相对路径资源），失败再退回 cmd /c start，并写日志。
-      `if (Test-Path ${psq(exe)}) {`,
-      `  try {`,
-      `    Start-Process -FilePath ${psq(exe)} -WorkingDirectory ${psq(dir)} -ErrorAction Stop`,
-      `    Note 'relaunched via Start-Process'`,
-      `  } catch {`,
-      `    Note ("Start-Process failed: " + $_.Exception.Message + "; fallback to cmd start")`,
-      `    try {`,
-      `      Start-Process -FilePath 'cmd.exe' -ArgumentList '/c','start','""',${psq(exe)} -WorkingDirectory ${psq(dir)} -WindowStyle Hidden`,
-      `      Note 'relaunched via cmd start'`,
-      `    } catch { Note ("cmd start failed: " + $_.Exception.Message) }`,
-      `  }`,
-      `} else { Note 'relaunch skipped: exe missing' }`,
-      `Note 'updater done'`,
-      `Start-Sleep -Milliseconds 400`,
-      // 复制失败时保留整个版本目录（载荷 + 就绪标记），交给下次启动续做；
-      // 否则会前脚说「保留载荷」后脚又把它删掉，续做永远拿不到文件。
-      `if ($applyOk) { Remove-Item -Path ${psq(path.join(this.updateDir, job.version))} -Recurse -Force }`,
-      `else { Note 'version dir kept for resume on next launch' }`,
-      // 收尾的清理语句失败（目录已被删/被杀软占用）不应该让调用方以为更新失败
-      `exit 0`,
-    );
-
-    const script = lines.join('\r\n');
+    const spec = {
+      install: fs.realpathSync(this.installDir), exe: path.basename(this.exePath),
+      mode, payload, expected, waitPid, version: job.version,
+      failure: path.join(dir, FAILURE),
+      log: path.join(this.updateDir, 'update.log'),
+      forceFull: path.join(dir, '.apkstart-force-full'),
+      relaunch: opts.spawn !== false || opts.relaunch !== false,
+    };
+    const config = Buffer.from(JSON.stringify(spec), 'utf8').toString('base64');
+    const script = "$spec = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('"
+      + config + "')) | ConvertFrom-Json\r\n"
+      + fs.readFileSync(path.join(__dirname, 'update-apply.ps1'), 'utf8');
     fs.writeFileSync(path.join(this.updateDir, 'apply.log.ps1'), script, 'utf8');
     if (opts.spawn === false) return script;
-    // -EncodedCommand 走 UTF-16LE base64：脚本里出现中文路径也不会被 GBK 解码搞坏
+    if (this._applyPromise) throw new Error('更新已交给安装程序，正在等待退出');
+
+    // Record the attempt before letting a helper or app restart race another launch.
+    fs.writeFileSync(path.join(dir, APPLIED), '', { flag: opts.resume ? 'wx' : 'w' });
+    fs.rmSync(spec.failure, { force: true });
     const b64 = Buffer.from(script, 'utf16le').toString('base64');
     const ps = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-    // 这里**不能**用 detached：某些安全软件 / 沙箱策略会直接拦掉「分离的控制台进程」，
-    // 表现为脚本一声不响地根本没跑（更新界面卡在「正在替换程序并重启」）。
-    // Windows 上父进程退出并不会杀掉普通子进程，所以用「普通子进程 + unref」同样能在
-    // 我们退出之后继续干活，兼容性还更好。
-    const child = spawn(ps, [
-      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-      '-WindowStyle', 'Hidden', '-EncodedCommand', b64,
-    ], { stdio: 'ignore', windowsHide: true });
-    child.unref();
-    return true;
+    this._applyPromise = (async () => {
+      // Reject corrupted cached content before asking the running app to exit.
+      try {
+        for (const file of files || [{ rel: '', sha256: expected }]) {
+          if (await sha256File(path.join(payload, file.rel)) !== file.sha256.toLowerCase()) {
+            throw new Error('更新包校验失败，请重新下载安装包');
+          }
+        }
+      } catch (err) {
+        if (mode === 'app') fs.writeFileSync(spec.forceFull, '');
+        else if (mode === 'zip') fs.rmSync(this._readyFile(payload), { force: true });
+        throw err;
+      }
+      await new Promise((resolve, reject) => {
+        const child = spawn(ps, [
+          '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+          '-WindowStyle', 'Hidden', '-EncodedCommand', b64,
+        ], { stdio: 'ignore', windowsHide: true });
+        child.once('spawn', () => { child.unref(); resolve(true); });
+        child.once('error', reject);
+      });
+      return true;
+    })().catch((err) => {
+      this._applyPromise = null;
+      throw err;
+    });
+    return this._applyPromise;
   }
 
   /** 打不开 UI 的场景（或没有可自动安装的资产）时，把发布页丢给浏览器 */

@@ -118,7 +118,7 @@ async function findOwnedEmulator({ readOwner, readListeners, consoleClient }) {
       } catch (_) { return false; }
     };
     if (await readConsoleName(client) !== AVD_NAME || !(await revalidate())) return { state: 'unknown' };
-    return { state: 'owned', emulator: { port, pid: owner.pid, serial, client, revalidate } };
+    return { state: 'owned', emulator: { port, pid: owner.pid, generation: owner.generation, serial, client, revalidate } };
   } catch (_) {
     return { state: 'unknown' };
   }

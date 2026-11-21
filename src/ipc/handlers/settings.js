@@ -3,13 +3,25 @@
 const { ipcFailure } = require('../failure');
 
 function createSettingsHandlers({
-  applyAutoStart, copyDirContents, displaySettings, fs, getCurrentAppPkg, live,
+  applyAutoStart, displaySettings, getCurrentAppPkg, live,
   portraitSize, refreshPointerMapping, screenRect, store, toggleDisplayMode,
 }) {
   return {
     'settings:get': () => store.getSettings(),
 
     'settings:set': (_e, patch) => {
+      if (patch?.runtime && ('dir' in patch.runtime || 'avdDir' in patch.runtime)) {
+        const runtime = live.runtime;
+        // Never change the paths used for ownership checks while a guest is running.
+        return runtime.lifecycle.maintain(async () => {
+          const state = await runtime.inspectEmulatorOwnership();
+          if (state.state !== 'absent' || runtime.vmStarting || runtime.installing
+              || runtime.emulator.running() || runtime.vmProc) {
+            return { ok: false, error: '请先完全停止安卓运行时，再更换数据目录。' };
+          }
+          return store.saveSettings(patch);
+        });
+      }
       const next = store.saveSettings(patch);
       if (patch && patch.autoStart !== undefined) applyAutoStart();
       if (patch && patch.display && live.appWin && live.appWin.isOpen) {
@@ -43,18 +55,15 @@ function createSettingsHandlers({
     },
 
     /**
-     * 修改本机共享目录：把旧目录里已有的文件一次性迁到新目录（best-effort，不删旧文件），
-     * 再保存设置。Sharer 每次同步都动态读 store.getSettings().sharedDir，无需重启即可生效。
+     * 按实际复制结果提交目录设置，不对已有的同名文件做覆盖，也不删除旧目录。
      */
     'settings:setSharedDir': async (_e, dir) => {
-      if (!dir || !dir.trim()) return { ok: false, error: '目录不能为空' };
-      const newDir = dir.trim();
-      const oldDir = store.getSettings().sharedDir;
+      if (typeof dir !== 'string' || !dir.trim()) return { ok: false, error: '目录不能为空' };
       try {
-        if (oldDir && oldDir !== newDir) copyDirContents(oldDir, newDir);
-        fs.mkdirSync(newDir, { recursive: true });
-        store.saveSettings({ sharedDir: newDir });
-        return { ok: true, oldDir, newDir };
+        const result = await live.sharer.changeLocalDir(dir.trim(), {
+          migrate: true, commit: (target) => store.saveSettings({ sharedDir: target }),
+        });
+        return { ok: true, ...result };
       } catch (e) {
         return ipcFailure(e);
       }
@@ -68,16 +77,13 @@ function createSettingsHandlers({
 
     'display:set': async (_e, patch) => {
       const next = store.saveSettings({ display: patch || {} });
-      if (live.appWin && live.appWin.isOpen) {
-        live.appWin.portrait = portraitSize();
-        const full = next.display.mode === 'fullscreen';
-        if (full && !live.appWin.win.isMaximized()) live.appWin.win.maximize();
-        if (!full && live.appWin.win.isMaximized()) live.appWin.win.unmaximize();
-        // 全屏 = 平板横屏排版（见 toggleDisplayMode 的说明）
-        live.appWin.setLandscape(full).catch(() => {});
-        live.appWin.scheduleFit();
+      let windowLayoutApplied = false;
+      if (live.appWin?.isOpen && (patch?.portrait || patch?.mode)) {
+        const options = patch.mode ? { fullscreen: next.display.mode === 'fullscreen' } : {};
+        try { windowLayoutApplied = await live.appWin.applyWindowSize(portraitSize(), options) === true; }
+        catch (_) { /* The preference is saved even if no window can be updated. */ }
       }
-      return next.display;
+      return { ...next.display, ok: true, windowLayoutApplied };
     },
 
     'display:toggle': () => toggleDisplayMode(),

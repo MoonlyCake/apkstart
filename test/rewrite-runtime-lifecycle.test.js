@@ -145,20 +145,69 @@ test('failed restart does not block the next individual launch', async () => {
   assert.equal(runtime.lifecycle.phase, 'idle');
 });
 
-test('failed Wi-Fi recovery never initiates a data reset', async () => {
+test('failed Wi-Fi recovery never initiates a restart or data reset', async () => {
   const runtime = runtimeFixture();
   const trace = [];
-  Object.defineProperty(runtime, 'vmRunning', { value: true });
-  runtime.repairWifi = async () => { trace.push('wifi'); return false; };
-  runtime._lifecycle = { restart: async () => { trace.push('cold'); return { ok: true }; } };
+  runtime._networkEndpoint = async () => ({ client: {}, revalidate: async () => true });
+  runtime._lifecycle = { restart: async () => assert.fail('must not restart the active session') };
   runtime.adbPath = () => 'fixture-adb';
   runtime.waitForNetwork = async () => { trace.push('network'); return { ok: false, reason: 'wifi-not-connected' }; };
   runtime._resetAndroidData = async () => assert.fail('must not reset data');
   const result = await runtime.repairNetwork();
   assert.equal(result.ok, false);
   assert.equal(result.wiped, false);
-  assert.match(result.error, /单独选择「重置安卓数据」/);
-  assert.deepEqual(trace, ['wifi', 'cold', 'network']);
+  assert.match(result.error, /没有重启运行时或清除安卓数据/);
+  assert.deepEqual(trace, ['network']);
+});
+
+test('installed app launch rechecks network instead of trusting a cached radio address', async () => {
+  const runtime = runtimeFixture();
+  const guest = { identity: { pid: 1000, generation: 'current' }, client: {}, revalidate: async () => true };
+  runtime._networkEndpoint = async () => guest;
+  runtime._lastNetwork = { ok: true, ip: '10.0.2.15', at: Date.now(), ownerKey: '1000:current' };
+  let clock = 0;
+  let repairs = 0;
+  const probes = [];
+  runtime.checkNetwork = async ({ guest: pinned, verifyInternet }) => {
+    assert.equal(pinned, guest);
+    probes.push(verifyInternet);
+    return repairs ? { ok: true, ip: '10.0.2.16', reachable: true } : { ok: false, reason: 'no-default-network' };
+  };
+  runtime.repairWifi = async ({ guest: pinned, canContinue }) => {
+    assert.equal(pinned, guest);
+    assert.equal(canContinue(), true);
+    repairs++;
+    return true;
+  };
+  assert.deepEqual(await runtime.waitForNetwork({ now: () => clock, pause: async (ms) => { clock += ms; } }),
+    { ok: true, ip: '10.0.2.16', reachable: true });
+  assert.equal(repairs, 1);
+  assert.deepEqual(probes, [false, false, true]);
+});
+
+test('the launch budget cancels late Wifi writes and never reports a reconnect request as internet', async () => {
+  const runtime = runtimeFixture();
+  runtime._networkEndpoint = async () => ({ client: {}, revalidate: async () => true });
+  runtime.checkNetwork = async () => ({ ok: false, reason: 'no-default-network' });
+  let mutationCheck;
+  runtime.repairWifi = ({ canContinue }) => {
+    mutationCheck = canContinue;
+    return new Promise(() => {}); // Slow stock emulator control command.
+  };
+  const result = await runtime.waitForNetwork({ timeoutMs: 40, pause: async () => {} });
+  assert.deepEqual(result, { ok: false, reason: 'no-default-network' });
+  assert.equal(mutationCheck(), false);
+});
+
+test('network cache only belongs to the exact guest and expires to unknown', () => {
+  const runtime = runtimeFixture();
+  const first = { identity: { pid: 1000, generation: 'a' } };
+  const replacement = { identity: { pid: 1000, generation: 'b' } };
+  runtime._lastNetwork = { ok: true, ip: '10.0.2.16', at: Date.now(), ownerKey: '1000:a' };
+  assert.equal(runtime._networkSnapshot(first).ok, true);
+  assert.equal(runtime._networkSnapshot(replacement).ok, false);
+  runtime._lastNetwork.at -= 15001;
+  assert.deepEqual(runtime._networkSnapshot(first), { ok: false, reason: 'unknown' });
 });
 
 test('confirmed stop retires its lease and discards already pending network probes', async () => {
@@ -246,7 +295,23 @@ test('explicit reset and positive resize use exclusive VM slots', async (t) => {
   await reset;
   assert.deepEqual(await resize, { ok: true, stopped: true, actualGB: 4 });
   assert.equal((await boot).ok, true);
-  assert.deepEqual(trace, ['reset', 'settings', 'stop', 'settings', 'resize', 'boot']);
+  assert.deepEqual(trace, ['reset', 'settings', 'stop', 'resize', 'settings', 'boot']);
+});
+
+test('a failed physical resize does not publish new settings, and an ambiguous AVD is untouched', async (t) => {
+  const runtime = runtimeFixture();
+  const write = t.mock.method(store, 'saveSettings', () => {});
+  runtime.avdOwner = () => ({ state: 'absent' });
+  runtime.emulator.resizeDataPartition = () => ({ ok: false, error: 'disk full' });
+  runtime.emulator.dataInfo = () => ({ ok: true, actualGB: 4 });
+  const result = await runtime.resizeDataPartition(8192);
+  assert.equal(result.ok, false);
+  assert.equal(result.actualGB, 4);
+  assert.equal(write.mock.callCount(), 0);
+  runtime.provisioner = { paths: () => ({ avdDirConflict: { current: 'old', requested: 'new' } }) };
+  runtime._resetAndroidData = async () => assert.fail('cannot reset an ambiguous AVD');
+  assert.equal((await runtime.resetAndroidData()).code, 'AVD_DIR_CONFLICT');
+  assert.equal((await runtime.resizeDataPartition(8192)).code, 'AVD_DIR_CONFLICT');
 });
 
 test('compatibility restart refuses an unsafe change before stop, otherwise invalidates before boot', async () => {
@@ -269,7 +334,7 @@ test('idle shutdown distinguishes a missing activity probe from a verified empty
   const runtime = runtimeFixture();
   const client = new AdbClient({ adbPath: 'injected', serial: 'fixture' });
   runtime.lastActivity = 0;
-  runtime.client = () => client;
+  runtime._networkEndpoint = async () => ({ client, revalidate: async () => true });
   let stops = 0;
   runtime._stopInner = async () => { stops++; return true; };
   client.shell = async () => { throw new Error('ADB disconnected'); };
@@ -295,6 +360,7 @@ test('a session opened after an idle probe cancels queued idle shutdown', async 
     probed.resolve();
     return [];
   } });
+  runtime._networkEndpoint = async () => ({ client: runtime.client(), revalidate: async () => true });
   runtime._stopInner = async () => assert.fail('must not stop a newly requested session');
   const shutdown = runtime._stopIfIdle(1);
   await probed.promise;
@@ -303,4 +369,29 @@ test('a session opened after an idle probe cancels queued idle shutdown', async 
   gate.resolve();
   await block;
   assert.equal(await shutdown, false);
+});
+
+test('watchdog scales tablet density from the running panel and never writes across a stale lease', async () => {
+  const runtime = runtimeFixture();
+  runtime.emulator.running = () => true;
+  Object.defineProperty(runtime, 'settings', { value: { display: { landscape: false, tabletMode: true } } });
+  let alive = true;
+  let retireOnProbe = false;
+  const commands = [];
+  const client = { async shell(cmd) {
+    commands.push(cmd);
+    if (cmd === 'dumpsys window displays') {
+      if (retireOnProbe) alive = false;
+      return 'init=1080x1920 cur=1080x1920';
+    }
+    return 'Override density: 190';
+  } };
+  runtime._emulatorGuest = async () => ({ client, revalidate: async () => alive });
+  runtime.log = () => {};
+  await runtime._healOrientation();
+  assert.deepEqual(commands, ['dumpsys window displays', 'wm density', 'wm density 285']);
+  retireOnProbe = true;
+  commands.length = 0;
+  await runtime._healOrientation();
+  assert.deepEqual(commands, ['dumpsys window displays']);
 });

@@ -59,6 +59,8 @@ public class ApkAgent
     [DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr h, int c);
     [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
     [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr h, uint cmd);
+    [DllImport("user32.dll")] static extern bool IsChild(IntPtr parent, IntPtr window);
+    [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr window);
     // 裁剪嵌入窗口的可见区域：把压到标题栏上的那条外框去掉
     [DllImport("user32.dll")] static extern int SetWindowRgn(IntPtr h, IntPtr rgn, bool redraw);
     [DllImport("gdi32.dll")] static extern IntPtr CreateRectRgn(int l, int t, int r, int b);
@@ -414,7 +416,7 @@ public class ApkAgent
         return lease != null && lease.ShowRequested && lease.Window == h && SameAdbConsentWindow(lease);
     }
 
-    static IntPtr FindEmulator()
+    static IntPtr FindEmulator(bool surfaceOnly = false)
     {
         IntPtr best = IntPtr.Zero;
         long bestScore = long.MinValue;
@@ -426,6 +428,7 @@ public class ApkAgent
             uint owner;
             GetWindowThreadProcessId(h, out owner);
             if (!IsOurs(owner)) return true;
+            if (surfaceOnly && !IsAdbConsentMainWindow(h, owner)) return true;
             string cls = ClassOf(h);
             if (cls.IndexOf("QWindowIcon", StringComparison.Ordinal) < 0) return true;
             string title = TitleOf(h);
@@ -776,10 +779,10 @@ public class ApkAgent
 
     // HWND_TOP: Chromium 的渲染子窗口和模拟器是同级的子窗口，
     // 不主动抬到最前就会被 Chromium 那块黑底盖住（用户看到的就是黑屏）。
-    static readonly IntPtr HWND_TOP = new IntPtr(1);
-    static void Fit(int x, int y, int w, int h, bool frame, int clipTop)
+    static readonly IntPtr HWND_TOP = IntPtr.Zero;
+    static bool Fit(int x, int y, int w, int h, bool frame, int clipTop)
     {
-        if (_emu == IntPtr.Zero) return;
+        if (!IsOwnedQtWindow(_emu) || !IsOurHost(_host)) return false;
         // Fit 是 JS 侧每次 resize 都会调的，此时网页层一定已经建好了。
         // 确保模拟器挂在网页层之下（兄弟关系会被网页层盖住并吃掉鼠标）。
         if (_host != IntPtr.Zero)
@@ -825,12 +828,16 @@ public class ApkAgent
                             }
                         }
                     }
-                    // x/y 保持 -8 的溢出（把 Qt 的 8px 灰边推出可视区），
-                    // 宽高按客户区 + 2*8；标题栏 38px 由宿主自绘盖住。
+                    // The host's title bar is 38 DIP, not 38 physical pixels.
+                    uint dpi = 96;
+                    try { uint measured = GetDpiForWindow(_host); if (measured != 0) dpi = measured; }
+                    catch (EntryPointNotFoundException) { }
+                    int titleHeight = (int)Math.Round(38.0 * dpi / 96.0);
+                    // Qt's 8px edge padding is already in physical pixels.
                     x = -8;
-                    y = 38 - 8;
+                    y = titleHeight - 8;
                     w = cw + 16;
-                    h = (chh - 38) + 16;
+                    h = (chh - titleHeight) + 16;
                 }
             }
         }
@@ -839,19 +846,16 @@ public class ApkAgent
         // 只有「确实已经嵌进我们窗口」的才允许显示。
         // 万一 embed 失败（模拟器窗口还没建好 / 句柄换了），Fit 绝不能把它当独立窗口
         // 顶到桌面上 —— 那正是用户看到的那个 "Android Emulator - apkstart5554" 黑窗。
-        IntPtr ep = GetParent(_emu);
-        bool embedded = ep != IntPtr.Zero
-                     && (ep == _host || ep == _chromeRender);
-        if (!embedded)
+        if (!HasOurParent(_emu))
         {
             ShowWindow(_emu, 0);
-            return;
+            return false;
         }
         // SWP_FRAMECHANGED forces Windows to recompute the whole non-client area and
         // repaint it. It is needed exactly once (right after SetParent); repeating it
         // on every periodic sweep caused visible stutter and wasted GPU/CPU.
         uint flags = SWP_NOACTIVATE | SWP_SHOWWINDOW | (frame ? SWP_FRAMECHANGED : 0u);
-        SetWindowPos(_emu, HWND_TOP, x, y, w, h, flags);
+        return SetWindowPos(_emu, HWND_TOP, x, y, w, h, flags) && HasOurParent(_emu);
         // 绝不给嵌入窗口设 window region：Qt/GL 子窗口一旦带 region，命中测试和
         // 输入坐标映射会错位（点击失效 / 点不到按钮），旋转改尺寸后 region 还是旧
         // 矩形又会在四周露黑边。标题栏那条 8px 溢出改由宿主自绘标题栏盖住。
@@ -883,25 +887,72 @@ public class ApkAgent
     // 与 Detach 相同，但**不显示**窗口：宿主窗口即将销毁时调用。
     // 不先摘下来，Windows 会在宿主销毁时把子窗口重新挂到桌面并设成可见，
     // 于是就凭空多出一个 "Android Emulator - apkstart5554" 的黑窗。
-    static void ParkEmulator()
+    static IntPtr CurrentEmulatorWindow()
     {
-        if (_emu == IntPtr.Zero) _emu = FindEmulator();
-        IntPtr e = _emu;
-        if (e == IntPtr.Zero) { _host = IntPtr.Zero; return; }
-        ShowWindow(e, 0);
-        SetParent(e, IntPtr.Zero);
-        uint style = (uint)GetWindowLong(e, GWL_STYLE);
-        style &= ~WS_CHILD;
-        // 把 WS_VISIBLE(0x10000000) 一起补回来：它可能被「SetParent 到隐藏宿主」那次操作隐式清掉，
-        // 第三方底座（MuMu）自己不会重新显示，用户关掉应用窗口后就再也看不到模拟器。
-        style |= (uint)(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | 0x10000000);
-        SetWindowLong(e, GWL_STYLE, (int)style);
-        int ex = GetWindowLong(e, GWL_EXSTYLE);
-        ex |= WS_EX_APPWINDOW;
-        SetWindowLong(e, GWL_EXSTYLE, ex);
-        SetWindowPos(e, IntPtr.Zero, 40, 40, 480, 853, SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE);
+        if (!IsRealSurface(_emu)) _emu = FindEmulator(true);
+        if (!IsRealSurface(_emu)) _emu = IntPtr.Zero;
+        return _emu;
+    }
+
+    static bool IsOwnedQtWindow(IntPtr h)
+    {
+        uint pid;
+        return IsWindow(h) && GetWindowThreadProcessId(h, out pid) != 0 &&
+            ClassOf(h).IndexOf("QWindowIcon", StringComparison.Ordinal) >= 0 && ScopedEmulatorStart(pid) != 0;
+    }
+
+    static bool IsDetachedSurface(IntPtr h)
+    {
+        uint pid;
+        return IsOwnedQtWindow(h) && GetWindowThreadProcessId(h, out pid) != 0 &&
+            IsAdbConsentMainWindow(h, pid) && ((uint)GetWindowLong(h, GWL_STYLE) & WS_CHILD) == 0;
+    }
+
+    static bool IsOurHost(IntPtr h)
+    {
+        uint pid;
+        return _appPid != 0 && IsWindow(h) && GetWindowThreadProcessId(h, out pid) != 0 && pid == _appPid;
+    }
+
+    static bool HasOurParent(IntPtr h)
+    {
+        if (!IsOwnedQtWindow(h) || !IsOurHost(_host)) return false;
+        IntPtr parent = GetParent(h);
+        return parent != IntPtr.Zero &&
+            (parent == _host || (parent == _chromeRender && IsChild(_host, parent)));
+    }
+
+    static bool IsRealSurface(IntPtr h)
+    {
+        return HasOurParent(h) || IsDetachedSurface(h);
+    }
+
+    static bool ParkEmulator()
+    {
+        // Explicit park supersedes the authorization lease rather than re-showing its prior state.
+        _adbConsent = null;
+        IntPtr e = CurrentEmulatorWindow();
+        bool parked = true;
+        if (e != IntPtr.Zero)
+        {
+            ShowWindow(e, 0);
+            SetParent(e, IntPtr.Zero);
+            uint style = (uint)GetWindowLong(e, GWL_STYLE);
+            style &= ~(WS_CHILD | 0x10000000u); // Never restore WS_VISIBLE during park.
+            style |= (uint)(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
+            SetWindowLong(e, GWL_STYLE, (int)style);
+            int ex = GetWindowLong(e, GWL_EXSTYLE);
+            SetWindowLong(e, GWL_EXSTYLE, ex | WS_EX_APPWINDOW);
+            SetWindowPos(e, IntPtr.Zero, 40, 40, 480, 853, SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE);
+            ShowWindow(e, 0);
+            parked = !IsWindow(e) || (GetParent(e) == IntPtr.Zero && !IsWindowVisible(e));
+        }
         _emu = IntPtr.Zero;
         _host = IntPtr.Zero;
+        _chromeRender = IntPtr.Zero;
+        _hostPid = 0;
+        _detachedMode = false;
+        return parked;
     }
 
     // ------------------------------------------------------------------ rotation
@@ -1334,13 +1385,14 @@ public class ApkAgent
                         // Never re-parent into a foreign window: a stale handle could
                         // point at another app (the exact way "ApkStart ate WeChat's
                         // window" can happen).
-                        if (want == IntPtr.Zero || (_appPid != 0 && wantPid != _appPid))
+                        if (!IsOurHost(want))
                         {
                             Reply(sock, "{\"ok\":false,\"error\":\"host-not-ours\"}");
                             Thread.Sleep(1);
                         }
                         else
                         {
+                            IntPtr previous = CurrentEmulatorWindow();
                             _host = want;
                             _hostPid = wantPid;
                             _chromeRender = FindChromeRender(want);
@@ -1356,15 +1408,15 @@ public class ApkAgent
                                 for (int i = 0; i < pieces.Length; i++)
                                 {
                                     IntPtr cand = ParseHwnd(pieces[i]);
-                                    if (cand == IntPtr.Zero || !IsWindow(cand)) continue;
+                                    if (!IsRealSurface(cand)) continue;
                                     // 已经嵌进我们宿主的窗口（重复 embed / 换尺寸）：直接用
-                                    if (GetParent(cand) == want || GetParent(cand) == _chromeRender)
+                                    if (HasOurParent(cand))
                                     {
                                         _emu = cand;
                                         break;
                                     }
                                     Embed(_host, cand);
-                                    if (GetParent(cand) == _host || GetParent(cand) == _chromeRender)
+                                    if (HasOurParent(cand))
                                     {
                                         _emu = cand;
                                         break;
@@ -1373,14 +1425,13 @@ public class ApkAgent
                             }
                             else
                             {
-                                _emu = FindEmulator();
-                                Embed(_host, _emu);
+                                _emu = previous;
+                                if (!HasOurParent(_emu)) Embed(_host, _emu);
                             }
-                            bool ok = _emu != IntPtr.Zero
-                                && (GetParent(_emu) == _host || GetParent(_emu) == _chromeRender);
                             _embedAt = Environment.TickCount;
                             _lastToolSweep = 0;
-                            Fit((int)L(line, "x"), (int)L(line, "y"), (int)L(line, "w"), (int)L(line, "h"), true, (int)L(line, "clipTop"));
+                            bool ok = HasOurParent(_emu) &&
+                                Fit((int)L(line, "x"), (int)L(line, "y"), (int)L(line, "w"), (int)L(line, "h"), true, (int)L(line, "clipTop"));
                             Reply(sock, "{\"ok\":" + (ok ? "true" : "false") + ",\"emu\":" + _emu.ToInt64() + "}");
                             // 第三方底座的窗口不是我们创建、也不会自己恢复显示：
                             // 每个候选都要挂上 WS_VISIBLE，否则 SetParent 之后它永远是隐藏的。
@@ -1389,9 +1440,8 @@ public class ApkAgent
                     }
                     else if (cmd == "fit")
                     {
-                        if (_emu == IntPtr.Zero) _emu = FindEmulator();
-                        Fit((int)L(line, "x"), (int)L(line, "y"), (int)L(line, "w"), (int)L(line, "h"), false, (int)L(line, "clipTop"));
-                        Reply(sock, "{\"ok\":true}");
+                        bool ok = Fit((int)L(line, "x"), (int)L(line, "y"), (int)L(line, "w"), (int)L(line, "h"), false, (int)L(line, "clipTop"));
+                        Reply(sock, "{\"ok\":" + (ok ? "true" : "false") + "}");
                     }
                     else if (cmd == "rotate")
                     {
@@ -1415,9 +1465,11 @@ public class ApkAgent
                         // 独立窗口模式下 Detach() 会把 _emu 清空（它按「嵌入结束」处理），
                         // 所以这里要重新找一次，否则 show/layout 全部作用在空句柄上，
                         // 表现就是「切独立窗口后模拟器窗口不见了」。
-                        if (_emu == IntPtr.Zero) _emu = FindEmulator();
-                        if (_emu != IntPtr.Zero) ShowWindow(_emu, 5);
-                        Reply(sock, "{\"ok\":" + (_emu != IntPtr.Zero ? "true" : "false") + "}");
+                        IntPtr window = CurrentEmulatorWindow();
+                        bool ok = window != IntPtr.Zero && (!_detachedMode || IsDetachedSurface(window));
+                        if (ok) ShowWindow(window, IsIconic(window) ? 9 : 5);
+                        ok = ok && IsOwnedQtWindow(window) && IsWindowVisible(window) && !IsIconic(window);
+                        Reply(sock, "{\"ok\":" + (ok ? "true" : "false") + "}");
                     }
                     else if (cmd == "detach")
                     {
@@ -1427,7 +1479,7 @@ public class ApkAgent
                         _detachedMode = L(line, "keep") == 1;
                         // 独立模式可能从没 embed 过（_emu 还是 0），先找一次，
                         // 否则 Detach 会直接 return，后续 show/layout 全部作用在空句柄上。
-                        if (_emu == IntPtr.Zero) _emu = FindEmulator();
+                        CurrentEmulatorWindow();
                         Detach();
                         Reply(sock, "{\"ok\":true,\"emu\":" + _emu.ToInt64() + "}");
                     }
@@ -1438,8 +1490,8 @@ public class ApkAgent
                         // 把标题改回去，所以 QuietSweep 每轮巡检都会补设一次（见下）。
                         string t = S(line, "text");
                         if (t.Length == 0) t = "ApkStart";
+                        CurrentEmulatorWindow(); // Resolve with the old title before changing it.
                         _ourTitle = t;
-                        if (_emu == IntPtr.Zero) _emu = FindEmulator();
                         bool ok = _emu != IntPtr.Zero && SetWindowTextW(_emu, t);
                         Reply(sock, "{\"ok\":" + (ok ? "true" : "false") + "}");
                     }
@@ -1448,7 +1500,7 @@ public class ApkAgent
                         // 给模拟器原生窗口设图标（独立窗口模式下任务栏/Alt+Tab 显示当前应用图标，
                         // 而不是 Google 模拟器的默认绿机器人）。传 ICO/PNG 绝对路径。
                         string f = S(line, "file");
-                        if (_emu == IntPtr.Zero) _emu = FindEmulator();
+                        CurrentEmulatorWindow();
                         bool ok = false;
                         if (f.Length > 0 && System.IO.File.Exists(f))
                         {
@@ -1478,20 +1530,21 @@ public class ApkAgent
                         // 独立窗口模式：模拟器窗口是系统原生窗口，这里只把它摆到
                         // 指定屏幕矩形（不 SetParent）。方向/缩放/输入都交给它自己，
                         // 因此不会出现嵌入模式那套黑边、坐标错位、铺不满的问题。
-                        if (_emu == IntPtr.Zero) _emu = FindEmulator();
-                        if (_emu == IntPtr.Zero)
+                        IntPtr window = CurrentEmulatorWindow();
+                        if (!IsDetachedSurface(window))
                         {
                             Reply(sock, "{\"ok\":false,\"error\":\"no-emu\"}");
                         }
                         else
                         {
                             // 先确保它是可见的顶层窗口（WS_CHILD 已被 Detach 摘掉）
-                            ShowWindow(_emu, 5);
-                            SetWindowPos(_emu, HWND_TOP,
+                            ShowWindow(window, IsIconic(window) ? 9 : 5);
+                            bool placed = SetWindowPos(window, HWND_TOP,
                                 (int)L(line, "x"), (int)L(line, "y"),
                                 (int)L(line, "w"), (int)L(line, "h"),
                                 SWP_SHOWWINDOW);
-                            Reply(sock, "{\"ok\":true}");
+                            bool ok = placed && IsDetachedSurface(window) && IsWindowVisible(window) && !IsIconic(window);
+                            Reply(sock, "{\"ok\":" + (ok ? "true" : "false") + "}");
                         }
                     }
                     else if (cmd == "hook")
@@ -1569,8 +1622,8 @@ public class ApkAgent
                         _quiet = true;
                         _bootHideStart = Environment.TickCount;
                         _bootHideSweep = 0;
-                        ParkEmulator();
-                        Reply(sock, "{\"ok\":true}");
+                        bool ok = ParkEmulator();
+                        Reply(sock, "{\"ok\":" + (ok ? "true" : "false") + "}");
                     }
                     else if (cmd == "quit")
                     {

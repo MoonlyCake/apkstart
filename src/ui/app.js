@@ -209,17 +209,36 @@ function updateStats() {
   $('statusStats').textContent = n ? `${n} 个应用` : '暂无应用';
 }
 
+function networkExplanation(network) {
+  if (network?.checking || network?.reason === 'checking') return '正在检查安卓能否上网。';
+  switch (network?.reason) {
+    case 'wifi-not-connected': return '安卓没有连上模拟器的 Wi-Fi。';
+    case 'no-default-network':
+    case 'no-default-route': return '安卓没有可用的默认联网通道；仅有 IP 地址不代表能上网。';
+    case 'no-ip-address': return '安卓连接了网络，但还没有取得可用地址。';
+    case 'guest-changed': return '安卓运行时已切换，请等待新的检查结果。';
+    case 'device-offline': return '尚未连接到安卓运行时，不能确认联网。';
+    case 'internet-unverified': return '安卓已取得网络配置，但尚未确认可访问互联网。';
+    default: return '尚未确认安卓能访问互联网，可到「设置 → 修复网络」再试。';
+  }
+}
+
+let statusRequest = 0;
 async function refreshStatus() {
+  const request = ++statusRequest;
   try {
-    state.status = await api.runtimeStatus();
+    const status = await api.runtimeStatus();
+    if (request !== statusRequest) return;
+    if (!status || status.ok === false) throw new Error(status?.error || '未返回运行时状态');
+    state.status = status;
     const s = state.status;
     const dot = $('statusDot');
     const text = $('statusText');
     const tag = $('engineTag');
 
-    if (s.phase === 'awaiting-auth') {
+    if (s.phase === 'awaiting-auth' || s.phase === 'adb-unauthorized') {
       dot.className = 'dot warn';
-      text.textContent = s.authorizationMessage || '请在安卓模拟器窗口中确认「允许 USB 调试」。';
+      text.textContent = s.authorizationMessage || '安卓调试连接尚未授权。';
       tag.textContent = '等待授权';
       tag.className = 'brand-tag';
     } else if (!s.adbOk) {
@@ -232,6 +251,11 @@ async function refreshStatus() {
       text.textContent = `运行时已就绪 · Android ${s.android || '?'}${s.freeform ? ' · 独立窗口已启用' : ''}`;
       tag.textContent = `Android ${s.android || ''}`.trim();
       tag.className = 'brand-tag ok';
+    } else if (s.installing || s.phase === 'installing') {
+      dot.className = 'dot warn';
+      text.textContent = '安卓系统安装中 —— 请在模拟器窗口完成安装';
+      tag.textContent = '安装中';
+      tag.className = 'brand-tag';
     } else if (s.phase === 'booting' || s.vmStarting || s.deviceOnline) {
       dot.className = 'dot warn';
       text.textContent = '正在引导 Android…';
@@ -255,13 +279,8 @@ async function refreshStatus() {
       tag.className = 'brand-tag';
     } else if (s.needsSetup === 'boot') {
       dot.className = 'dot warn';
-      text.textContent = '运行时已就绪 —— 安装 APK 或双击桌面图标会自动开机';
+      text.textContent = '运行时组件齐全，安卓尚未开机 —— 安装或打开应用时自动启动';
       tag.textContent = '待开机';
-      tag.className = 'brand-tag';
-    } else if (s.installing) {
-      dot.className = 'dot warn';
-      text.textContent = '安装程序运行中 —— 请在虚拟机窗口里完成安装';
-      tag.textContent = '安装中';
       tag.className = 'brand-tag';
     } else {
       dot.className = 'dot';
@@ -277,21 +296,32 @@ async function refreshStatus() {
     const netEl = $('statusNet');
     const netSep = $('statusNetSep');
     if (netEl) {
-      const show = !!s.ready && !!s.network;
+      const show = s.ready === true;
       netEl.hidden = !show;
       if (netSep) netSep.hidden = !show;
       if (show) {
-        netEl.textContent = s.network.ok ? `网络正常 ${s.network.ip || ''}`.trim() : '虚拟机未联网';
-        netEl.className = 'status-item status-net ' + (s.network.ok ? 'ok' : 'warn');
-        netEl.title = s.network.ok
-          ? '安卓虚拟机已联网，联网类应用可以正常加载'
-          : '安卓虚拟机没有网络，联网页面会一直是空白/报错。可在「设置 → 修复网络」处理';
+        const network = s.network;
+        const online = network?.ok === true;
+        const checking = !network || network.checking || network.reason === 'checking';
+        netEl.textContent = checking ? '正在检查联网'
+          : online ? `安卓已联网 ${network.ip || ''}`.trim() : '安卓联网未确认';
+        netEl.className = 'status-item status-net ' + (online && !checking ? 'ok' : 'warn');
+        netEl.title = online && !checking ? '已确认安卓网络可访问互联网；个别应用服务可能仍不可用。'
+          : networkExplanation(checking ? { reason: 'checking' } : network);
       }
     }
 
     renderSetup(s);
   } catch (e) {
+    if (request !== statusRequest) return;
+    state.status = null;
     $('statusText').textContent = `状态检查失败：${e.message}`;
+    $('statusDot').className = 'dot warn';
+    $('engineTag').textContent = '状态未知';
+    $('engineTag').className = 'brand-tag';
+    $('statusDevice').textContent = '';
+    if ($('statusNet')) $('statusNet').hidden = true;
+    if ($('statusNetSep')) $('statusNetSep').hidden = true;
   }
 }
 
@@ -339,7 +369,7 @@ function renderSetup(s) {
   const emuDone0 = !!(env.emulator && env.emulator.ok);
   const imgDone0 = !!(env.sysimg && env.sysimg.ok);
   const allDone0 = adbDone && emuDone0 && imgDone0;
-  const awaitingAuth = s.phase === 'awaiting-auth';
+  const awaitingAuth = s.phase === 'awaiting-auth' || s.phase === 'adb-unauthorized';
   const authMessage = s.authorizationMessage || '请在安卓模拟器窗口中确认「允许 USB 调试」。';
   const booting = s.phase === 'booting' || s.vmStarting || (s.deviceOnline && !s.ready);
   const stateText = $('setupStateText');
@@ -567,11 +597,11 @@ async function installFiles(paths) {
         t.update({ title: pr.meta ? `正在安装 ${pr.meta.label}` : `正在安装 ${name}`, body: pr.message, progress: pct });
       });
       const r = await api.installApk(p);
-      if (r?.ok === false) {
+      if (r?.ok !== true || !r.app) {
         failed++;
         t.dismiss();
         if (installToast === t) installToast = null;
-        toast({ title: '未安装', body: r.error });
+        toast({ title: '未安装', body: r?.error || '没有收到安装完成的确认', type: 'error' });
         continue;
       }
       t.update({ title: `${r.app.label} 已安装`, body: r.app.shortcutPath ? '桌面快捷方式已创建，双击即可直接打开。' : '可在应用卡片右键创建桌面快捷方式。', progress: 100, type: 'ok' });
@@ -585,11 +615,13 @@ async function installFiles(paths) {
       failed++;
       // 先把那条「正在安装…」的 sticky 提示收掉，否则它会一直转圈、还继续被
       // 运行时日志刷新 —— 用户看到的就是「失败信息一直在循环」。
-      // 错误提示统一由下面的 install:error 监听器负责（带文件名与中文原因），
-      // 这里不再重复弹一条。
+      // 如果没有先收到主进程的 install:error，仍要显示本次 IPC 自己的错误。
       try { off(); } catch (_) { /* ignore */ }
       t.dismiss();
-      if (installToast === t) installToast = null;
+      if (installToast === t) {
+        installToast = null;
+        toast({ title: `安装失败：${name}`, body: friendlyInstallErrorText(e.message), type: 'error' });
+      }
     } finally {
       try { off(); } catch (_) { /* ignore */ }
     }
@@ -597,7 +629,11 @@ async function installFiles(paths) {
 
   state.installing = false;
   await refreshApps();
-  if (ok && !failed) $('search').value = '';
+  if (ok && !failed) {
+    state.filter = '';
+    $('search').value = '';
+    renderGrid();
+  }
 }
 
 /* ---------------- 应用操作 ---------------- */
@@ -611,15 +647,16 @@ async function launchApp(pkg) {
     sticky: true,
     spinner: true,
   });
-  const r = await api.launch(pkg);
-  if (r.ok) {
+  const r = await api.launch(pkg).catch((error) => ({ ok: false, error: error.message }));
+  t.el.querySelector('.spinner')?.remove();
+  if (r?.ok === true) {
     // 应用有自己的窗口，主界面自动收起；这里只留一句提示，然后隐藏窗口
     t.update({ title: '已启动', body: '应用正在独立窗口中运行（顶部可旋转屏幕）。', type: 'ok' });
     setTimeout(t.dismiss, 1600);
     setTimeout(() => api.winHide(), 900);
     setTimeout(refreshApps, 1200);
   } else {
-    t.update({ title: '启动失败', body: r.error, type: 'error' });
+    t.update({ title: '启动失败', body: r?.error || '没有收到应用窗口已启动的确认', type: 'error' });
     setTimeout(t.dismiss, 6000);
   }
 }
@@ -627,6 +664,7 @@ async function launchApp(pkg) {
 async function createShortcut(pkg) {
   try {
     const r = await api.createShortcut(pkg);
+    if (r?.ok !== true || !r.path) throw new Error(r?.error || '没有返回快捷方式位置');
     toast({ title: '桌面快捷方式已创建', body: r.path, type: 'ok' });
     refreshApps();
   } catch (e) {
@@ -640,7 +678,15 @@ async function uninstall(pkg) {
   const ok = window.confirm(`确定卸载「${app.label}」？\n\n应用数据会一并被清除，桌面快捷方式也会被删除。`);
   if (!ok) return;
   try {
-    await api.uninstall(pkg);
+    const r = await api.uninstall(pkg);
+    if (r?.ok !== true) {
+      if (r?.guestRemoved) {
+        toast({ title: '安卓应用已卸载，但本地清理未完成', body: r.error || app.label, type: 'error' });
+        await refreshApps();
+        return;
+      }
+      throw new Error(r?.error || '安卓没有确认卸载完成');
+    }
     toast({ title: '已卸载', body: app.label, type: 'ok' });
     refreshApps();
   } catch (e) {
@@ -723,6 +769,7 @@ async function handleMenu(act) {
       const next = cur === 'landscape' ? 'portrait' : (cur === 'portrait' ? null : 'landscape');
       try {
         const r = await api.setAppOrientation(pkg, next);
+        if (r?.ok !== true) throw new Error(r?.error || '未保存应用方向');
         const txt = next === 'landscape' ? '横屏启动' : (next === 'portrait' ? '竖屏启动' : '跟随应用');
         toast({ title: `已设为${txt}`, body: '下次打开该应用时生效，无需重启整个环境。', type: 'ok' });
         if (r && typeof r.landscape === 'boolean' && state.apps) {
@@ -740,7 +787,8 @@ async function handleMenu(act) {
     case 'clear': {
       if (!window.confirm(`清除「${app.label}」的全部数据？此操作不可撤销。`)) return;
       try {
-        await api.clearData(pkg);
+        const r = await api.clearData(pkg);
+        if (r?.ok !== true) throw new Error(r?.error || '安卓没有确认清除完成');
         toast({ title: '数据已清除', body: app.label, type: 'ok' });
       } catch (e) {
         toast({ title: '清除失败', body: e.message, type: 'error' });
@@ -752,34 +800,40 @@ async function handleMenu(act) {
   }
 }
 
-/**
- * 按键映射预设选择器。用 confirm + prompt 做最简交互（不引入新 UI 组件）。
- * 后续可以做成更精致的弹窗编辑器。
- */
 async function showKeymapPicker(pkg, label) {
   try {
+    const dialog = $('keymapDialog');
+    if (dialog.open) return;
     const presets = await api.keymap.getPresets();
     const current = await api.keymap.getMap(pkg);
-    const hasCurrent = current && current.length > 0;
-    const lines = presets.map((p, i) => `${i + 1}. ${p.label} — ${p.desc}`);
-    if (hasCurrent) lines.unshift('0. 清除当前映射');
-    const msg = `为「${label}」选择按键映射预设：\n\n${lines.join('\n')}\n\n输入编号：`;
-    const input = window.prompt(msg, hasCurrent ? '0' : '1');
-    if (input === null) return; // 取消
-    const idx = parseInt(input, 10);
-    if (hasCurrent && idx === 0) {
-      await api.keymap.setMap(pkg, []);
-      toast({ title: '已清除按键映射', body: label, type: 'ok' });
-      return;
+    if (dialog.open) return;
+    const select = $('keymapPreset');
+    $('keymapTitle').textContent = `「${label}」的按键映射`;
+    select.replaceChildren();
+    for (const [index, preset] of presets.entries()) {
+      const option = document.createElement('option');
+      option.value = String(index);
+      option.textContent = `${preset.label} — ${preset.desc}`;
+      select.appendChild(option);
     }
-    const presetIdx = hasCurrent ? idx - 1 : idx;
-    if (presetIdx < 1 || presetIdx > presets.length) {
-      toast({ title: '无效编号', type: 'error' });
-      return;
+    if (current?.length) {
+      const option = document.createElement('option');
+      option.value = 'clear';
+      option.textContent = '清除当前映射';
+      select.appendChild(option);
     }
-    const chosen = presets[presetIdx - 1];
-    await api.keymap.applyPreset(pkg, chosen.id);
-    toast({ title: `已套用「${chosen.label}」`, body: `${label} · 打开应用后键盘即可操控`, type: 'ok' });
+    $('keymapApply').disabled = !select.options.length;
+    dialog.returnValue = '';
+    const submitted = await new Promise((resolve) => {
+      dialog.showModal();
+      dialog.addEventListener('close', () => resolve(dialog.returnValue === 'apply'), { once: true });
+    });
+    if (!submitted) return;
+    const clear = select.value === 'clear';
+    const chosen = presets[Number(select.value)];
+    const r = clear ? await api.keymap.setMap(pkg, []) : await api.keymap.applyPreset(pkg, chosen?.id);
+    if (r?.ok !== true) throw new Error(r?.error || '未保存按键映射');
+    toast({ title: clear ? '已清除按键映射' : `已保存「${chosen.label}」预设`, body: label, type: 'ok' });
   } catch (e) {
     toast({ title: '按键映射设置失败', body: e.message, type: 'error' });
   }
@@ -797,16 +851,23 @@ async function refreshAndroid() {
   el.textContent = '读取中…';
   const r = await api.android.status().catch(() => null);
   if (!r || !r.ok) {
-    el.textContent = r && r.error ? `运行时未就绪（${String(r.error).slice(0, 36)}）` : '运行时未启动';
+    el.textContent = r?.error ? `未读到安卓设置：${r.error}` : '未读到安卓设置';
+    for (const id of ['setAndroidWifi', 'setAndroidAirplane', 'setAndroidAnim', 'setAndroidVolume', 'setAndroidFont', 'setAndroidDensity']) {
+      $(id).disabled = true;
+    }
     return;
   }
+  const volume = r.volume == null ? '未知' : `${r.volume}%`;
   el.textContent = `Android ${r.sdk || '?'} · ${r.wifi ? 'Wi-Fi 已开' : 'Wi-Fi 已关'}` +
-    `${r.airplane ? ' · 飞行模式' : ''} · 音量 ${r.volume}%`;
+    `${r.airplane ? ' · 飞行模式' : ''} · 音量 ${volume}`;
+  for (const id of ['setAndroidWifi', 'setAndroidAirplane', 'setAndroidAnim', 'setAndroidVolume', 'setAndroidFont', 'setAndroidDensity']) {
+    $(id).disabled = false;
+  }
   $('setAndroidWifi').checked = !!r.wifi;
   $('setAndroidAirplane').checked = !!r.airplane;
   $('setAndroidAnim').checked = !r.animationsOff;
-  $('setAndroidVolume').value = r.volume;
-  $('androidVolumeText').textContent = `${r.volume}%`;
+  if (r.volume != null) $('setAndroidVolume').value = r.volume;
+  $('androidVolumeText').textContent = volume;
   if (r.fontScale) $('setAndroidFont').value = Number(r.fontScale).toFixed(2);
   if (r.density) {
     const opt = [...$('setAndroidDensity').options].find((o) => o.value === String(r.density));
@@ -821,7 +882,7 @@ function bindAndroid() {
       type: r && r.ok ? 'ok' : 'error',
       title: r && r.ok ? (msg || '已生效') : `失败：${(r && r.error) || '运行时未就绪'}`,
     });
-    if (r && r.ok) refreshAndroid();
+    refreshAndroid();
   };
   $('setAndroidWifi').addEventListener('change', (e) => set('wifi', e.target.checked, e.target.checked ? 'Wi-Fi 已开启' : 'Wi-Fi 已关闭'));
   $('setAndroidAirplane').addEventListener('change', (e) => set('airplane', e.target.checked, e.target.checked ? '已进入飞行模式' : '已退出飞行模式'));
@@ -836,13 +897,13 @@ function bindAndroid() {
   $('btnAndroidRefresh').addEventListener('click', () => refreshAndroid());
   $('btnAndroidTune').addEventListener('click', async () => {
     const r = await api.android.tune(state.launchPkg || '').catch(() => null);
-    toast({ type: r && r.ok ? 'ok' : 'error', title: r && r.ok ? '已优化：动画关闭、后台放宽、电池白名单' : '优化失败，运行时可能未启动' });
+    toast({ type: r && r.ok ? 'ok' : 'error', title: r && r.ok ? '安卓优化设置已更新' : '优化失败', body: r?.error });
     if (r && r.ok) refreshAndroid();
   });
   const open = async (action) => {
     const r = await api.android.open(action).catch(() => null);
     if (!r || !r.ok) {
-      toast({ type: 'error', title: '需要先打开一次应用，让运行时启动' });
+      toast({ type: 'error', title: '未打开安卓设置', body: r?.error || '无法连接安卓运行时' });
     }
   };
   $('btnAndroidSettings').addEventListener('click', () => open('settings'));
@@ -870,7 +931,7 @@ const preflight = panels.createPreflightPanel({
 });
 const updates = panels.createUpdatesPanel({ api, $, toast });
 const settings = panels.createSettingsPanel({
-  api, $, state, toast, refreshStatus, refreshAndroid, navigation, diagnostics, preflight,
+  api, $, state, toast, refreshStatus, refreshAndroid, navigation, diagnostics, preflight, networkExplanation,
 });
 
 /* ---------------- 事件绑定 ---------------- */
@@ -942,15 +1003,18 @@ function bindEvents() {
     if (act === 'install') { await startInstall(); return; }
     if (act === 'vmStart') {
       const t = toast({ title: '正在启动运行时…', body: '首次启动需要引导 Android 系统', sticky: true, spinner: true });
-      const r = await api.runtimeStart();
-      if (r.ok) { t.update({ title: '运行时已就绪', type: 'ok' }); setTimeout(t.dismiss, 2200); }
-      else t.update({ title: '启动失败', body: r.error, type: 'error' });
+      const r = await api.runtimeStart().catch((e) => ({ ok: false, error: e.message }));
+      t.el.querySelector('.spinner')?.remove();
+      if (r?.ok === true) { t.update({ title: '安卓已就绪', body: '联网状态单独检查。', type: 'ok' }); }
+      else t.update({ title: '安卓未启动', body: r?.error || '没有收到启动确认', type: 'error' });
+      setTimeout(t.dismiss, r?.ok === true ? 2200 : 6000);
       refreshStatus();
       return;
     }
     if (act === 'vmStop') {
-      await api.runtimeStop();
-      toast({ title: '运行时会话已结束' });
+      const r = await api.runtimeStop().catch((e) => ({ ok: false, error: e.message }));
+      toast(r?.ok === true ? { title: '运行时会话已结束', type: 'ok' }
+        : { title: '运行时未确认停止', body: r?.error || '请到诊断页查看状态', type: 'error' });
       refreshStatus();
     }
   });
@@ -966,10 +1030,15 @@ function bindEvents() {
   if (btnSync) btnSync.addEventListener('click', async () => {
     btnSync.disabled = true;
     try {
-      await api.syncShared();
-      toast({ title: '已同步共享目录', type: 'ok' });
-    } catch (_) {
-      toast({ title: '同步失败', body: '运行时未就绪时会跳过同步', type: 'error' });
+      const r = await api.syncShared();
+      const transfers = `上传 ${r?.pushed || 0} 项，下载 ${r?.pulled || 0} 项。`;
+      if (r?.ok === true) toast({ title: '共享目录同步完成', body: transfers, type: 'ok' });
+      else if (r?.skipped) toast({ title: '已有同步进行中', body: r.error, type: 'info' });
+      else if (r?.pushed || r?.pulled || r?.conflicts?.length) {
+        toast({ title: '共享目录未完全同步', body: `${transfers}${r.error || '部分文件未同步。'}`, type: 'error' });
+      } else toast({ title: '同步失败', body: r?.error || '没有收到同步确认', type: 'error' });
+    } catch (e) {
+      toast({ title: '同步失败', body: e.message, type: 'error' });
     } finally {
       btnSync.disabled = false;
     }
@@ -1041,9 +1110,9 @@ function bindEvents() {
     const files = [...(e.dataTransfer?.files || [])];
     const paths = files
       .map((f) => { try { return api.pathForFile(f); } catch (_) { return null; } })
-      .filter((p) => p && /\.apk$/i.test(p));
+      .filter((p) => p && /\.(?:apk|apks|xapk)$/i.test(p));
     if (paths.length) installFiles(paths);
-    else toast({ title: '只能拖入 .apk 文件', type: 'error' });
+    else toast({ title: '只能拖入 .apk、.apks 或 .xapk 文件', type: 'error' });
   });
 
   // 主进程事件

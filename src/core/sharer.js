@@ -1,185 +1,231 @@
 'use strict';
-/**
- * 本机 ↔ 安卓 的共享目录双向同步
- *
- * 没有 root 的情况下无法真正「挂载」目录，所以采用增量同步：
- * 任何一侧新增/修改的文件都会在几秒内同步到另一侧，语义上等价于共享文件夹。
- */
-const fs = require('fs');
-const path = require('path');
+
+const fs = require('node:fs');
+const path = require('node:path');
+const { createHash, randomUUID } = require('node:crypto');
+const { readJsonFile, writeJsonFile } = require('../application/json-state');
+const { prepareSharedDirectory } = require('../application/shared-directory');
 const store = require('./store');
 
-const MAX_FILE = 512 * 1024 * 1024; // 单文件 512MB 上限
+const MAX_FILE = 512 * 1024 * 1024;
+const scanDone = '__APKSTART_SHARED_SCAN_DONE__';
+const statFormat = '%s|%y|%z';
+const quote = (value) => "'" + value.replace(/'/g, "'\\''") + "'";
+const same = (a, b) => a === b || (!!a && !!b && a.size === b.size && a.stamp === b.stamp);
+const isRecord = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
 
-function walk(dir, base = dir, out = []) {
-  let items = [];
-  try { items = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return out; }
-  for (const it of items) {
-    if (it.name.startsWith('.')) continue;
-    const full = path.join(dir, it.name);
-    if (it.isDirectory()) walk(full, base, out);
-    else if (it.isFile()) {
-      try {
-        const st = fs.statSync(full);
-        if (st.size <= MAX_FILE) {
-          out.push({ abs: full, rel: path.relative(base, full).split(path.sep).join('/'), mtime: st.mtimeMs, size: st.size });
-        }
-      } catch (_) { /* ignore */ }
+function localFile(file) {
+  let st;
+  try { st = fs.lstatSync(file, { bigint: true }); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  if (!st.isFile()) throw new Error('目标不是普通文件');
+  return { size: Number(st.size), stamp: st.mtimeNs + '|' + st.ctimeNs };
+}
+
+function localFiles(root, folder = root, files = new Map()) {
+  for (const entry of fs.readdirSync(folder, { withFileTypes: true })) {
+    if (entry.name.startsWith('.')) continue;
+    const full = path.join(folder, entry.name);
+    if (entry.isDirectory()) localFiles(root, full, files);
+    else if (entry.isFile()) {
+      const info = localFile(full);
+      if (info) files.set(path.relative(root, full).split(path.sep).join('/'), info);
     }
   }
-  return out;
+  return files;
+}
+
+function compatiblePath(rel) {
+  return rel.split('/').every((part) => part && !part.startsWith('.') && !/[\\\x00-\x1f]/.test(part)
+    && (process.platform !== 'win32' || (!/[<>:"|?*]|[ .]$/.test(part)
+      && !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))));
+}
+
+function remoteStat(record) {
+  const match = /^(\d+)\|([^|\r\n]+)\|([^|\r\n]+)$/.exec(record);
+  if (!match || !Number.isSafeInteger(Number(match[1]))) throw new Error('无法读取安卓文件的大小或修改时间');
+  return { size: Number(match[1]), stamp: match[2] + '|' + match[3] };
+}
+
+async function remoteFiles(client, dir) {
+  const output = await client.shell(
+    'cd ' + quote(dir) + " && find . -type f -exec stat -c '" + statFormat + "|%n' {} + && echo " + scanDone,
+    { timeout: 20000, maxBuffer: 8 * 1024 * 1024 },
+  );
+  const lines = output.split(/\r?\n/);
+  if (lines.pop() !== scanDone) throw new Error('没有拿到完整的安卓文件列表，未同步');
+  const files = new Map();
+  for (const line of lines) {
+    const match = /^(\d+\|[^|\r\n]+\|[^|\r\n]+)\|\.\/(.+)$/.exec(line);
+    if (!match) throw new Error('安卓文件列表不完整，未同步');
+    if (!match[2].split('/').some((p) => p.startsWith('.'))) files.set(match[2], remoteStat(match[1]));
+  }
+  return files;
+}
+
+async function remoteFile(client, file) {
+  const q = quote(file);
+  const text = await client.shell('if [ -f ' + q + ' ] && [ ! -L ' + q + " ]; then stat -c '" + statFormat + "' " + q
+    + '; elif [ -e ' + q + ' ] || [ -L ' + q + ' ]; then echo NOT_REGULAR; else echo ABSENT; fi');
+  if (text === 'ABSENT') return null;
+  if (text === 'NOT_REGULAR') throw new Error('安卓目标不是普通文件');
+  return remoteStat(text);
+}
+
+function localParent(root, rel) {
+  let dir = root;
+  for (const part of rel.split('/').slice(0, -1)) {
+    dir = path.join(dir, part);
+    try { fs.mkdirSync(dir); } catch (error) { if (error.code !== 'EEXIST') throw error; }
+    if (!fs.lstatSync(dir).isDirectory()) throw new Error('共享路径中存在链接或非目录');
+  }
+  return dir;
+}
+
+async function sameContents(client, local, remote) {
+  const out = await client.shell('sha256sum ' + quote(remote), { timeout: 30000 });
+  const digest = /^([a-f0-9]{64})\s/i.exec(out)?.[1]?.toLowerCase();
+  if (!digest) return false;
+  const hash = createHash('sha256');
+  for await (const data of fs.createReadStream(local)) hash.update(data);
+  return hash.digest('hex') === digest;
 }
 
 class Sharer {
-  constructor(runtime) {
+  constructor(runtime, { settings = () => store.getSettings(), stateFile = path.join(store.DATA_DIR, 'shared-state.json') } = {}) {
     this.runtime = runtime;
-    this.stateFile = path.join(store.DATA_DIR, 'shared-state.json');
+    this.settings = settings;
+    this.stateFile = stateFile;
     this._busy = false;
     this._timer = null;
     this._lastError = '';
+    this._ambiguous = { scope: '', files: new Map() };
   }
 
-  get localDir() { return store.getSettings().sharedDir; }
-  get remoteDir() { return store.getSettings().deviceSharedDir; }
+  get localDir() { return this.settings().sharedDir; }
+  get remoteDir() { return this.settings().deviceSharedDir; }
 
-  loadState() {
-    try { return JSON.parse(fs.readFileSync(this.stateFile, 'utf8')); } catch (_) { return {}; }
-  }
-
-  saveState(s) {
-    try { fs.writeFileSync(this.stateFile, JSON.stringify(s, null, 2)); } catch (_) { /* ignore */ }
-  }
-
-  async ensureDirs(onLog = () => {}) {
-    if (!fs.existsSync(this.localDir)) fs.mkdirSync(this.localDir, { recursive: true });
-    const client = this.runtime.client();
-    if (!(await client.isOnline())) return false;
-    await client.shellMkdir(this.remoteDir);
-    return true;
-  }
-
-  async sync({ onLog = () => {} } = {}) {
-    if (this._busy) return { skipped: true };
+  async changeLocalDir(to, { migrate = false, commit }) {
+    if (this._busy) throw new Error('共享目录正在同步或迁移，请稍后重试');
     this._busy = true;
-    const result = { pushed: 0, pulled: 0, errors: [] };
     try {
-      const client = this.runtime.client();
-      if (!(await client.isOnline())) throw new Error('运行时未连接');
-      await this.ensureDirs(onLog);
-      const state = this.loadState();
-
-      // --- 本机 → 设备 ---
-      // 状态里同时记「本机 mtime」和「设备 mtime」两个值。
-      // 老实现只记一个 mtime、拉完写回本机时间，于是下一轮拿本机时间去和设备的
-      // 时间比 —— 永远不相等 → 每 8 秒把同一个文件从设备拉一遍，落盘时间又变，
-      // 再下一轮继续拉……表现就是「硬盘一直转、文件反复重写、空间越用越少」。
-      const stateOf = (prev) => (prev ? {
-        size: prev.size,
-        lmtime: prev.lmtime || prev.mtime || 0,
-        rmtime: prev.rmtime || 0,
-        dir: prev.dir || '',
-      } : null);
-
-      const localFiles = walk(this.localDir);
-      for (const f of localFiles) {
-        const prev = stateOf(state[f.rel]);
-        const changed = !prev || prev.size !== f.size || Math.abs(prev.lmtime - f.mtime) > 1500;
-        if (!changed) continue;
-        const remote = `${this.remoteDir}/${f.rel}`;
-        try {
-          await client.shell(`mkdir -p "$(dirname '${remote}')"`);
-          await client.push(f.abs, remote);
-          state[f.rel] = { size: f.size, lmtime: f.mtime, rmtime: 0, dir: 'up', at: Date.now() };
-          result.pushed++;
-        } catch (e) {
-          result.errors.push(`↑ ${f.rel}: ${e.message}`);
-        }
-      }
-
-      // --- 设备 → 本机 ---
-      // 优先用 toybox stat 拿真实 mtime；拿不到才退回 ls 解析（此时只能按大小判断）
-      let remoteList = null;
+      const from = this.localDir;
+      const prepared = await prepareSharedDirectory({ from, to, migrate });
       try {
-        remoteList = await client.listRemoteStat(this.remoteDir);
-      } catch (_) { /* ignore */ }
-      if (!remoteList) {
-        try {
-          remoteList = await this.listRemoteRecursive(client, this.remoteDir);
-        } catch (_) { remoteList = []; }
+        if (this.localDir !== from) throw new Error('共享目录设置已改变');
+        await commit(prepared.path);
+      } catch (error) {
+        throw new Error('共享目录未切换，原目录未修改。目标目录已复制 ' + prepared.copied + ' 个文件：' + error.message, { cause: error });
       }
-
-      for (const r of remoteList) {
-        // 超大文件（视频/游戏数据包）不往回拉：本地目录不该成为设备缓存的下水道
-        if (r.size > MAX_FILE) continue;
-        const prev = stateOf(state[r.rel]);
-        const sizeSame = !!prev && prev.size === r.size;
-        const rmtimeSame = !!(prev && prev.rmtime && r.mtime)
-          && Math.abs(prev.rmtime - r.mtime) <= 1500;
-        if (prev && sizeSame && (rmtimeSame || prev.dir === 'up')) {
-          // 大小一致，且要么设备时间没变、要么这个文件就是我们刚推上去的：
-          // 只把设备时间记下来收工，绝不重复下载
-          if (r.mtime && prev.rmtime !== r.mtime) {
-            state[r.rel] = { ...prev, rmtime: r.mtime };
-          }
-          continue;
-        }
-        if (prev && sizeSame && !r.mtime) continue;   // 拿不到设备时间且大小相同 → 视为一致
-        const local = path.join(this.localDir, r.rel);
-        try {
-          fs.mkdirSync(path.dirname(local), { recursive: true });
-          await client.pull(`${this.remoteDir}/${r.rel}`, local);
-          const st = fs.statSync(local);
-          state[r.rel] = { size: st.size, lmtime: st.mtimeMs, rmtime: r.mtime || 0, dir: 'down', at: Date.now() };
-          result.pulled++;
-        } catch (e) {
-          result.errors.push(`↓ ${r.rel}: ${e.message}`);
-        }
-      }
-
-      this.saveState(state);
-      this._lastError = result.errors[0] || '';
-      return result;
-    } catch (e) {
-      this._lastError = e.message;
-      return { ...result, error: e.message };
+      return prepared;
     } finally {
       this._busy = false;
     }
   }
 
-  async listRemoteRecursive(client, base, prefix = '', depth = 0, out = []) {
-    if (depth > 6) return out;
-    // 优先一次 find + stat 拿全量（比逐目录 ls -l 快，也不受日期格式差异影响）
-    if (depth === 0 && !prefix) {
-      try {
-        const text = await client.shell(
-          `cd "${base}" 2>/dev/null && find . -type f -exec stat -c '%s|%Y|%n' {} + 2>/dev/null`,
-        );
-        const rows = String(text).split('\n').map((l) => l.trim()).filter(Boolean)
-          .map((l) => /^(\d+)\|(\d+)\|(.+)$/.exec(l))
-          .filter(Boolean)
-          .map((m) => ({ rel: m[3].replace(/^\.\//, ''), size: Number(m[1]), mtime: Number(m[2]) * 1000 }));
-        if (rows.length) return rows;
-      } catch (_) { /* 落到 ls 解析 */ }
-    }
-    const items = await client.listRemote(prefix ? `${base}/${prefix}` : base);
-    for (const it of items) {
-      if (it.name === '.' || it.name === '..') continue;
-      const rel = prefix ? `${prefix}/${it.name}` : it.name;
-      if (it.isDir) {
-        // eslint-disable-next-line no-await-in-loop
-        await this.listRemoteRecursive(client, base, rel, depth + 1, out);
-      } else {
-        out.push({ rel, size: it.size, mtime: Date.now() });
+  async sync() {
+    const result = { ok: false, pushed: 0, pulled: 0, errors: [], conflicts: [] };
+    const fail = (code, error) => ({ ...result, code, error });
+    if (this._busy) return { ...fail('SHARE_BUSY', '共享目录正在同步'), skipped: true };
+    this._busy = true;
+    this._lastError = '';
+    try {
+      const dir = this.localDir;
+      const remote = this.remoteDir;
+      const generation = this.runtime.guestGeneration;
+      const endpoint = await this.runtime._networkEndpoint();
+      const client = endpoint?.client;
+      if (!client || await client.deviceState().catch(() => '') !== 'device' || !await endpoint.revalidate()) {
+        this._lastError = 'ApkStart 的安卓运行时未连接或未授权';
+        return fail('SHARE_OFFLINE', this._lastError);
       }
+      const stillCurrent = async () => dir === this.localDir && remote === this.remoteDir
+        && generation === this.runtime.guestGeneration && await endpoint.revalidate()
+        && generation === this.runtime.guestGeneration;
+      const guard = async () => {
+        if (!await stillCurrent()) throw new Error('共享目录或安卓运行时已切换，请重新同步');
+      };
+      const avdDir = this.settings().runtime?.avdDir || this.settings().runtime?.dir || '';
+      const scope = JSON.stringify([dir, remote, avdDir]);
+      if (this._ambiguous.scope !== scope) this._ambiguous = { scope, files: new Map() };
+      if (!path.isAbsolute(dir) || !path.posix.isAbsolute(remote) || path.posix.normalize(remote) === '/') {
+        throw new Error('共享目录路径无效');
+      }
+      const state = readJsonFile(this.stateFile, {}, isRecord);
+      // 老记录会把未复制的安卓修改当成已同步；不能拿它作为允许覆盖的依据。
+      const prev = state.value.version === 2 && state.value.scope === scope && isRecord(state.value.entries)
+        ? new Map(Object.entries(state.value.entries)) : new Map();
+
+      await guard();
+      fs.mkdirSync(dir, { recursive: true });
+      const root = fs.realpathSync(dir);
+      await client.shell('mkdir -p ' + quote(remote));
+      const host = localFiles(root);
+      const guest = await remoteFiles(client, remote);
+      const names = new Set([...host.keys(), ...guest.keys()]);
+      const count = new Map();
+      const key = (name) => process.platform === 'win32' ? name.toLowerCase() : name;
+      for (const name of names) count.set(key(name), (count.get(key(name)) || 0) + 1);
+      let dirty = false;
+      const ambiguous = new Map();
+      const remember = (name, local, remoteFileInfo) => { prev.set(name, { local, remote: remoteFileInfo }); dirty = true; };
+
+      // 必须先快照两端并决定方向，不能先把 Windows 版本推上去再检查安卓。
+      for (const rel of names) {
+        const l = host.get(rel) || null;
+        const r = guest.get(rel) || null;
+        const entry = prev.get(rel);
+        if (!compatiblePath(rel) || count.get(key(rel)) > 1) { result.conflicts.push(rel); continue; }
+        if (entry && same(l, entry.local) && same(r, entry.remote)) continue;
+        if (Math.max(l?.size ?? 0, r?.size ?? 0) > MAX_FILE) {
+          result.errors.push(rel + '：文件超过 512 MB，未同步');
+          continue;
+        }
+        const local = path.join(root, rel);
+        const target = path.posix.join(remote, rel);
+        const push = !r || (!!l && !!entry && same(r, entry.remote));
+        const pull = !l || (!!r && !!entry && same(l, entry.local));
+        try {
+          if (push || pull) {
+            const pair = await transfer({ client, guard, root, rel, local, target, l, r, push });
+            remember(rel, pair.local, pair.remote);
+            result[push ? 'pushed' : 'pulled']++;
+          } else {
+            const cached = this._ambiguous.files.get(rel);
+            const conflictKnown = cached && same(l, cached.local) && same(r, cached.remote);
+            await guard();
+            if (!conflictKnown && l.size === r.size && await sameContents(client, local, target)
+              && same(localFile(local), l) && same(await remoteFile(client, target), r)) {
+              await guard();
+              remember(rel, l, r);
+            } else {
+              ambiguous.set(rel, { local: l, remote: r });
+              result.conflicts.push(rel);
+            }
+          }
+        } catch (error) { result.errors.push(rel + '：' + error.message); }
+      }
+      this._ambiguous.files = ambiguous;
+      await guard();
+      for (const rel of prev.keys()) if (!names.has(rel)) { prev.delete(rel); dirty = true; }
+      if (dirty) writeJsonFile(this.stateFile, { version: 2, scope, entries: Object.fromEntries(prev) }, state);
+      if (result.errors.length || result.conflicts.length) {
+        this._lastError = '共享同步未全部完成：' + result.errors.length + ' 个失败，' + result.conflicts.length + ' 个冲突。冲突文件未覆盖。';
+        return fail('SHARE_PARTIAL', this._lastError);
+      }
+      return { ...result, ok: true };
+    } catch (error) {
+      this._lastError = error.message;
+      return fail('SHARE_SYNC_FAILED', error.message);
+    } finally {
+      this._busy = false;
     }
-    return out;
   }
 
   start(intervalMs = 8000) {
     if (this._timer) return;
     this._timer = setInterval(() => { this.sync().catch(() => {}); }, intervalMs);
-    if (this._timer.unref) this._timer.unref();
+    this._timer.unref?.();
   }
 
   stop() {
@@ -188,6 +234,52 @@ class Sharer {
   }
 
   get lastError() { return this._lastError; }
+}
+
+async function transfer({ client, guard, root, rel, local, target, l, r, push }) {
+  const unchanged = async () => {
+    await guard();
+    if (!same(localFile(local), l) || !same(await remoteFile(client, target), r)) {
+      throw new Error('文件在同步时被修改，未覆盖');
+    }
+  };
+  await unchanged();
+  if (push) {
+    const folder = path.posix.dirname(target);
+    const staged = path.posix.join(folder, '.apkstart-sync-' + randomUUID());
+    try {
+      await guard();
+      await client.shell('mkdir -p ' + quote(folder));
+      await guard();
+      await client.push(local, staged);
+      if ((await remoteFile(client, staged))?.size !== l.size) throw new Error('上传结果校验失败');
+      await unchanged();
+      await guard();
+      await client.shell('mv ' + (r ? '-Tf' : '-Tn') + ' ' + quote(staged) + ' ' + quote(target));
+      if (await remoteFile(client, staged)) throw new Error('安卓目标已存在，未覆盖');
+      const uploaded = await remoteFile(client, target);
+      if (uploaded?.size !== l.size) throw new Error('上传后无法确认目标文件');
+      return { local: l, remote: uploaded };
+    } finally {
+      // 只清理由本次传输生成的临时文件，不能向替换后的虚拟机发送清理命令。
+      await guard().then(() => client.shell('rm -f ' + quote(staged))).catch(() => {});
+    }
+  }
+
+  const folder = localParent(root, rel);
+  const staged = path.join(folder, '.apkstart-sync-' + randomUUID());
+  try {
+    await guard();
+    await client.pull(target, staged);
+    if (localFile(staged)?.size !== r.size) throw new Error('下载结果校验失败');
+    await unchanged();
+    await guard();
+    if (l) fs.renameSync(staged, local);
+    else await fs.promises.copyFile(staged, local, fs.constants.COPYFILE_EXCL);
+    return { local: localFile(local), remote: r };
+  } finally {
+    try { fs.unlinkSync(staged); } catch (_) { /* 已发布或没有生成临时文件。 */ }
+  }
 }
 
 module.exports = { Sharer };

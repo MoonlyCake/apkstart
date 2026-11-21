@@ -2,7 +2,9 @@
 
 (() => {
   const panels = window.apkstartUiPanels ||= {};
-  panels.createStorageSettings = function createStorageSettings({ api, $, save, toast }) {
+  panels.createStorageSettings = function createStorageSettings({
+    api, $, save, toast, refreshStatus = async () => {}, networkExplanation = () => '仍未确认可访问互联网。',
+  }) {
     /** 数据分区实际大小 + 磁盘余量，显示在设置页容量选择下方 */
     async function refreshDataInfo() {
       const el = $('dataNote');
@@ -19,8 +21,11 @@
       const pending = Number(info.pendingGB) > 0
         ? ` 目标 ${info.configuredGB} GB 还没生效：安卓正在用快速启动差量盘，需要「重置安卓数据」后按新容量重建（会清空已装应用）。`
         : '';
+      const conflict = info.avdDirConflict
+        ? ` 为保留已有数据，当前仍使用 ${info.avdDirConflict.current}；设置的 ${info.avdDirConflict.requested} 尚未接管。`
+        : '';
       el.textContent = `当前数据分区：${img}${auto ? '（自动）' : ''} · 所在磁盘剩余 ${free}。${pending}`
-        + '游戏提示「存储空间不足」就把这里调大后点「立即扩容」；能就地扩容时不丢已装应用。';
+        + conflict + ' 游戏提示「存储空间不足」时可点「立即扩容」；能就地扩容时不丢已装应用。';
     }
 
     function bindPartition() {
@@ -89,17 +94,18 @@
         btn.disabled = true;
         try {
           const preview = await api.runtimeCleanup({ apply: false, includeSnapshots });
+          if (preview?.ok !== true) throw new Error(preview?.error || '未收到清理预览');
           if (!preview.candidates.length) {
-            toast({ title: '已经是精简状态', body: '没有可回收的旧镜像或快照。', type: 'ok' });
+            toast({ title: '没有可回收的缓存', body: '系统镜像与其他安卓数据不会被自动删除。' });
             return;
           }
           const r = await api.runtimeCleanup({ apply: true, includeSnapshots });
-          if (r.cancelled) return;
-          if (r.ok === false) throw new Error(r.error);
+          if (r?.cancelled) return;
+          if (r?.ok !== true && !r?.removed?.length) throw new Error(r?.error || '未确认清理完成');
           toast({
-            title: '清理完成',
-            body: `释放约 ${(r.saved / 1048576).toFixed(0)} MB（${r.removed.length} 项），已安装应用保留。`,
-            type: 'ok',
+            title: r.ok ? '清理完成' : '仅完成部分清理',
+            body: `释放约 ${((r.saved || 0) / 1048576).toFixed(0)} MB（${r.removed.length} 项）。${r.error || ''}`,
+            type: r.ok ? 'ok' : 'error',
           });
           const u = await api.runtimeUsage();
           $('usageText').textContent = `共 ${u.totalText} · 可回收 ${u.reclaimableText}（${u.count} 项）`;
@@ -119,7 +125,7 @@
             type: 'warning',
             title: '重置安卓数据？',
             message: '这会把安卓系统还原成「刚装好系统」的干净状态：',
-            detail: '• 删除全部已安装的第三方 app（含红果、游戏等）及其数据、登录态\n'
+            detail: '• 删除全部已安装的第三方应用及其数据、登录态\n'
               + '• 删除当前 AVD 的快速启动快照\n'
               + '• 系统镜像本身不受影响，重新打开应用会再次冷启动建数据\n\n'
               + '此操作不可撤销。是否继续？',
@@ -157,7 +163,7 @@
         }
       });
 
-      // 网络修复可能重启安卓，但不是重置数据的入口。
+      // Reconnect the owned guest only; a repaired link still requires fresh Internet validation.
       $('btnRepairNetwork').addEventListener('click', async () => {
         const btn = $('btnRepairNetwork');
         btn.disabled = true;
@@ -166,25 +172,25 @@
             type: 'warning',
             title: '修复虚拟机网络？',
             message: '应用里需要联网的页面一直黑屏/转圈，通常是安卓虚拟机没有网络。',
-            detail: '先尝试重连 Wi-Fi；如果无效，会冷启动安卓一次，正在运行的应用可能关闭。'
-              + '不会清除安卓应用、登录状态或其他数据。是否继续？',
-            buttons: ['取消', '开始修复'],
+            detail: '仅尝试重连当前安卓环境的模拟器网络，不会重启安卓，也不会改动 Windows 网络。是否继续？',
+            okLabel: '开始修复',
             defaultId: 0,
             cancelId: 0,
           });
           if (!ok || ok.response !== 1) return;
           const r = await api.runtimeRepairNetwork();
-          if (!r || !r.ok) {
+          refreshStatus().catch(() => {});
+          if (r?.ok !== true || r.network?.ok !== true) {
             toast({
               title: '网络仍未恢复',
-              body: (r && r.error) || '请检查 Windows 的网络、防火墙或代理。安卓数据未清除。',
+              body: r?.error || networkExplanation(r?.network),
               type: 'error',
             });
             return;
           }
           toast({
-            title: '网络已恢复',
-            body: `${r.network?.ip || '已联网'}（未清除安卓数据）`,
+            title: '已确认安卓能联网',
+            body: r.network.ip || '',
             type: 'ok',
           });
         } catch (e) {
@@ -251,7 +257,7 @@
       $('setDeviceSharedDir').addEventListener('change', (e) => save({ deviceSharedDir: e.target.value.trim() }));
       $('setAutoStart').addEventListener('change', (e) => save({ autoStart: e.target.checked }));
 
-      $('btnOpenShared').addEventListener('click', () => api.openSharedDir());
+      $('btnOpenShared').addEventListener('click', () => openDirectory(() => api.openSharedDir()));
 
       // 两个入口执行同一项操作，在请求完成前都暂停。
       const shortcutButtons = [$('btnRebuildShortcuts'), $('btnRebuildIntegrationShortcuts')];
@@ -284,14 +290,14 @@
         if (!dir) { toast({ title: '请先填写或浏览目录', type: 'error' }); return; }
         const btn = $('btnSaveShared');
         btn.disabled = true;
-        const r = await api.setSharedDir(dir).catch(() => ({ ok: false }));
-        btn.disabled = false;
-        if (r.ok) {
-          const moved = r.oldDir && r.oldDir !== r.newDir;
-          toast({ title: '共享目录已更新', body: moved ? '旧目录里已有的文件已迁移到新目录' : '已保存', type: 'ok' });
-        } else {
-          toast({ title: '保存失败', body: r.error, type: 'error' });
-        }
+        try {
+          const r = await api.setSharedDir(dir);
+          if (r?.ok !== true) throw new Error(r?.error || '未收到迁移确认');
+          $('setSharedDir').value = r.path || dir;
+          toast({ title: '共享目录已更新', body: r.copied ? `已复制 ${r.copied} 项，旧文件保留。` : '没有新文件需要迁移。', type: 'ok' });
+        } catch (e) {
+          toast({ title: '共享目录未修改', body: e.message, type: 'error' });
+        } finally { btn.disabled = false; }
       });
 
       // 一键卸载 ApkStart 本体（取消 .apk 关联 + 启动卸载程序；便携版手动删除）
@@ -318,56 +324,96 @@
         toast({ title: '正在卸载…', body: '卸载程序已启动，ApkStart 即将退出', type: 'ok', sticky: true });
       });
 
-      $('btnOpenData').addEventListener('click', async () => {
-        const info = await api.info();
-        const dir = info.runtimeDir || info.dataDir;
-        window.open(`file:///${dir.replace(/\\/g, '/')}`);
-      });
+      $('btnOpenData').addEventListener('click', () => openDirectory(() => api.runtimeOpenDirectory('runtime')));
       $('btnBrowseRuntimeDir').addEventListener('click', async () => {
-        const picked = await api.openDir();
-        if (!picked) return;
-        await api.setSettings({ runtime: { dir: picked } });
-        $('setRuntimeDir').value = picked;
-        toast({ title: '数据目录已更新', body: '请重启 ApkStart 使其生效（旧数据不会自动搬移）', type: 'ok', sticky: true });
+        try {
+          const picked = await api.openDir();
+          if (!picked) return;
+          const r = await api.setSettings({ runtime: { dir: picked } });
+          if (!r?.runtime || r.ok === false) throw new Error(r?.error || '没有收到目录保存确认');
+          const active = await api.info();
+          $('setRuntimeDir').value = active.runtimeDir || active.dataDir;
+          toast({ title: '部署目录已保存', body: '旧文件没有被移动或删除。', type: 'ok' });
+          await refreshDataInfo();
+        } catch (e) {
+          toast({ title: '部署目录未更新', body: e.message, type: 'error' });
+        }
       });
 
       // 安卓数据目录（AVD + 快照）：真正吃盘的那块，单独指到别的盘
       if ($('btnBrowseAvdDir')) {
         $('btnBrowseAvdDir').addEventListener('click', async () => {
-          const picked = await api.openDir();
-          if (!picked) return;
-          await api.setSettings({ runtime: { avdDir: picked } });
-          $('setAvdDir').value = picked;
-          toast({
-            title: '安卓数据目录已更新',
-            body: '请重启 ApkStart 使其生效。旧目录里的 apkstart.avd 可以整体搬到新目录，再删掉旧的。',
-            type: 'ok',
-            sticky: true,
-          });
+          try {
+            const picked = await api.openDir();
+            if (!picked) return;
+            const r = await api.setSettings({ runtime: { avdDir: picked } });
+            if (!r?.runtime || r.ok === false) throw new Error(r?.error || '未收到目录保存确认');
+            const info = await api.dataInfo();
+            $('setAvdDir').value = info.avdDir || '';
+            toast(info.avdDirConflict ? {
+              title: '仍在使用原来的安卓数据',
+              body: `新目录未接管；当前有效目录为 ${info.avdDirConflict.current}。请保留原目录。`,
+              type: 'info', sticky: true,
+            } : { title: '安卓数据目录已保存', body: '旧安卓数据没有被搬移或删除。', type: 'ok' });
+            await refreshDataInfo();
+          } catch (e) {
+            toast({ title: '安卓数据目录未更新', body: e.message, type: 'error' });
+          }
         });
       }
       if ($('btnOpenAvdDir')) {
-        $('btnOpenAvdDir').addEventListener('click', async () => {
-          const info = await api.dataInfo().catch(() => null);
-          const dir = (info && info.avdDir) || (await api.info()).dataDir;
-          window.open(`file:///${String(dir).replace(/\\/g, '/')}`);
-        });
+        $('btnOpenAvdDir').addEventListener('click', () => openDirectory(() => api.runtimeOpenDirectory('avd')));
       }
 
       $('btnAssoc').addEventListener('click', async () => {
         const btn = $('btnAssoc');
-        if (btn.dataset.on === '1') {
-          await api.assocUnregister();
-          btn.textContent = '未关联 · 点击开启';
-          btn.dataset.on = '0';
-          toast({ title: '.apk 关联已取消' });
-        } else {
-          const r = await api.assocRegister();
-          btn.textContent = '已关联 · 点击取消';
-          btn.dataset.on = '1';
-          toast({ title: '.apk 关联已开启', body: r.ok ? '现在双击 APK 会直接安装到 ApkStart' : '', type: r.ok ? 'ok' : 'error' });
+        btn.disabled = true;
+        try {
+          const mode = btn.dataset.mode;
+          if (mode === 'choose') {
+            const r = await api.assocOpenDefaultSettings();
+            if (r?.ok !== true) throw new Error(r?.error || '未打开默认应用设置');
+            toast({ title: '请在 Windows 设置中选择 .apk 默认应用' });
+            return;
+          }
+          const r = mode === 'effective' ? await api.assocUnregister() : await api.assocRegister();
+          await refreshAssoc();
+          if (r?.needsDefaultSelection) {
+            btn.dataset.mode = 'choose';
+            btn.textContent = '转到 Windows 默认应用';
+            toast({ title: '还需要在 Windows 中确认默认应用', body: r.error || '点击按钮打开 Windows 设置。' });
+          } else if (r?.ok !== true) {
+            throw new Error(r?.error || 'Windows 没有确认关联已更新');
+          } else if (mode === 'effective') {
+            toast(r.removed ? { title: '本实例的 .apk 关联已取消', type: 'ok' }
+              : { title: '无本实例的关联需要取消' });
+          } else if (r.effective) {
+            toast({ title: '已确认 .apk 默认由本实例打开', type: 'ok' });
+          }
+        } catch (e) {
+          toast({ title: 'APK 关联未确认', body: e.message, type: 'error' });
+        } finally {
+          btn.disabled = false;
         }
       });
+    }
+
+    async function openDirectory(open) {
+      try {
+        const r = await open();
+        if (r?.ok !== true) throw new Error(r?.error || '没有收到打开目录的确认');
+      } catch (e) {
+        toast({ title: '未打开目录', body: e.message, type: 'error' });
+      }
+    }
+
+    async function refreshAssoc() {
+      const btn = $('btnAssoc');
+      if (!btn) return;
+      const r = await api.assocStatus();
+      btn.dataset.mode = r?.effective ? 'effective' : r?.registered ? 'choose' : 'register';
+      btn.textContent = r?.effective ? '已生效 · 点击取消'
+        : r?.registered ? '已注册候选 · 选择 Windows 默认应用' : '未确认默认关联 · 点击注册';
     }
 
     function bind() {
@@ -376,6 +422,6 @@
       bindIntegration();
     }
 
-    return { bind, refreshDataInfo };
+    return { bind, refreshDataInfo, refreshAssoc };
   };
 })();

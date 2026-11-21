@@ -69,7 +69,7 @@ const FEATURE_SCRIPT = [
   '$ErrorActionPreference = "SilentlyContinue";',
   '$o = [ordered]@{};',
   'foreach ($n in @("HypervisorPlatform","VirtualMachinePlatform","Microsoft-Hyper-V-All")) {',
-  '  try { $o[$n] = (Get-WindowsOptionalFeature -Online -FeatureName $n -ErrorAction Stop).State } catch { $o[$n] = "unknown" }',
+  '  try { $o[$n] = [string](Get-WindowsOptionalFeature -Online -FeatureName $n -ErrorAction Stop).State } catch { $o[$n] = "unknown" }',
   '}',
   '$o | ConvertTo-Json -Compress',
 ].join(' ');
@@ -281,7 +281,8 @@ function evaluate({ hw = {}, settings = {}, edition = 'installer' } = {}) {
 
   // ---- 2. Windows 侧：WHPX / Hyper-V ----
   const hp = String(v.hypervisorPlatform || 'unknown');
-  const hpxOn = hp === 'enabled' || (hp === 'unknown' && v.winHvApi && v.hypervisorPresent);
+  const whpxRunning = v.accelOk && v.accelKind === 'whpx';
+  const hpxOn = whpxRunning || hp === 'enabled' || (hp === 'unknown' && v.winHvApi && v.hypervisorPresent);
   if (hpxOn) {
     add({
       key: 'whpx-ok',

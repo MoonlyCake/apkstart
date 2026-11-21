@@ -6,6 +6,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { createHash } = require('node:crypto');
 
 const TMP = path.join(os.tmpdir(), `apkstart-auto-test-${Date.now()}`);
 process.env.APPDATA = TMP;
@@ -156,7 +157,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
 
   console.log('\n[layers.js 容器式瘦身]');
 
-  await test('盘点可回收项：非 x86_64 QEMU、旧镜像、旧 AVD、旧快照', () => {
+  await test('运行时清理只碰快照；非 x86_64 QEMU 只在构建裁剪中列出', () => {
     const root = path.join(TMP, 'runtime-layers');
     const mk = (p, size) => {
       fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -176,12 +177,12 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
 
     const a = layers.analyze(root);
     const paths = a.candidates.map((c) => c.path.replace(/\\/g, '/'));
-    assert(paths.some((p) => p.endsWith('qemu-system-aarch64.exe')), '应列出非 x86_64 QEMU');
+    assert(!paths.some((p) => p.endsWith('qemu-system-aarch64.exe')), '用户清理不裁剪引擎');
     assert(!paths.some((p) => p.endsWith('qemu-system-x86_64.exe')), '不能删 x86_64 QEMU');
-    assert(paths.some((p) => p.includes('android-30')), '应列出旧版 API30 镜像');
+    assert(!paths.some((p) => p.includes('android-30')), '其他 AVD 可能仍依赖 API30 镜像');
     assert(!paths.some((p) => p.endsWith('.lock')), '不能把活动 AVD 的锁列为清理项');
     assert(paths.some((p) => p.includes('snapshots')), '应列出旧快照');
-    assert(paths.some((p) => p.includes('apkstart-arm.avd')), '应列出非活动 AVD');
+    assert(!paths.some((p) => p.includes('apkstart-arm.avd')), '非活动 AVD 还是用户数据');
     assert(!paths.some((p) => p.endsWith('apkstart.avd/config.ini')), '不能删活动 AVD 配置');
 
     const dry = layers.prune(root, { apply: false });
@@ -189,10 +190,14 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(fs.existsSync(path.join(root, 'avd', 'apkstart-arm.avd', 'userdata-qemu.img')));
 
     const done = layers.prune(root, { apply: true });
-    assert(done.saved > 0 && done.removed.length >= 4, '实际清理应释放空间');
-    assert(!fs.existsSync(path.join(root, 'avd', 'apkstart-arm.avd')), '非活动 AVD 应被清掉');
+    assert(done.saved > 0 && done.removed.length === 1 && !done.failed.length, '实际清理仅释放快照空间');
+    assert(fs.existsSync(path.join(root, 'avd', 'apkstart-arm.avd')), '非活动 AVD 必须保留');
+    assert(fs.existsSync(path.join(root, 'system-images', 'android-30', 'default', 'x86_64', 'system.img')), 'API30 镜像必须保留');
     assert(fs.existsSync(path.join(root, 'avd', 'apkstart.avd', 'config.ini')), '活动 AVD 必须保留');
     assert(fs.existsSync(path.join(root, 'emulator', 'qemu', 'windows-x86_64', 'qemu-system-x86_64.exe')), 'x86_64 QEMU 必须保留');
+    const build = layers.analyze(root, { aggressive: true, keepSnapshots: true });
+    assert(build.candidates.length === 1, '构建裁剪只列出明确的精简候选项');
+    assert(build.candidates[0].path.endsWith('qemu-system-aarch64.exe'));
   });
 
   console.log('\n[adb.js 安装/启动失败可读性]');
@@ -209,58 +214,62 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
 
   console.log('\n[sharer 不再来回搬运（磁盘写满的元凶）]');
 
-  await test('同一个文件不会每轮都被从设备拉回来', async () => {
+  function sharedFixture(directory, entries = []) {
     const { Sharer } = require('../src/core/sharer');
-    const localDir = path.join(TMP, 'shared');
-    fs.mkdirSync(localDir, { recursive: true });
-    const file = path.join(localDir, 'a.txt');
-    fs.writeFileSync(file, 'hello');
-
-    const calls = { push: 0, pull: 0 };
-    const fakeClient = {
-      isOnline: async () => true,
-      shellMkdir: async () => {},
-      shell: async () => '',
-      push: async () => { calls.push += 1; },
-      pull: async (_r, dst) => { calls.pull += 1; fs.writeFileSync(dst, 'hello'); },
-      listRemoteStat: async () => [{ rel: 'a.txt', size: 5, mtime: Date.now() - 60000 }],
+    const remote = '/sdcard/x';
+    const localDir = path.join(TMP, directory);
+    const files = new Map(entries.map(([name, value]) => [remote + '/' + name, value]));
+    const calls = { pushed: 0, pulled: 0, scans: [] };
+    const stat = (row) => row ? row.size + '|mtime-1|ctime-1' : 'ABSENT';
+    const client = {
+      async deviceState() { return 'device'; },
+      async shell(cmd) {
+        const paths = Array.from(cmd.matchAll(/'([^']*)'/g), (m) => m[1]);
+        if (cmd.startsWith('cd ')) {
+          calls.scans.push(cmd);
+          return [...Array.from(files, ([name, row]) => stat(row) + '|./' + name.slice(remote.length + 1)),
+            '__APKSTART_SHARED_SCAN_DONE__'].join('\n');
+        }
+        if (cmd.startsWith('mkdir -p ')) return '';
+        if (cmd.startsWith('if [ -f ')) return stat(files.get(paths[0]));
+        if (cmd.startsWith('mv ')) {
+          const row = files.get(paths[0]);
+          assert(row, '要先复制到暂存文件');
+          files.delete(paths[0]);
+          files.set(paths[1], row);
+          return '';
+        }
+        if (cmd.startsWith('rm -f ')) { files.delete(paths[0]); return ''; }
+        throw new Error('unexpected command: ' + cmd);
+      },
+      async push(src, dst) { calls.pushed++; files.set(dst, { size: fs.statSync(src).size }); },
+      async pull(src, dst) { calls.pulled++; fs.writeFileSync(dst, files.get(src).contents); },
     };
-    const sh = new Sharer({ client: () => fakeClient });
-    sh.localDirOverride = localDir;
-    // 用真实的路径/状态文件，但目录指向临时目录
-    Object.defineProperty(sh, 'localDir', { get: () => localDir });
-    Object.defineProperty(sh, 'remoteDir', { get: () => '/sdcard/x' });
-    sh.stateFile = path.join(TMP, 'shared-state.json');
+    const runtime = { guestGeneration: 1, _networkEndpoint: async () => ({ client, revalidate: async () => true }) };
+    const sharer = new Sharer(runtime, {
+      settings: () => ({ sharedDir: localDir, deviceSharedDir: remote }),
+      stateFile: path.join(TMP, directory + '-state.json'),
+    });
+    return { sharer, localDir, calls };
+  }
 
-    await sh.sync();          // 第 1 轮：本机新文件 → 推上去
-    const firstPull = calls.pull;
-    await sh.sync();          // 第 2 轮
-    await sh.sync();          // 第 3 轮
-    await sh.sync();          // 第 4 轮
-    assert(calls.push === 1, `只应推送一次，实际 ${calls.push}`);
-    assert(firstPull === 0, `刚推上去的文件不该立刻被拉回来，实际拉取 ${firstPull} 次`);
-    assert(calls.pull === firstPull, `后续轮次不应再反复拉取，实际累计 ${calls.pull} 次`);
+  await test('同一个文件不会每轮都被从设备拉回来', async () => {
+    const { sharer, localDir, calls } = sharedFixture('shared');
+    fs.mkdirSync(localDir, { recursive: true });
+    fs.writeFileSync(path.join(localDir, 'a.txt'), 'hello');
+    for (let i = 0; i < 4; i++) {
+      const result = await sharer.sync();
+      assert(result.ok && result.pulled === 0 && result.pushed === (i === 0 ? 1 : 0), JSON.stringify(result));
+    }
+    assert(calls.pushed === 1 && calls.pulled === 0, JSON.stringify(calls));
   });
 
   await test('超大文件不会被反向拉回本机（本地目录不是设备缓存下水道）', async () => {
-    const { Sharer } = require('../src/core/sharer');
-    const localDir = path.join(TMP, 'shared2');
-    fs.mkdirSync(localDir, { recursive: true });
-    let pulled = 0;
-    const fakeClient = {
-      isOnline: async () => true,
-      shellMkdir: async () => {},
-      shell: async () => '',
-      push: async () => {},
-      pull: async () => { pulled += 1; },
-      listRemoteStat: async () => [{ rel: 'big.mp4', size: 600 * 1024 * 1024, mtime: Date.now() }],
-    };
-    const sh = new Sharer({ client: () => fakeClient });
-    Object.defineProperty(sh, 'localDir', { get: () => localDir });
-    Object.defineProperty(sh, 'remoteDir', { get: () => '/sdcard/x' });
-    sh.stateFile = path.join(TMP, 'shared-state2.json');
-    await sh.sync();
-    assert(pulled === 0, '超过 512MB 的文件不应拉回本机');
+    const { sharer, localDir, calls } = sharedFixture('shared2', [['big.mp4', { size: 600 * 1024 * 1024 }]]);
+    const result = await sharer.sync();
+    assert(!result.ok && result.code === 'SHARE_PARTIAL' && /512 MB/.test(result.errors[0]), JSON.stringify(result));
+    assert(calls.scans.length === 1 && calls.pulled === 0 && !fs.existsSync(path.join(localDir, 'big.mp4')),
+      '应实际扫描超大文件但不拉回本机');
   });
 
   console.log('\n[adb/sharer 文件互通]');
@@ -279,15 +288,15 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
   });
 
   await test('远端文件列表可用 find+stat 一次拿全（不依赖 ls 日期解析）', async () => {
-    const { Sharer } = require('../src/core/sharer');
-    const sh = Object.create(Sharer.prototype);
-    const fake = {
-      shell: async () => '12|1794480758|./a.txt\n8|1794480759|./sub/b.txt\n',
-      listRemote: async () => [],
-    };
-    const rows = await sh.listRemoteRecursive(fake, '/sdcard/x');
-    assert(rows.length === 2, `应返回 2 个文件，实际 ${rows.length}`);
-    assert(rows[1].rel === 'sub/b.txt' && rows[1].mtime > 1e12, JSON.stringify(rows[1]));
+    const { sharer, localDir, calls } = sharedFixture('shared-tree', [
+      ['a.txt', { size: 5, contents: 'hello' }],
+      ['sub/b.txt', { size: 8, contents: 'contents' }],
+    ]);
+    const result = await sharer.sync();
+    assert(result.ok && result.pulled === 2, JSON.stringify(result));
+    assert(calls.scans.length === 1 && /find \. -type f -exec stat/.test(calls.scans[0]), JSON.stringify(calls));
+    assert(fs.readFileSync(path.join(localDir, 'a.txt'), 'utf8') === 'hello', '顶层文件未复制');
+    assert(fs.readFileSync(path.join(localDir, 'sub', 'b.txt'), 'utf8') === 'contents', '子目录文件未复制');
   });
 
   console.log('\n[zip.js 大包流式解压]');
@@ -518,10 +527,9 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     const j = adb.indexOf('async resetDisplayOverrides(');
     const body = adb.slice(i, j);
     assert(!/wm size \d/.test(body), 'setOrientation 不得再设置 wm size 覆盖');
-    // density 现在统一走 tabletDensity()（用户可在设置里关掉平板排版），
-    // 但常量本身必须仍是 190（720 宽 → 606dp 才越过平板断点）。
-    assert(/wm density \$\{tabletDensity\(\)\}/.test(body), 'density 只作为退化路径保留');
-    assert(/const TABLET_DENSITY = 190/.test(adb), '平板密度常量必须是 190');
+    const { tabletDensityFor } = require('../src/core/display');
+    assert(tabletDensityFor(720, 1280) === 190, '720p 仍应保留约 606dp 的平板排版');
+    assert(tabletDensityFor(1080, 1920) === 285, '1080p 不应继续使用 720p 的密度');
   });
 
   await test('游戏模式必须使用高优先级且关闭全局鼠标钩子', () => {
@@ -935,7 +943,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(/keep/.test(detachBlock.slice(0, 600)), 'detach 需要 keep 参数区分「切独立」和「结束嵌入」');
 
     // 尺寸要按面板比例算：模拟器自己锁宽高比，给错比例会被夹回去
-    assert(/_panelRatio/.test(appwinJs), '独立窗口尺寸必须按面板比例计算');
+    assert(/windowBounds\(this\.portrait, area/.test(appwinJs), '独立窗口尺寸必须复用面板比例计算');
     assert(!/w:\s*Math\.min\(area\.w - 80, 1280\)/.test(appwinJs), '不能再写死 1280 宽（会被模拟器夹成竖条）');
   });
 
@@ -963,7 +971,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(/agent\.setTitle\(/.test(appwin), '独立窗口打开时要真的改标题');
   });
 
-  await test('中文环境：开机注入 locale、静默装拼音输入法、captive portal 国内端点', () => {
+  await test('中文环境：开机注入 locale 并静默装拼音输入法，不更改网络验证设置', () => {
     const root = path.join(__dirname, '..');
     const emuJs = fs.readFileSync(path.join(root, 'src', 'core', 'emulator.js'), 'utf8');
     const adbJs = fs.readFileSync(path.join(root, 'src', 'core', 'adb.js'), 'utf8');
@@ -992,9 +1000,8 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(/_chineseReady/.test(engJs), '中文初始化要幂等（每次开机只做一次）');
     assert(/chineseIme/.test(engJs), '要允许用户关掉');
 
-    // 联网验证端点：不能让 gstatic 把网络标成「!」
-    assert(/captive_portal_http_url/.test(adbJs), '要设置国内联网验证端点');
-    assert(/connect\.rom\.miui\.com/.test(adbJs), '端点要国内可达');
+    // 独立网络体检可探测实际连通性，中文环境不重写或禁用 Android 自身的验证。
+    assert(!/settings put global captive_portal_/.test(adbJs), '语言设置不能关闭网络验证或修改探测地址');
 
     // 设置页要有开关
     assert(/setLocale/.test(html) && /setChineseIme/.test(html), '设置页要暴露语言/输入法开关');
@@ -1073,18 +1080,17 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     //  2) 逻辑方向锁 **0**：面板已经是横的，再锁 1 会把横面板转成竖逻辑空间
     //  3) 忽略应用自己的方向请求：红果这类应用声明 portrait，系统照办后
     //     init=1280x720 的横面板会变成 cur=720x1280 的竖逻辑空间
-    const setOri = adbJs.slice(adbJs.indexOf('async setOrientation'), adbJs.indexOf('async resetDisplayOverrides'));
-    assert(/wm user-rotation lock 0/.test(setOri),
-      'setOrientation 必须锁 rotation 0（锁 1 会让横面板躺倒）');
-    assert(!/user-rotation lock \$\{landscape \? 1/.test(setOri),
+    const oriCommands = adbJs.slice(adbJs.indexOf('function orientationCommands'), adbJs.indexOf('function targetWindowDrawn'));
+    assert(/wm user-rotation lock 0/.test(oriCommands) && /wm set-user-rotation lock 0/.test(oriCommands),
+      '现代和 Android 11 的命令都必须锁 rotation 0');
+    assert(!/user-rotation lock \$\{landscape \? 1/.test(oriCommands),
       '不能再按 landscape 锁 1 —— 那是「只有竖面板可旋转」时代的写法');
-    assert(/wm set-ignore-orientation-request/.test(setOri),
+    assert(/wm set-ignore-orientation-request/.test(oriCommands) && /wm set-fix-to-user-rotation/.test(oriCommands),
       '必须忽略应用的屏幕方向请求，否则竖屏锁定的应用会躺倒');
 
     const reset = adbJs.slice(adbJs.indexOf('async resetDisplayOverrides'));
-    assert(/wm user-rotation lock 0/.test(reset.slice(0, 800)), 'resetDisplayOverrides 也要锁 0');
-    assert(/wm set-ignore-orientation-request/.test(reset.slice(0, 800)),
-      'resetDisplayOverrides 也要按模式设置 ignore-orientation');
+    assert(/orientationCommands\(landscape\)/.test(reset.slice(0, 1800)),
+      'resetDisplayOverrides 必须使用同一套方向设置');
   });
 
   await test('关闭应用必须有入口：右键菜单 + 托盘 + IPC 一个都不能少', async () => {
@@ -1118,7 +1124,8 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(/await appSessions\.stop\(target\)/.test(mainJs) && !/let currentAppPkg/.test(mainJs),
       '停止后的前台标记必须只从会话控制器读取');
     const stop = mainJs.slice(mainJs.indexOf('async function stopApp('));
-    assert(/agent\.hide\(\)[\s\S]{0,180}appWin\.close/.test(stop), '独立窗口模式先 hide 再 close');
+    assert(/await appSessions\.stop\(target\)[\s\S]{0,500}await appWin\.close/.test(stop),
+      '确认 Android 停止后，才关闭并停放对应会话的窗口');
     assert(/onCloseApp\(\(_pkg, ticket\)[\s\S]{0,160}appSessions\.close\(ticket\)/.test(mainJs),
       '外部关闭同样使用窗口代际令牌');
   });
@@ -1197,7 +1204,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     // 独立窗口模式下「全屏」要作用在模拟器窗口上，maximize 一个隐藏窗口没有意义
     const appwinJs = fs.readFileSync(path.join(root, 'src', 'core', 'appwin.js'), 'utf8');
     assert(/_wantFullscreen/.test(appwinJs), '独立窗口模式要记住全屏意图');
-    assert(/if \(this\._wantFullscreen\)/.test(appwinJs), 'openDetached 要按全屏铺满可用区');
+    assert(/_displayBounds\(area, this\._wantFullscreen/.test(appwinJs), 'openDetached 要按全屏铺满可用区');
 
     // 修复：重启运行时后旧 rt.client 失效，beforeStart 必须返回新的 rt
     const instJs = fs.readFileSync(path.join(root, 'src', 'core', 'installer.js'), 'utf8');
@@ -1206,10 +1213,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(/return newRt/.test(mainJs) || /return rt/.test(mainJs.slice(mainJs.indexOf('restartForOrientation'))),
       'restartForOrientation 要返回新的 rt 给 beforeStart');
 
-    // 修复：独立窗口模式横屏时 _panelRatio 要按面板方向校正
-    assert(/this\.state\.landscape.*b\.height > b\.width/.test(appwinJs)
-      || /landscape.*height.*width/.test(appwinJs),
-      '_panelRatio 横屏时要校正比值');
+    assert(/landscape: this\.state\.landscape/.test(appwinJs), '横屏时将面板方向传给共用的显示计算');
   });
 
   await test('点开应用要尽早出画面：进程一出现就接窗口，不等 4 秒观察期', () => {
@@ -1228,58 +1232,17 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(mainJs.includes('await presentation.finishAttachment()'), '稳定后应等待接管结果，失败时重试');
   });
 
-  await test('虚拟机联网：AVD 必须开虚拟 Wi-Fi，且能主动重连「不会自动连」的热点', () => {
+  await test('虚拟机联网：启用虚拟 Wi-Fi、只验证真实连通性，修复不隐式重启或清数据', () => {
     const root = path.join(__dirname, '..');
     const emuJs = fs.readFileSync(path.join(root, 'src', 'core', 'emulator.js'), 'utf8');
     const engineJs = fs.readFileSync(path.join(root, 'src', 'core', 'engine.js'), 'utf8');
-
-    // API 34 的 Play Store 镜像上网走 wlan0（netsim 虚拟 Wi-Fi），不是 eth0。
-    // config.ini 少了 hw.wifi，wlan0 就永远 NO-CARRIER，应用里一直「网络错误」。
-    assert(/['"]hw\.wifi=yes['"]/.test(emuJs), 'config.ini 必须写 hw.wifi=yes');
-
-    // 实机根因：AndroidWifi 会落成「Saved / Won't automatically connect」，
-    // 开机后不自动连接。shell 又没有 NETWORK_SETTINGS 权限，cmd wifi
-    // connect-network 会抛 SecurityException，所以只能走 UI 点一下。
-    assert(/async repairWifi/.test(emuJs), '需要有主动重连 Wi-Fi 的能力');
-    assert(/WIFI_SETTINGS/.test(emuJs), '重连需要拉起 Wi-Fi 设置页');
-    assert(/uiautomator dump/.test(emuJs), '重连要靠 uiautomator 找到热点再点');
-    // 连上之后还要把「联网验证」探针换成国内可达的端点，否则系统一直给网络打「!」，
-    // 部分应用据此判定离线、拒绝加载内容。
-    assert(/captive_portal_http_url/.test(emuJs), '需要把联网验证探针改成国内可达端点');
-    // 明令禁止用 connect-network 当主方案（权限不够，必然失败）。
-    // 只看真正的代码行——注释里提到它是在解释为什么不用。
-    const emuCode = emuJs.split('\n')
-      .map((l) => l.replace(/\/\/.*$/, ''))
-      .filter((l) => l.trim() && !/^\s*(\*|\/\*)/.test(l))
-      .join('\n');
-    assert(!/cmd wifi connect-network/.test(emuCode), 'shell 没有 connect-network 权限，不能用它');
-
-    // 网络修复先重连再冷启动；自动诊断走同一路径，不能把未联网当成清空授权。
-    const repair = engineJs.slice(engineJs.indexOf('async repairNetwork'), engineJs.indexOf('  dispose()'));
-    const wifiAt = repair.indexOf('repairWifi');
-    const bootAt = repair.indexOf('this.lifecycle.restart');
-    assert(wifiAt > -1 && bootAt > wifiAt, '先重连 Wi-Fi，再冷启动');
-    assert(!/forceWipe|resetAndroidData/.test(repair), '修复网络不能自动重置数据');
-
-    // ensureNetwork 也要先试轻量修复，别直接冷启动
-    const ensure = engineJs.slice(engineJs.indexOf('async ensureNetwork'));
-    const ensureBody = ensure.slice(0, ensure.indexOf('async repairNetwork'));
-    const eWifi = ensureBody.indexOf('repairWifi');
-    const eBoot = ensureBody.indexOf('_netColdBootTried');
-    assert(eWifi > -1 && eBoot > -1 && eWifi < eBoot,
-      'ensureNetwork 应先尝试重连 Wi-Fi，再考虑冷启动');
-
-    // 启动路径（installer）上也要做一次，否则每次点开应用都先吃一个「没网」的应用。
-    // 注意这里只允许非破坏性的 repairWifi，绝不能出现 ensureNetwork（会冷启动）。
     const instJs = fs.readFileSync(path.join(root, 'src', 'core', 'installer.js'), 'utf8');
-    assert(/repairWifi/.test(instJs), '启动应用前应尝试修复 Wi-Fi');
-    assert(!/\.ensureNetwork\(/.test(instJs), '启动路径不能调 ensureNetwork（会停虚拟机冷启动）');
-    // 必须挂在 engine（this.runtime）上：rt 是 ensure() 的返回对象，只有 client。
-    // 写成 rt.repairWifi 会是 undefined，调用即抛错又被 catch 吞掉，等于没修。
-    assert(/this\.runtime\.repairWifi\(/.test(instJs), 'repairWifi 要挂在 engine（this.runtime）上');
-    assert(!/\brt\.repairWifi\(/.test(instJs), 'rt 是 ensure() 的返回对象，上面没有 repairWifi');
-    // engine 上这个转发方法必须真的存在，否则 installer 里调用同样是 undefined
-    assert(/async repairWifi\(/.test(engineJs), 'engine 必须实现 repairWifi 转发');
+    assert(/['"]hw\.wifi=yes['"]/.test(emuJs), 'config.ini 必须写 hw.wifi=yes');
+    const repair = engineJs.slice(engineJs.indexOf('async waitForNetwork'), engineJs.indexOf('  dispose()'));
+    assert(!/lifecycle\.restart|forceWipe|resetAndroidData/.test(repair), '网络恢复不能偷偷重启或重置安卓');
+    assert(/this\.runtime\.waitForNetwork\(/.test(instJs), '启动路径使用运行时的网络结果');
+    assert(!/this\.runtime\.repairWifi\(/.test(instJs), '运行时负责重连，不得由启动路径重复重连');
+    // 断开的网卡、真实 204、过期所有权和超时的具体行为见独立网络夹具。
   });
 
   await test('WinAgent.setHook(false) 在默认状态下不会拉起 PowerShell 代理', async () => {
@@ -1663,7 +1626,8 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     ];
     const out = path.join(TMP, 'multi.bin');
     try {
-      const r = await downloadMulti(urls, out, { connections: 6, minChunk: 512 * 1024 });
+      const expectSha256 = createHash('sha256').update(data).digest('hex');
+      const r = await downloadMulti(urls, out, { connections: 6, minChunk: 512 * 1024, expectSha256 });
       const got = fs.readFileSync(out);
       assert(Buffer.compare(got, data) === 0, '多源拼装后内容必须与源文件完全一致');
       assert(r.sources === 2 && r.parallel >= 2, `应同时用到 2 个源，实际 ${JSON.stringify(r)}`);
@@ -1700,6 +1664,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     const s2 = await mk();
     const urls = [`http://127.0.0.1:${s1.address().port}/f`, `http://127.0.0.1:${s2.address().port}/f`];
     const out = path.join(TMP, 'multi-resume.bin');
+    const expectSha256 = createHash('sha256').update(data).digest('hex');
     try {
       // 造出「前两块已下完、最后一块没下」的现场（分块方式：3 连接 × 1MB）
       const per = Math.ceil(total / 3);
@@ -1707,9 +1672,9 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
       fs.ftruncateSync(fd, total);
       fs.writeSync(fd, data, 0, per * 2, 0);
       fs.closeSync(fd);
-      fs.writeFileSync(`${out}.chunks.json`, JSON.stringify({ total, n: 3, done: [0, per] }));
+      fs.writeFileSync(`${out}.chunks.json`, JSON.stringify({ sha256: expectSha256, total, n: 3, done: [0, per] }));
 
-      const r = await downloadMulti(urls, out, { connections: 3, minChunk: MB });
+      const r = await downloadMulti(urls, out, { connections: 3, minChunk: MB, expectSha256 });
       assert(r.resumed === true, '应识别出这是断点续传');
       assert(ranged === 1, `只应补下 1 个块，实际请求 ${ranged} 块`);
       assert(Buffer.compare(fs.readFileSync(out), data) === 0, '续传后的文件必须与源完全一致');
@@ -1752,7 +1717,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
       const r = await downloadMulti(
         [`http://127.0.0.1:${s1.address().port}/f`, `http://127.0.0.1:${s2.address().port}/f`],
         out,
-        { connections: 4, minChunk: 1024 * 1024, idleMs: 400, retries: 2 },
+        { connections: 4, minChunk: 1024 * 1024, idleMs: 400, retries: 2, expectSha256: createHash('sha256').update(data).digest('hex') },
       );
       const cost = Date.now() - t0;
       assert(fs.statSync(out).size === data.length, '最终必须下完整');
@@ -1804,7 +1769,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
       await downloadMulti(
         [`http://127.0.0.1:${s1.address().port}/f`, `http://127.0.0.1:${s2.address().port}/f`],
         out,
-        { connections: 2, minChunk: 512 * 1024, idleMs: 3000, slowAfterMs: 400, slowBps: 200 * 1024 },
+        { connections: 2, minChunk: 512 * 1024, idleMs: 3000, slowAfterMs: 400, slowBps: 200 * 1024, expectSha256: createHash('sha256').update(data).digest('hex') },
       );
       const cost = Date.now() - t0;
       assert(Buffer.compare(fs.readFileSync(out), data) === 0, '换源后内容必须正确');
@@ -2190,7 +2155,8 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     const appwin = fs.readFileSync(path.join(root, 'src', 'core', 'appwin.js'), 'utf8');
     // maximize() 会把 show:false 的 BrowserWindow 直接显示出来 —— 这是
     // 「打开应用出现多个窗口」的直接成因之一。
-    assert(/fullscreen && !this\.detachedMode\) this\.win\.maximize\(\)/.test(appwin),
+    const detached = appwin.slice(appwin.indexOf('async _openDetached('), appwin.indexOf('  embed(isCurrent)'));
+    assert(!/shell\.maximize\(\)|this\.win\.maximize\(\)/.test(detached),
       '独立窗口模式不能 maximize 壳窗口（会凭空显示一个黑窗口）');
     assert(/if \(this\.detachedMode\) this\.agent\.show\(\)/.test(appwin),
       '独立模式下重复点同一个应用要把模拟器窗口抬到前面，而不是显示壳窗口');
@@ -2281,27 +2247,21 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
   await test('标题要在 show 之前设，否则会闪上一个应用的名字', () => {
     const root = path.join(__dirname, '..');
     const appwin = fs.readFileSync(path.join(root, 'src', 'core', 'appwin.js'), 'utf8');
-    const start = appwin.indexOf('async openDetached(');
-    const body = appwin.slice(start, start + 2000);
-    const titleIdx = body.indexOf('this.agent.setTitle(');
-    const showIdx = body.indexOf('this.agent.show()');
+    const start = appwin.indexOf('async _openDetached(');
+    const body = appwin.slice(start, appwin.indexOf('  embed(isCurrent)', start));
+    const titleIdx = body.indexOf('agent.setTitle(');
+    const showIdx = body.indexOf('agent.show()');
     assert(titleIdx > 0 && showIdx > 0, '两个调用都要在 openDetached 里');
     assert(titleIdx < showIdx, 'setTitle 必须在 show 之前（代理缓存着上次的标题）');
   });
 
-  await test('网络体检不能一次不过就叫人重置数据', () => {
+  await test('网络体检不是开机就绪的阻塞条件，等待网络也不重置安卓', () => {
     const root = path.join(__dirname, '..');
-    const emuJs = fs.readFileSync(path.join(root, 'src', 'core', 'emulator.js'), 'utf8');
-    // Wi-Fi 关联比 sys.boot_completed 晚 5~20 秒，查一次就报「没有网络」等于每次
-    // 冷启动都误报；而以前的补救建议是「重置安卓数据」（会删掉已装应用）。
-    assert(/networkProbe\?\.\(this\.serial, \{ waitMs: \d+, interval: \d+ \}\)/.test(emuJs),
-      '开机后的网络体检要给等待窗口，不能查一次就下结论');
-    const boot = emuJs.slice(emuJs.indexOf('运行时就绪'));
-    const warn = boot.slice(0, 4000);
-    // 只看代码行：上面解释「以前这里建议重置数据」的注释不算
-    const warnCode = warn.split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
-    assert(!/重置安卓数据/.test(warnCode), '这条提示不能建议「重置安卓数据」（会丢已装应用）');
-    assert(/暂时没连上网/.test(warnCode), '要改成不吓人、不误导的说法');
+    const engine = fs.readFileSync(path.join(root, 'src', 'core', 'engine.js'), 'utf8');
+    const boot = engine.slice(engine.indexOf('  async bootEmulator'), engine.indexOf('  _armSnapshotSave'));
+    const network = engine.slice(engine.indexOf('  async waitForNetwork'), engine.indexOf('  dispose()'));
+    assert(!/networkProbe|waitForNetwork/.test(boot), '不能因为网络没验证就阻止确认 Android 开机');
+    assert(!/resetAndroidData|forceWipe|lifecycle\.restart/.test(network), '无法验证互联网时不得自动重启或清数据');
   });
 
   await test('开机时那个控制台黑窗要用高频通道压掉', () => {
@@ -2515,9 +2475,9 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     // store 默认要写 true
     const storeJs = fs.readFileSync(path.join(root, 'src', 'core', 'store.js'), 'utf8');
     assert(/autoRotate:\s*true/.test(storeJs), 'store 默认 autoRotate=true');
-    // adb 两段都要写加速度开关，且保留方向锁权威命令（测试前面已断言 lock 0 / ignore-request）
+    // 在启动前写开关；启动后只调整方向，不再重新写显示分辨率或密度。
     const adbJs = fs.readFileSync(path.join(root, 'src', 'core', 'adb.js'), 'utf8');
-    assert(/accelerometer_rotation \$\{guestAutoRotate\(\)\}/.test(adbJs), 'adb 要用 guestAutoRotate 值');
+    assert(/accelerometer_rotation [^\n]*guestAutoRotate\(\)/.test(adbJs), 'adb 要用 guestAutoRotate 值');
   });
 
   await test('窗口模式：默认原生窗口，两种模式可在设置里切换，且只迁移一次', () => {
@@ -2558,10 +2518,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
       '探针要按「显式 true 才算嵌入」判定');
   });
 
-  await test('加载速度：网络状态新鲜缓存快速复用，运行时停止即作废', async () => {
-    const root = path.join(__dirname, '..');
-    const engineJs = fs.readFileSync(path.join(root, 'src', 'core', 'engine.js'), 'utf8');
-    assert(/cached\.ok && Date\.now\(\) - cached\.at < 8000/.test(engineJs), 'waitForNetwork 要复用新鲜网络缓存');
+  await test('加载速度：状态栏网络快照只短暂缓存，运行时停止即作废', async () => {
     const { Runtime } = require('../src/core/engine');
     const runtime = Object.create(Runtime.prototype);
     runtime.emulator = { running: () => false };
@@ -2626,8 +2583,8 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(idx > 0, 'main 要调用 waitForAppFirstFrame');
     // 判定必须用 `dumpsys window`：`dumpsys window windows` 里没有 mCurrentFocus，
     // 会把焦点判断永远判成否，导致每次启动都白等满超时。
-    assert(/dumpsys window \| grep -E "Splash Screen\|mCurrentFocus"/.test(adbJs),
-      '首帧判定要用 dumpsys window（含 mCurrentFocus）');
+    assert(/dumpsys window displays \| grep[^\n]*mCurrentFocus/.test(adbJs)
+      && /mDrawState=HAS_DRAWN/.test(adbJs), '首帧需要目标焦点和同一个窗口实际完成绘制');
     // 红果这类重应用首帧要 15 秒以上，12 秒超时会把动画提前收掉
     const presentation = fs.readFileSync(path.join(root, 'src', 'desktop', 'launch-presentation.js'), 'utf8');
     assert(/timeoutMs:\s*20000/.test(presentation), '首帧等待给足 20 秒');
@@ -2683,11 +2640,13 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
       '仅 host + AMD 关闭 Vulkan');
   });
 
-  await test('升级残留：运行时目录指向别的安装包时改用随包内置', () => {
+  await test('启动时尊重有效运行时路径，不凭 resources/runtime 后缀强制替换', () => {
     const root = path.join(__dirname, '..');
     const mainJs = fs.readFileSync(path.join(root, 'src', 'main.js'), 'utf8');
-    assert(/looksForeignBundle/.test(mainJs), '要识别「另一个包的 resources/runtime」');
-    assert(/resources\[\\\\\/\]runtime\$/.test(mainJs), '按 resources/runtime 结尾判定');
+    const bootstrap = mainJs.slice(mainJs.indexOf('function bootstrapBundledRuntime()'), mainJs.indexOf('// 冒烟截图'));
+    assert(!/looksForeignBundle/.test(bootstrap), '有效的外置目录不能因为命名相同而被替换');
+    assert(/existsSync\(path\.join\(current, 'emulator', 'emulator\.exe'\)\)[\s\S]{0,500}return;/.test(bootstrap),
+      '当前已有可用运行时就不能覆盖用户的路径和设置');
   });
 
   await test('双实例交替：旧实例退出不能杀掉新实例刚接管的模拟器', () => {
