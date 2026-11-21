@@ -16,7 +16,7 @@ process.env.APPDATA = path.join(root, 'roaming');
 app.whenReady().then(async () => {
   assert.equal(process.platform, 'win32');
   const { Installer } = require('../src/core/installer');
-  const { appAumid } = require('../src/core/branding');
+  const { APP_AUMID, WINDOWS_DISPLAY_NAME, appAumid, registerManagerShortcut } = require('../src/core/branding');
   const { migrateAppShortcutBrand } = require('../src/core/shortcut');
   const store = require('../src/core/store');
   const pkg = 'com.example.song';
@@ -55,6 +55,16 @@ app.whenReady().then(async () => {
   assert.deepEqual(shell.readShortcutLink(foreign), foreignBefore);
   const created = installer.createShortcut({ package: 'com.example.newapp', label: 'New app' });
   assert.equal(shell.readShortcutLink(created).appUserModelId, appAumid('com.example.newapp'));
+  const managerOptions = { shell, programs: startMenuDir, target: process.execPath, icon,
+    toastActivatorClsid: app.toastActivatorCLSID };
+  const manager = registerManagerShortcut(managerOptions);
+  const managerDetails = shell.readShortcutLink(manager);
+  assert.equal(path.basename(manager, '.lnk'), WINDOWS_DISPLAY_NAME);
+  assert.equal(managerDetails.description, WINDOWS_DISPLAY_NAME);
+  assert.equal(managerDetails.appUserModelId, APP_AUMID);
+  assert.equal(registerManagerShortcut(managerOptions), manager);
+  assert.deepEqual(shell.readShortcutLink(manager), managerDetails);
+  console.log(`MANAGER_BRAND_OK ${APP_AUMID}; ${WINDOWS_DISPLAY_NAME}`);
   console.log(`SHORTCUT_BRAND_OK ${old} → ${next}; desktop, start menu, redirected; unrelated / pinned untouched`);
   app.exit(0);
 }).catch((error) => {
