@@ -1,5 +1,7 @@
 # Microsoft Store 提交材料（ApkStart 0.6.3）
 
+> 历史材料：这是旧版 ApkStart 0.6.3 的提交记录，不是 Apk Start --Q 的现行上架说明。
+
 > 这份文件是给 Partner Center 表单直接复制用的。包体、图标、清单由脚本产出，
 > 只有「注册账号 → 预留名称 → 上传 → 送审」必须在网页上人工完成。
 

@@ -13,6 +13,7 @@
 const { app, ipcMain, BrowserWindow } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const { productName, version } = require('../package.json');
 
 const OUT = path.join(__dirname, 'out');
 const UI = path.join(__dirname, '..', 'src', 'ui');
@@ -65,7 +66,7 @@ const OVERRIDES = {
     if (patch.engine) Object.assign(SETTINGS.engine, patch.engine);
     return SETTINGS;
   },
-  'app:info': () => ({ version: '0.6.0', isDev: true, platform: 'win32', dataDir: 'C:\\data', runtimeDir: 'C:\\data\\runtime' }),
+  'app:info': () => ({ productName, version, isDev: true, platform: 'win32', dataDir: 'C:\\data', runtimeDir: 'C:\\data\\runtime' }),
   'apps:list': () => ({ apps: [] }),
   'assoc:status': () => ({ registered: false }),
   'doctor:profile': () => ({ profile: {}, text: '均衡 · 4 核 / 4 GB / 720p' }),
@@ -81,8 +82,8 @@ const OVERRIDES = {
   'autodebug:state': () => ({ issues: DEBUG_ISSUES, summary: { total: 3, errors: 1, warns: 2, infos: 0, health: 'error', byCategory: [] }, at: Date.now(), running: false }),
   'autodebug:run': () => ({ issues: DEBUG_ISSUES, summary: { total: 3, errors: 1, warns: 2, infos: 0, health: 'error', byCategory: [] }, at: Date.now(), running: false }),
   'autodebug:config': () => SETTINGS.debug,
-  'app:startupInfo': () => ({ firstRun: false, tips: [] }),
-  'app:updateCheck': () => ({ ok: true, current: '0.6.0', hasUpdate: false, sources: [] }),
+  'app:startupInfo': () => ({ productName, version }),
+  'app:updateCheck': () => ({ ok: true, current: version, hasUpdate: false, releasePublished: false }),
   'runtime:log': () => [],
   'leftovers:scan': () => ({ items: [] }),
   'engine:resources': () => { resourceLoads += 1; return { memory: {}, cores: {} }; },
@@ -142,6 +143,13 @@ app.whenReady().then(async () => {
   await new Promise((r) => setTimeout(r, 1200));
 
   const evalJs = (code) => win.webContents.executeJavaScript(code, true);
+  const brand = await evalJs(`[
+    document.title,
+    document.getElementById('productName').textContent,
+    document.getElementById('productVersion').textContent,
+  ]`);
+  step('主窗口显示独立项目名和当前版本', brand[0] === `${productName} ${version}`
+    && brand[1] === productName && brand[2] === version);
 
   console.log('\n[设置页 · 分类导航]');
   // 先打开设置弹窗（自动检测结果是在打开设置时取回来渲染的）
@@ -149,6 +157,11 @@ app.whenReady().then(async () => {
   await new Promise((r) => setTimeout(r, 900));
   const modalOpen = await evalJs(`document.getElementById('settingsMask').classList.contains('on')`);
   step('设置弹窗能打开', modalOpen);
+  const about = await evalJs(`[
+    document.getElementById('aboutProductName').textContent,
+    document.getElementById('aboutVer').textContent,
+  ]`);
+  step('关于页显示与主窗口一致的名称和版本', about[0] === productName && about[1] === version);
   const optionalImage = await evalJs(`!document.getElementById('setCompat').checked
     && !document.getElementById('compatInstallField').hidden`);
   step('未下载兼容镜像时，不开旧版开关也能找到下载入口', optionalImage);
@@ -221,7 +234,14 @@ app.whenReady().then(async () => {
   await new Promise((r) => setTimeout(r, 100));
   step('两次确认后才执行一次重置请求', confirmCount === 4 && resetCount === 1);
 
-  win.webContents.send('update:state', { ok: true, current: '0.6.0', tag: 'v9.9.9', hasUpdate: true });
+  await evalJs(`document.getElementById('btnCheckUpdate').click()`);
+  await new Promise((r) => setTimeout(r, 100));
+  step('本分支未发布时不显示「已是最新版本」', await evalJs(`
+    document.getElementById('updateState').textContent.includes('尚无正式发布')
+      && document.getElementById('btnDoUpdate').hidden
+  `));
+
+  win.webContents.send('update:state', { ok: true, current: version, tag: 'v9.9.9', hasUpdate: true, releasePublished: true });
   await new Promise((r) => setTimeout(r, 100));
   step('更新状态从独立页面模块同步到欢迎提示', await evalJs(`
     document.getElementById('updateState').textContent.includes('v9.9.9')

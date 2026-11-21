@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' file: data:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
-<title>ApkStart</title>
+<title>Apk Start --Q</title>
 <link rel="stylesheet" href="style.css" />
 <link rel="stylesheet" href="theme.css" />
 </head>
@@ -30,7 +30,8 @@
     <div class="logo" aria-hidden="true">
       <svg viewBox="0 0 48 48" width="22" height="22"><use href="#brandMark"/></svg>
     </div>
-    <span class="brand-name">ApkStart</span>
+    <span class="brand-name" id="productName">Apk Start --Q</span>
+    <span class="brand-release" id="productVersion"></span>
     <span class="brand-tag" id="engineTag">未连接运行时</span>
   </div>
   <div class="titlebar-spacer"></div>
@@ -91,7 +92,7 @@
       <span class="sep"></span>
       <span class="status-item" id="statusStats"></span>
       <span class="sep"></span>
-      <a class="status-item powered-link" href="https://github.com/RoutineMiku/apkstart" target="_blank" rel="noopener">Powered by RoutineMiku</a>
+      <a class="status-item powered-link" href="https://github.com/MoonlyCake/apkstart" target="_blank" rel="noopener">维护 · MoonlyCake</a>
     </div>
   </footer>
 </main>
@@ -103,7 +104,7 @@
       <div class="welcome-halo"></div>
       <div class="welcome-badge"><svg viewBox="0 0 48 48" width="44" height="44" aria-hidden="true"><use href="#brandMark"/></svg></div>
       <div class="welcome-hi" id="welcomeHi">你好</div>
-      <div class="welcome-sub" id="welcomeSub">ApkStart 已就绪</div>
+      <div class="welcome-sub" id="welcomeSub">Apk Start --Q 已就绪</div>
     </div>
     <div class="welcome-body">
       <div class="welcome-stats" id="welcomeStats"></div>
@@ -543,15 +544,15 @@
       </div>
 
       <div class="group" id="downloadGroup" data-cat="net">
-        <div class="group-title">下载与更新源</div>
+        <div class="group-title">运行时下载源</div>
         <div class="field">
-          <label>更新与下载源</label>
+          <label>运行时组件来源</label>
           <select id="setSourcePref">
             <option value="auto">自动选择较快的源（推荐）</option>
             <option value="gitee">只用 Gitee（国内通常最快）</option>
             <option value="github">只用 GitHub</option>
           </select>
-          <span class="sub">「自动」会同时问 GitHub 与 Gitee 的最新版本，把每个下载地址都真下 256KB 测一次速度，再从最快的那个地址下载；其中一个源不通不影响更新。</span>
+          <span class="sub">仅用于下载 Android 运行时组件。选「自动」时，程序会在可用的下载地址之间测速；这里不影响软件更新。</span>
         </div>
         <div class="field switch-field">
           <div>
@@ -571,11 +572,11 @@
           <span class="sub">大文件按块并行下载。默认 8 线程已经能跑满大多数家宽；网络稳定时可以试 16。</span>
         </div>
         <details class="mini-details">
-          <summary>Gitee 更新源（可选）</summary>
+          <summary>Gitee 运行时资源（可选）</summary>
           <div class="field">
             <label>Gitee 只读 token（一般不用填）</label>
             <input id="setGiteeToken" type="password" placeholder="留空即可：公开仓库匿名也能读" />
-            <span class="sub">本项目仓库已公开，Gitee 的发行版列表匿名就能读，留空也能用 Gitee 源。
+            <span class="sub">公开的 Gitee 运行时资源可以匿名访问，通常无需填写。
               只有在「Gitee 被限流（返回 403/429）」或你想读私有分支时才需要填：
               gitee.com → 设置 → 私人令牌，只勾「projects」即可，它只用于读取发行版列表，
               不会上传任何东西。</span>
@@ -873,7 +874,7 @@
             磁盘紧张时把它指到另一个盘（如 D:），重启软件后生效；旧目录里的 <code>apkstart.avd</code> 可整体搬过去再删。</span>
         </div>
         <div class="field">
-          <label>卸载 ApkStart</label>
+          <label>卸载 Apk Start --Q</label>
           <div class="row">
             <button class="btn ghost sm" id="btnUninstall">一键卸载</button>
             <span class="inline-note">卸载会取消 .apk 关联并移除程序；便携版请按提示手动删除目录。</span>
@@ -892,8 +893,7 @@
           </div>
           <div class="update-bar" id="updateBar" hidden><i id="updateBarFill"></i></div>
           <span class="sub" id="updateNote">
-            从 GitHub（RoutineMiku/apkstart）获取最新版本；轻量版会下载便携包并自动替换程序文件，
-            运行时、已装应用与快照都不受影响。
+            本版本独立编号，只从本项目的 GitHub 发行页检查软件更新。运行时下载源不受影响。
           </span>
         </div>
       </div>
@@ -902,26 +902,15 @@
         <div class="group-title">关于</div>
         <div class="about-box">
           <div class="about-brand">
-            <img class="about-logo" src="assets/logo.png" alt="ApkStart Logo" draggable="false" />
-          </div>
-          <div class="about-qrs">
-            <div class="about-qr">
-              <img src="assets/wechat-qr.jpg" alt="微信公众号二维码" width="112" height="112" />
-              <span class="about-qr-tip">扫码关注公众号</span>
-            </div>
-            <div class="about-qr">
-              <img src="assets/douyin-qr.jpg" alt="抖音二维码" width="112" height="112" />
-              <span class="about-qr-tip">抖音 · 日常MIKU</span>
-            </div>
+            <img class="about-logo" src="assets/logo.png" alt="Apk Start --Q" draggable="false" />
           </div>
           <div class="about-info">
-            <div class="about-name">ApkStart <span class="about-ver" id="aboutVer"></span></div>
-            <p class="note">双击即装的 Windows 安卓应用启动器：APK 安装、桌面快捷方式、独立窗口运行、文件双向互通。</p>
+            <div class="about-name"><span id="aboutProductName">Apk Start --Q</span> <span class="about-ver" id="aboutVer"></span></div>
+            <p class="note">让安卓应用在 Windows 桌面安个家。装好 APK，从桌面图标打开，就能在独立窗口里使用。</p>
             <div class="about-links">
               <button class="btn ghost sm" id="btnOpenManual">打开使用手册（含故障解决方案）</button>
-              <a href="https://github.com/RoutineMiku/apkstart" target="_blank" rel="noopener">GitHub · RoutineMiku/apkstart</a>
-              <a href="https://v.douyin.com/9TIIxVCANig/" target="_blank" rel="noopener">抖音 · @日常MIKU（联系作者）</a>
-              <span class="powered">Powered by <b>RoutineMiku</b></span>
+              <a href="https://github.com/MoonlyCake/apkstart" target="_blank" rel="noopener">GitHub · MoonlyCake/apkstart</a>
+              <a href="https://github.com/RoutineMiku/apkstart" target="_blank" rel="noopener">上游 · RoutineMiku/apkstart（MIT）</a>
             </div>
           </div>
         </div>

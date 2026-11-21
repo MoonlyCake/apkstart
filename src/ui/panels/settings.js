@@ -82,8 +82,8 @@
         const di = await api.dataInfo().catch(() => null);
         $('setAvdDir').value = (di && di.avdDir) || '';
       }
-      const verEl = document.getElementById('aboutVer');
-      if (verEl && info.version) verEl.textContent = `v${info.version}`;
+      if (info.productName) $('aboutProductName').textContent = info.productName;
+      if (info.version) $('aboutVer').textContent = info.version;
       const curVerEl = document.getElementById('updateCurrent');
       if (curVerEl && info.version) curVerEl.textContent = `v${info.version}`;
       const assoc = await api.assocStatus();

@@ -6,7 +6,7 @@ function createUpdatesHandlers({ app, cancelUpdate, live, quitForRestart, runUpd
   return {
     'app:updateCheck': async (_e, opts = {}) => {
       try {
-        // 用户主动点「检查更新」→ 跳过缓存，必定重新问一次两个源
+        // 用户主动点「检查更新」时绕过短期缓存。
         const info = await live.updater.check({ force: opts.force !== false });
         setUpdateInfo(info);
         return { ok: true, ...info };
@@ -16,11 +16,7 @@ function createUpdatesHandlers({ app, cancelUpdate, live, quitForRestart, runUpd
     },
 
     'app:updateOpen': (_e, url) => {
-      // GitHub 和 Gitee 的发布页都允许直接打开：检查更新失败时界面就是靠这个
-      // 让用户手动去下载，只放行 github.com 会把国内用户挡在门外。
-      const raw = String(url || '');
-      const ok = /^https:\/\/(github\.com|gitee\.com)\//i.test(raw);
-      const target = ok ? raw : Updater.repoUrl();
+      const target = Updater.releasePageUrl(url);
       shell.openExternal(target).catch(() => {});
       return { ok: true, target };
     },

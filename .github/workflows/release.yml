@@ -11,6 +11,7 @@ permissions:
 jobs:
   build:
     name: 构建便携版并发布
+    if: github.repository == 'MoonlyCake/apkstart' && github.ref_type == 'tag'
     runs-on: windows-latest
 
     steps:
@@ -20,6 +21,15 @@ jobs:
         with:
           node-version: 22
           cache: npm
+
+      # package.json 是发版版本的唯一来源，不能把分支名或旧上游标签当新版本发布。
+      - name: 核对发布标签
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          if ($version -notmatch '^\d+\.\d+\.\d+$' -or $env:GITHUB_REF_NAME -cne "v$version") {
+            throw "发布标签必须与 package.json 一致：预期 v$version，实际 $env:GITHUB_REF_NAME"
+          }
 
       - name: 安装依赖（含 Electron 运行时）
         run: npm ci
@@ -32,16 +42,11 @@ jobs:
       - name: 打包便携版
         run: npm run pack
 
-      # 用 7-Zip 而不是 Compress-Archive：同一个目录，.NET deflate 压出来 105MB，
-      # 7-Zip -mx=9 只要 99.6MB —— 差这 5MB 就决定 Gitee 上放的是「一个能直接解压的
-      # zip」还是「两个必须手工拼接的 part」。build/zip.js 还带体积闸门：超过
-      # 100MiB 直接让 job 失败，避免以后又悄悄退回分片包。
-      - name: 压缩产物（7-Zip，体积闸门 100MiB）
+      - name: 压缩产物（7-Zip）
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
-          if (-not $tag.StartsWith('v')) { $tag = "v$tag" }
-          node build/zip.js dist/ApkStart-win64-portable "ApkStart-$tag-win64-portable.zip" --limit-mb 100
+          $tag = $env:GITHUB_REF_NAME
+          node build/zip.js dist/ApkStart-win64-portable "ApkStart-$tag-win64-portable.zip"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-Item "ApkStart-$tag-win64-portable.zip" | Select-Object Name, Length
 
@@ -51,8 +56,7 @@ jobs:
       - name: 生成增量更新资产（清单 + 代码包）
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
-          if (-not $tag.StartsWith('v')) { $tag = "v$tag" }
+          $tag = $env:GITHUB_REF_NAME
           node build/incremental.js dist/ApkStart-win64-portable $tag
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -62,12 +66,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
-          if (-not $tag.StartsWith('v')) { $tag = "v$tag" }
+          $tag = $env:GITHUB_REF_NAME
           $zip = "ApkStart-$tag-win64-portable.zip"
-          $ver = $tag.TrimStart('v')
-          $manifest = "ApkStart-v$ver-manifest.json"
-          $appzip = "ApkStart-v$ver-app.zip"
+          $manifest = "ApkStart-$tag-manifest.json"
+          $appzip = "ApkStart-$tag-app.zip"
+          $title = node -p "require('./package.json').productName + ' ' + require('./package.json').version"
           # 幂等：release 已存在（如重跑 / 重推 tag）就跳过 create，只上传资产
           $existing = gh release view $tag --json tagName -q .tagName 2>$null
           # 有手写的发版说明就用它（.github/release-notes-<tag>.md），比 --generate-notes
@@ -75,9 +78,9 @@ jobs:
           $notes = ".github/release-notes-$tag.md"
           if (-not $existing) {
             if (Test-Path $notes) {
-              gh release create $tag --title "ApkStart $tag" --notes-file $notes
+              gh release create $tag --verify-tag --title $title --notes-file $notes
             } else {
-              gh release create $tag --title "ApkStart $tag" --generate-notes
+              gh release create $tag --verify-tag --title $title --generate-notes
             }
             if ($LASTEXITCODE -ne 0) { exit 1 }
           }
@@ -88,43 +91,6 @@ jobs:
           }
           if (-not $ok) { Write-Error "上传失败: $zip / $manifest / $appzip"; exit 1 }
           gh release view $tag --json assets --jq '.assets[].name'
-
-      # 同步到 Gitee：国内直连 GitHub 只有几十 KB/s，Gitee 通常能跑几 MB/s。
-      # 便携包压紧后约 99.6MB，在 Gitee 单文件上限（100MB）以内，直接放一个整包，
-      # 用户点开就能解压；只有超限时 publish-gitee.js 才退回 .part1/.part2 分片。
-      # Setup（1.4GB）与运行时整包（1.4GB）超限太多，只留在 GitHub ——
-      # 应用端对「哪个源有资产」是取并集的，不影响更新。
-      # Gitee 同步「缺 token / 网络不通」只告警不阻断：否则整 build job 变红，
-      # 下面 needs: build 的 full job 会被整段跳过，连 GitHub 自己的 Setup / 运行时整包都发不出。
-      # 缺 token 时这一步仍会在日志里标红（continue-on-error 是「可见但非致命」），不静默。
-      - name: 同步便携版到 Gitee
-        continue-on-error: true
-        env:
-          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-        shell: pwsh
-        run: |
-          # 以前这里是「没配 token 就静默跳过、这一步仍显示成功」——
-          # v0.3.4 就这样在 Gitee 上悄悄少了一个版本，事后才发现。
-          # 现在缺 token 直接让这一步失败，宁可红一次也别再无声无息。
-          if (-not $env:GITEE_TOKEN) {
-            Write-Error "缺少 GITEE_TOKEN：Gitee 这一版不会有安装包。请在 Settings → Secrets and variables → Actions 添加 GITEE_TOKEN（勾选 projects + pull_requests 之外的 releases 权限即可）。"
-            exit 1
-          }
-          $tag = "${{ github.ref_name }}"
-          if (-not $tag.StartsWith('v')) { $tag = "v$tag" }
-          # 发布说明与 GitHub 用同一份，别让 Gitee 那边只剩一句「便携版安装包」
-          $notes = ".github/release-notes-$tag.md"
-          # 增量资产（清单 + 代码包）都很小，一起同步，国内用户更新也走增量
-          $ver = $tag.TrimStart('v')
-          $manifest = "ApkStart-v$ver-manifest.json"
-          $appzip = "ApkStart-v$ver-app.zip"
-          $incArgs = @("--extra", $manifest, "--extra", $appzip)
-          if (Test-Path $notes) {
-            node tools/publish-gitee.js $tag --zip "ApkStart-$tag-win64-portable.zip" --notes $notes @incArgs
-          } else {
-            node tools/publish-gitee.js $tag --zip "ApkStart-$tag-win64-portable.zip" @incArgs
-          }
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   full:
     name: 构建完整版（内置运行时，离线开箱即用）
@@ -185,9 +151,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
-          if (-not $tag.StartsWith('v')) { $tag = "v$tag" }
-          $setup = Get-ChildItem dist/release/*Setup.exe | Select-Object -First 1
+          $tag = $env:GITHUB_REF_NAME
+          $setup = Get-Item "dist/release/ApkStart-$($tag.Substring(1))-Setup.exe" -ErrorAction SilentlyContinue
           if (-not $setup) { Write-Error "未找到 Setup.exe"; exit 1 }
           Write-Output ("上传 {0} ({1:N0} MB)" -f $setup.Name, ($setup.Length / 1MB))
           $ok = $false
@@ -205,8 +170,7 @@ jobs:
       - name: 打包运行时整包（轻量版下载源）
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
-          if (-not $tag.StartsWith('v')) { $tag = "v$tag" }
+          $tag = $env:GITHUB_REF_NAME
           $zip = "ApkStart-runtime-$tag.zip"
           if (-not (Test-Path "build\runtime\emulator\emulator.exe")) { Write-Error "build\runtime 不完整"; exit 1 }
           tar.exe -a -cf $zip -C "build\runtime" .
@@ -218,8 +182,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
-          if (-not $tag.StartsWith('v')) { $tag = "v$tag" }
+          $tag = $env:GITHUB_REF_NAME
           $zip = "ApkStart-runtime-$tag.zip"
           $ok = $false
           for ($i = 1; $i -le 3 -and -not $ok; $i++) {

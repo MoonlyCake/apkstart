@@ -1,6 +1,7 @@
 'use strict';
 
 const { ipcFailure } = require('../failure');
+const { productName } = require('../../../package.json');
 
 function createDesktopHandlers({
   app, APPICON_FILE, assoc, dialog, findUninstaller, fs, ICON_PNG, IS_DEV, launcherInfo,
@@ -8,6 +9,7 @@ function createDesktopHandlers({
 }) {
   return {
     'app:info': () => ({
+      productName,
       version: app.getVersion(),
       isDev: IS_DEV,
       platform: process.platform,
@@ -27,6 +29,7 @@ function createDesktopHandlers({
         autostart: process.argv.includes('--autostart') || !!a.silent,
         launch: a.launch || null,
         smoke: process.argv.includes('--smoke'),
+        productName,
         version: app.getVersion(),
         isPackaged: app.isPackaged,
       };

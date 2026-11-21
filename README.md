@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="docs/images/readme/hero.svg" alt="ApkStart · MoonlyCake：让 Android 应用在 Windows 桌面上找到自己的位置" width="100%">
+  <img src="docs/images/readme/hero.svg" alt="Apk Start --Q 1.0.0 · MoonlyCake：让 Android 应用在 Windows 桌面上找到自己的位置" width="100%">
 </p>
 
-<h1 align="center">ApkStart</h1>
+<h1 align="center">Apk Start --Q 1.0.0</h1>
 
 <p align="center"><strong>让 Android 应用从 Windows 桌面直接打开。</strong></p>
 <p align="center">
@@ -12,7 +12,7 @@
   <a href="#反馈与许可">反馈与许可</a>
 </p>
 
-ApkStart 是一个面向 **Windows 10 / 11 x64** 的 Android 应用运行器。导入安装包后，可以为应用建立桌面与开始菜单入口。运行时由 ApkStart 按需管理，不需要先打开另一款模拟器。
+**Apk Start --Q** 是一个面向 **Windows 10 / 11 x64** 的 Android 应用运行器。导入安装包后，可以为应用建立桌面与开始菜单入口。程序按需管理 Android 运行时，不必先打开另一款模拟器。
 
 ## 快速开始
 
@@ -48,7 +48,7 @@ ApkStart 是一个面向 **Windows 10 / 11 x64** 的 Android 应用运行器。�
 
 - **启动慢或提示缺少硬件加速**：先到「设置 → 诊断与修复」运行本机体检，按报告检查 CPU 虚拟化和 Windows 虚拟机监控程序平台。见[环境体检说明](docs/preflight.md)。
 - **提示应用需要其他镜像**：先检查 APK 架构和已部署镜像。切换到与现有安卓数据不兼容的镜像前先备份，不要把重置当成普通安装步骤。
-- **点击后没有反应**：优先从设置导出诊断报告。普通桌面版默认日志位于 `%APPDATA%apkstartlogsapp.log`。提交报告前请检查并删去不愿公开的信息。
+- **点击后没有反应**：优先从设置导出诊断报告。普通桌面版默认日志位于 `%APPDATA%\apkstart\logs\app.log`。提交报告前请检查并删去不愿公开的信息。
 
 </details>
 
@@ -61,7 +61,7 @@ ApkStart 是一个面向 **Windows 10 / 11 x64** 的 Android 应用运行器。�
 | `npm test` | 运行软件回归测试。 |
 | `npm run test:ui` | 用 Electron 渲染设置页并执行界面回归。 |
 
-本分支以源码和本地构建为入口。内置更新源尚未切换到本仓库；自行构建后，使用软件更新前请确认目标来源。
+本项目从 **1.0.0** 开始独立编号。内置软件更新只认[本仓库的 GitHub 发行页](https://github.com/MoonlyCake/apkstart/releases)，不跟随上游版本。Android 运行时组件的下载源不变。
 
 想了解实现，可读[架构说明](docs/rewrite-architecture.md)、[工程边界与诊断](docs/rewrite-follow-up.md)和 [Windows 音频说明](docs/rewrite-phase-2.md)。
 

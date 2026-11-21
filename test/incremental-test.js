@@ -97,15 +97,16 @@ console.log('\n[增量 · 哈希校验]');
     const exe = path.join(TMP, 'check', 'ApkStart.exe');
     fs.mkdirSync(path.dirname(exe), { recursive: true });
     fs.writeFileSync(exe, 'x');
-    const u = new Updater({ currentVersion: '0.6.2', exePath: exe, isPackaged: true, dataDir: path.join(TMP, 'check-data'), electronVersion: '33.4.11' });
-    u.sources.latest = async () => ({
-      version: '0.6.3', tag: 'v0.6.3', notes: '', htmlUrl: '', publishedAt: '',
-      assets: [
-        { name: 'ApkStart-v0.6.3-manifest.json', size: 1, url: 'https://x/m', urls: ['https://x/m'], sizes: {} },
-        { name: 'ApkStart-v0.6.3-app.zip', size: 2, url: 'https://x/a', urls: ['https://x/a'], sizes: {} },
-        { name: 'ApkStart-v0.6.3-win64-portable.zip', size: 3, url: 'https://x/f', urls: ['https://x/f'], sizes: {} },
-      ],
-      sources: [], unreachable: [],
+    const u = new Updater({
+      currentVersion: '0.6.2', exePath: exe, isPackaged: true,
+      dataDir: path.join(TMP, 'check-data'), electronVersion: '33.4.11',
+      fetchRelease: async () => Response.json({
+        tag_name: 'v0.6.3',
+        assets: ['manifest.json', 'app.zip', 'win64-portable.zip'].map((part, idx) => {
+          const name = 'ApkStart-v0.6.3-' + part;
+          return { name, size: idx + 1, browser_download_url: Updater.repoUrl() + '/download/v0.6.3/' + name };
+        }),
+      }),
     });
     const info = await u.check();
     assert(info.incremental && info.incremental.manifest.name.endsWith('manifest.json'), '没认出清单');
@@ -121,7 +122,7 @@ console.log('\n[增量 · 哈希校验]');
     fs.mkdirSync(dataDir, { recursive: true });
     fs.writeFileSync(exe, 'old');
     const u = new Updater({ currentVersion: '0.6.2', exePath: exe, isPackaged: true, dataDir });
-    const payload = path.join(dataDir, 'update', '0.6.3', 'app-payload');
+    const payload = path.join(u.updateDir, '0.6.3', 'app-payload');
     fs.mkdirSync(path.join(payload, 'resources', 'app'), { recursive: true });
     fs.writeFileSync(path.join(payload, 'resources', 'app', 'package.json'), '{"version":"0.6.3"}');
     const script = u.apply({ mode: 'app', payload, version: '0.6.3' }, { spawn: false });
@@ -138,12 +139,12 @@ console.log('\n[增量 · 哈希校验]');
     fs.mkdirSync(path.dirname(exe), { recursive: true });
     fs.writeFileSync(exe, 'x');
     const u = new Updater({ currentVersion: '0.6.2', exePath: exe, isPackaged: true, dataDir });
-    const payload = path.join(dataDir, 'update', '0.6.3', 'app-payload');
+    const payload = path.join(u.updateDir, '0.6.3', 'app-payload');
     fs.mkdirSync(path.join(payload, 'resources', 'app'), { recursive: true });
     fs.writeFileSync(path.join(payload, 'resources', 'app', 'package.json'), '{}');
     u._markPayloadReady(payload, '0.6.3', 'app');
     assert(u.findResumableJob().mode === 'app', '标记前可续做');
-    fs.writeFileSync(path.join(dataDir, 'update', '0.6.3', '.apkstart-force-full'), '');
+    fs.writeFileSync(path.join(u.updateDir, '0.6.3', '.apkstart-force-full'), '');
     assert(u.findResumableJob() === null, '标记后不能再续做增量');
     const script = u.apply({ mode: 'app', payload, version: '0.6.3' }, { spawn: false });
     assert(/\.apkstart-force-full/.test(script), 'apply 失败分支要写强制完整包标记');
@@ -155,14 +156,14 @@ console.log('\n[增量 · 哈希校验]');
     fs.mkdirSync(path.dirname(exe), { recursive: true });
     fs.writeFileSync(exe, 'x');
     const u = new Updater({ currentVersion: '0.6.2', exePath: exe, isPackaged: true, dataDir });
-    const appPayload = path.join(dataDir, 'update', '0.6.3', 'app-payload');
+    const appPayload = path.join(u.updateDir, '0.6.3', 'app-payload');
     fs.mkdirSync(path.join(appPayload, 'resources', 'app'), { recursive: true });
     fs.writeFileSync(path.join(appPayload, 'resources', 'app', 'package.json'), '{}');
     u._markPayloadReady(appPayload, '0.6.3', 'app');
     const job = u.findResumableJob();
     assert(job && job.mode === 'app' && job.version === '0.6.3', `应找回 app 续做，实际 ${JSON.stringify(job)}`);
 
-    const zipPayload = path.join(dataDir, 'update', '0.6.4', 'payload');
+    const zipPayload = path.join(u.updateDir, '0.6.4', 'payload');
     fs.mkdirSync(zipPayload, { recursive: true });
     fs.writeFileSync(path.join(zipPayload, 'ApkStart.exe'), 'new');
     u._markPayloadReady(zipPayload, '0.6.4', 'zip');

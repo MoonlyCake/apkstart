@@ -1443,23 +1443,25 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     fs.mkdirSync(dir, { recursive: true });
     const exe = path.join(dir, 'ApkStart.exe');
     fs.writeFileSync(exe, 'x');
-    const mk = (assets) => ({
-      version: '0.5.0', tag: 'v0.5.0', name: 'ApkStart v0.5.0', notes: '', htmlUrl: '',
-      publishedAt: '', sources: [], unreachable: [], assets,
+    const mk = (names) => Response.json({
+      tag_name: 'v0.5.0',
+      assets: names.map((name) => ({
+        name,
+        browser_download_url: Updater.repoUrl() + '/download/v0.5.0/' + name,
+      })),
     });
-    const u = new Updater({ currentVersion: '0.3.4', exePath: exe, isPackaged: true, dataDir: dir });
+    const runtime = 'ApkStart-runtime-v0.5.0.zip';
+    let names = [runtime, 'ApkStart-v0.5.0-win64-portable.zip'];
+    const u = new Updater({
+      currentVersion: '0.3.4', exePath: exe, isPackaged: true, dataDir: dir,
+      fetchRelease: async () => mk(names),
+    });
     // 两个资产同时存在 → 必须挑便携包
-    u.sources = { latest: async () => mk([
-      { name: 'ApkStart-runtime-v0.5.0.zip', url: 'https://x/runtime.zip', urls: ['https://x/runtime.zip'], sizes: {} },
-      { name: 'ApkStart-v0.5.0-win64-portable.zip', url: 'https://x/p.zip', urls: ['https://x/p.zip'], sizes: {} },
-    ]) };
     let info = await u.check({ force: true });
     assert(/portable/.test(info.asset.name), `应挑便携包，实际 ${info.asset.name}`);
 
     // 只有运行时整包（便携包没传上去）→ 宁可不自动更新，也不能拿 1.5GB 运行时当程序包
-    u.sources = { latest: async () => mk([
-      { name: 'ApkStart-runtime-v0.5.0.zip', url: 'https://x/runtime.zip', urls: ['https://x/runtime.zip'], sizes: {} },
-    ]) };
+    names = [runtime];
     info = await u.check({ force: true });
     assert(!info.asset, '只有运行时整包时不应挑出更新资产');
     assert(info.canAutoApply === false, '没有可用资产时不能自动更新');
@@ -1548,29 +1550,6 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(a.size === 0, '大小未知时应为 0（界面按已收字节显示进度）');
   });
 
-  await test('分片资产必须一路传到 updater.asset，否则 prepare 会报「没有可用的下载地址」', async () => {
-    const { Updater } = require('../src/core/updater');
-    const u = new Updater({
-      currentVersion: '0.0.1', exePath: path.join(TMP, 'A.exe'), isPackaged: true, dataDir: TMP,
-      settings: () => ({}),
-    });
-    u.sources.latest = async () => ({
-      version: '9.9.9',
-      tag: 'v9.9.9',
-      assets: [{
-        name: 'ApkStart-v9.9.9-win64-portable.zip',
-        size: 0,
-        partial: true,
-        parts: [{ index: 1, size: 0, urls: ['https://gitee.com/x/p1'] }, { index: 2, size: 0, urls: ['https://gitee.com/x/p2'] }],
-      }],
-      sources: [{ source: 'gitee', name: 'Gitee', tag: 'v9.9.9' }],
-      unreachable: [],
-    });
-    const info = await u.check({ force: true });
-    assert(info.asset && info.asset.parts && info.asset.parts.length === 2, 'parts 必须保留到 asset 上');
-    assert(info.canAutoApply === true, '有分片就应判定为可自动更新');
-  });
-
   await test('双源：合并版本时只认同版本的资产，不拿旧包冒充新包', async () => {
     const { Sources } = require('../src/core/sources');
     const s = new Sources(() => ({ runtime: {} }));
@@ -1652,41 +1631,6 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     } finally {
       s1.close(); s2.close();
       fs.rmSync(out, { force: true });
-    }
-  });
-
-  await test('分片更新包：按顺序拼回整包，大小不符立刻中止', async () => {
-    const http = require('http');
-    const { Updater } = require('../src/core/updater');
-    const partA = Buffer.alloc(4096, 0x41);
-    const partB = Buffer.alloc(2048, 0x42);
-    const srv = http.createServer((req, res) => {
-      if (req.url.startsWith('/a')) { res.writeHead(200, { 'Content-Length': partA.length }); res.end(partA); return; }
-      if (req.url.startsWith('/b')) { res.writeHead(200, { 'Content-Length': partB.length }); res.end(partB); return; }
-      res.writeHead(404); res.end();
-    });
-    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
-    const port = srv.address().port;
-    const sb = path.join(TMP, 'parts-upd');
-    fs.mkdirSync(sb, { recursive: true });
-    const u = new Updater({ currentVersion: '0.0.0', exePath: path.join(sb, 'A.exe'), isPackaged: true, dataDir: sb, settings: () => ({}) });
-    const target = path.join(sb, 'joined.zip');
-    try {
-      await u._downloadParts({
-        name: 'joined.zip',
-        size: partA.length + partB.length,
-        parts: [
-          { index: 1, size: partA.length, urls: [`http://127.0.0.1:${port}/a`] },
-          { index: 2, size: partB.length, urls: [`http://127.0.0.1:${port}/b`] },
-        ],
-      }, target, 2, partA.length + partB.length);
-      const got = fs.readFileSync(target);
-      assert(got.length === partA.length + partB.length, '拼装后大小必须等于各分片之和');
-      assert(got.slice(0, partA.length).every((b) => b === 0x41), '第一片内容顺序错误');
-      assert(got.slice(partA.length).every((b) => b === 0x42), '第二片内容顺序错误');
-    } finally {
-      srv.close();
-      fs.rmSync(sb, { recursive: true, force: true });
     }
   });
 
@@ -2464,15 +2408,14 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     const root = path.join(__dirname, '..');
     const packJs = fs.readFileSync(path.join(root, 'build', 'pack.js'), 'utf8');
     const mainJs = fs.readFileSync(path.join(root, 'src', 'main.js'), 'utf8');
-    const pkg = require(path.join(root, 'package.json'));
-
     // 直改名出来的 exe 里面还是 Electron：FileDescription=Electron、
     // ProductName=Electron、CompanyName=GitHub, Inc.、版本 33.4.11，图标也是默认的。
     assert(/function embedExeMeta\(exe\)/.test(packJs), '要有 exe 元信息写入步骤');
     assert(/--set-icon/.test(packJs), '要写图标');
     assert(/--set-file-version/.test(packJs), '要写文件版本');
     assert(/--set-version-string', 'FileDescription'/.test(packJs), '要写 FileDescription');
-    assert(/--set-version-string', 'ProductName', 'ApkStart'/.test(packJs), 'ProductName 必须是 ApkStart');
+    assert(/--set-version-string', 'ProductName', PKG\.productName/.test(packJs),
+      'EXE 展示名必须取自 package.json');
     assert(/embedExeMeta\(exePath\)/.test(packJs), '要在改名之后真的调用');
     // 找不到 rcedit 时要明确告警，不能静默产出「Electron 图标」的包
     assert(/找不到 rcedit\.exe/.test(packJs), '缺 rcedit 要告警');
@@ -2486,23 +2429,22 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(/build', 'runtime'/.test(packJs), '完整版要内置 build/runtime');
   });
 
-  await test('版本统一：package.json / MSIX 四段号 / 文档包名一致', () => {
+  await test('版本统一：package.json / lockfile / EXE / MSIX 一致', () => {
     const root = path.join(__dirname, '..');
     const pkg = require(path.join(root, 'package.json'));
-    const { msixVersion } = require(path.join(root, 'build', 'msix.js'));
+    const lock = require(path.join(root, 'package-lock.json'));
+    const { msixVersion, manifest } = require(path.join(root, 'build', 'msix.js'));
     const four = msixVersion(pkg.version);
     assert(/^\d+\.\d+\.\d+\.0$/.test(four), `MSIX 四段版本号格式不对：${four}`);
-    const artifact = `ApkStart_${four}_x64.msix`;
-    for (const f of ['docs/store-listing.md', 'docs/store-msix.md', 'docs/store-upload-walkthrough.md']) {
-      const t = fs.readFileSync(path.join(root, f), 'utf8');
-      assert(t.includes(artifact), `${f} 里应引用当前版本的包名 ${artifact}`);
-    }
+    assert(lock.version === pkg.version, '锁文件版本必须和 package.json 一致');
+    assert(lock.packages[''].version === pkg.version, '锁文件根包版本必须和 package.json 一致');
+    const manifestXml = manifest();
+    assert(manifestXml.includes(`Version="${four}"`), 'MSIX 清单必须使用当前四段版本');
+    assert(manifestXml.includes(`<DisplayName>${pkg.productName}</DisplayName>`), 'MSIX 清单使用项目展示名');
+    assert(manifestXml.includes('Executable="app\\ApkStart.exe"'), '保留 MSIX 可执行文件名');
     // exe 的文件版本也要用同一个号（四段），别和 package.json 各说各话
     const packJs = fs.readFileSync(path.join(root, 'build', 'pack.js'), 'utf8');
     assert(/\$\{PKG\.version\}\.0/.test(packJs), 'exe 文件版本要跟 package.json 对齐');
-    // 商店包和 exe 用的是同一个版本来源，不该有第二份硬编码版本号
-    const msixJs = fs.readFileSync(path.join(root, 'build', 'msix.js'), 'utf8');
-    assert(/const VERSION = String\(pkg\.version/.test(msixJs), 'MSIX 版本号必须取自 package.json');
   });
 
   await test('安卓应用的快捷方式必须用它自己的图标 + 自己的任务栏身份', () => {

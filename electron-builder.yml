@@ -1,5 +1,4 @@
 appId: com.apkstart.win
-productName: ApkStart
 copyright: Copyright © 2026 ApkStart
 
 directories:
@@ -37,6 +36,8 @@ extraResources:
       - "!.prepared"
 
 win:
+  # 只改展示名；保留可执行文件、默认安装目录和卸载文件名，支持就地更新。
+  executableName: ApkStart
   target:
     - target: nsis
       arch:
@@ -59,8 +60,8 @@ appx:
   identityName: RoutineMiku.ApkStart
   publisher: "CN=58CA1DED-8AB3-4D0D-AF50-62C9B781AA4D"
   publisherDisplayName: RoutineMiku
-  displayName: ApkStart
   applicationId: ApkStart
+  artifactName: ApkStart-${version}.${ext}
   # 全信任桌面应用唯一必需的能力。不要加 unvirtualizedResources /
   # broadFileSystemAccess —— Store 基本不批，而且本应用靠「数据目录挪到
   # %USERPROFILE%\ApkStart」绕开了 AppData 写重定向，不需要它们。
@@ -85,6 +86,8 @@ nsis:
   # 或者图标还指着旧 exe。always 保证每次安装后都指向当前安装目录。
   createDesktopShortcut: always
   createStartMenuShortcut: true
+  # 自定义安装脚本仍给原来的快捷方式补写图标，避免改名后产生两套入口。
+  shortcutName: ApkStart
   artifactName: ApkStart-${version}-Setup.exe
   # 卸载前先结束仍在运行的运行时进程，避免文件被锁导致无法删除
   # （火绒等粉碎工具删不掉，多半是 qemu/adb 进程还驻留）。
@@ -110,6 +113,5 @@ linux:
   icon: src/ui/assets/logo-128.png
   desktop:
     entry:
-      Name: ApkStart
       Comment: 在 FydeOS / Linux 上管理安卓应用
       Categories: Utility;

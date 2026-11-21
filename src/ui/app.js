@@ -1089,11 +1089,14 @@ async function init() {
   updates.bind();
   bindAndroid();
   bindWelcome();
+  const identity = api.startupInfo().catch(() => null);
   state.settings = await api.getSettings();
   await refreshStatus();
   await refreshApps();
   refreshAndroid();
   diagnostics.selfCheck();
+  startupInfo = await identity;
+  applyProductIdentity(startupInfo);
   maybeShowWelcome();
   setInterval(refreshStatus, 6000);
   setInterval(refreshApps, 15000);
@@ -1103,6 +1106,13 @@ async function init() {
 /* ---------------- 启动欢迎卡 ---------------- */
 
 let startupInfo = null;
+
+function applyProductIdentity(info) {
+  if (!info || !info.productName || !info.version) return;
+  $('productName').textContent = info.productName;
+  $('productVersion').textContent = info.version;
+  document.title = `${info.productName} ${info.version}`;
+}
 
 function greetingOf(h) {
   if (h < 5) return '夜深了';
@@ -1127,12 +1137,11 @@ function bindWelcome() {
 }
 
 /** 决定要不要弹：开机自启必弹；手动打开则每天最多一次，且用户可永久关闭 */
-async function maybeShowWelcome() {
+function maybeShowWelcome() {
   const mask = $('welcomeMask');
   if (!mask) return;
   // 冒烟截图时不要弹欢迎卡：否则每次自动截图都被它挡住主界面
-  try { if ((await api.startupInfo()).smoke) return; } catch (_) { /* ignore */ }
-  try { startupInfo = await api.startupInfo(); } catch (_) { startupInfo = null; }
+  if (startupInfo && startupInfo.smoke) return;
   const cfg = (state.settings && state.settings.welcome) || {};
   if (cfg.disabled) return;
   const today = new Date().toISOString().slice(0, 10);
@@ -1142,7 +1151,8 @@ async function maybeShowWelcome() {
   $('welcomeHi').textContent = `${greetingOf(h)}，欢迎回来`;
   const ver = (startupInfo && startupInfo.version) || (state.status && state.status.version) || '';
   const ready = state.status && state.status.ready;
-  $('welcomeSub').textContent = `ApkStart${ver ? ` v${ver}` : ''} · ${ready ? '运行时就绪，点开即用' : '运行时会按需自动准备'}`;
+  const name = $('productName').textContent;
+  $('welcomeSub').textContent = `${name}${ver ? ` ${ver}` : ''} · ${ready ? '运行时就绪，点开即用' : '运行时会按需自动准备'}`;
 
   const apps = (state.apps || []).length;
   const dev = $('statusDevice') ? $('statusDevice').textContent.trim() : '';

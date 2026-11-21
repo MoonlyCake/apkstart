@@ -1,6 +1,6 @@
 'use strict';
 /**
- * 在线更新：从 GitHub Releases（RoutineMiku/apkstart）取最新版本，下载并原地替换。
+ * 在线更新：从 GitHub Releases（MoonlyCake/apkstart）取最新版本，下载并原地替换。
  *
  * 三个形态都要照顾到：
  *   - 安装版（NSIS）：下载 `ApkStart-x.y.z-Setup.exe`，静默安装（/S）；
@@ -17,14 +17,13 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
-const { downloadAny, downloadAnyParallel, downloadMulti, sha256File } = require('./download');
+const { download, downloadParallel, sha256File } = require('./download');
 const { ZipFile, resolveZipEntry } = require('./zip');
 const { cmpVer } = require('./version');
-const { Sources } = require('./sources');
+const {
+  UpdateChannel, OWNER, REPO, CHANNEL, RELEASES_URL, releasePageUrl, releaseAssetUrl, versionFromTag,
+} = require('./update-channel');
 const inc = require('./incremental');
-
-const OWNER = 'RoutineMiku';
-const REPO = 'apkstart';
 
 /** PowerShell 单引号字符串：内部的 ' 要写成 '' */
 function psq(s) {
@@ -61,7 +60,7 @@ function findUninstaller(installDir) {
 class Updater {
   /**
    * @param {{currentVersion:string, exePath:string, isPackaged:boolean, dataDir:string,
-   *          electronVersion?:string, onProgress?:Function}} o
+   *          electronVersion?:string, onProgress?:Function, fetchRelease?:Function}} o
    */
   constructor(o) {
     this.current = o.currentVersion || '0.0.0';
@@ -74,10 +73,8 @@ class Updater {
     // Electron 运行时由调用方（main.js）传 process.versions.electron；测试里可注入。
     this.electronVersion = o.electronVersion || '';
     this.settings = typeof o.settings === 'function' ? o.settings : () => (o.settings || {});
-    // settings() 给 sources 用：决定「走 GitHub 还是 Gitee」「有没有镜像前缀」
-    this.sources = new Sources(this.settings);
+    this.channel = new UpdateChannel(o.fetchRelease);
     this.latest = null;
-    this._last = null;
   }
 
   /** 安装形态：安装版（有卸载器）还是便携包 */
@@ -86,82 +83,59 @@ class Updater {
   }
 
   get updateDir() {
-    return path.join(this.dataDir, 'update');
+    // 旧版的 update 目录可能留有上游载荷；保留原目录但不读取。
+    return path.join(this.dataDir, 'update-q');
   }
 
-  /**
-   * 检查更新：GitHub / Gitee 并发问，取版本号更高的，资产取并集。
-   * 具体下载地址在 prepare() 里再做一次真实测速排序。
-   */
-  /**
-   * @param {{force?:boolean}} [opts] force=true 时跳过 10 分钟的版本缓存
-   *        （用户主动点「检查更新」应该拿到最新结果；启动时的静默检查走缓存）
-   */
+  /** 检查本 fork 的正式发布，主动检查可绕过短期缓存。 */
   async check(opts = {}) {
-    const merged = await this.sources.latest({ force: !!opts.force });
-    const pick = (re) => merged.assets.find((a) => re.test(String(a.name || '')));
-    // 发行版里同时挂着「便携包」和「运行时整包」（ApkStart-runtime-*.zip）。
-    // 兜底的 .zip 匹配必须把运行时整包排除掉：某次发布如果只有运行时整包、
-    // 没有便携包，旧逻辑会把它当更新包解压进程序目录（多出 1.5GB 文件、程序也被换坏）。
-    const isRuntimePack = (a) => inc.isAuxAsset((a && a.name) || '');
+    const release = await this.channel.latest({ force: !!opts.force });
+    const assets = release?.assets || [];
+    const flavor = this.flavor;
+    const pick = (re) => assets.find((a) => re.test(a.name));
+    // 运行时、增量代码包等辅助资产不能当作可独立运行的整包。
+    const packages = assets.filter((a) => !inc.isAuxAsset(a.name));
+    const asset = flavor === 'setup'
+      ? (packages.find((a) => /Setup\.exe$/i.test(a.name)) || packages.find((a) => /\.exe$/i.test(a.name)))
+      : (packages.find((a) => /portable.*\.zip$/i.test(a.name))
+        || packages.find((a) => /win64.*\.zip$/i.test(a.name)) || packages.find((a) => /\.zip$/i.test(a.name)));
 
-    const wantSetup = this.flavor === 'setup';
-    const asset = wantSetup
-      ? (pick(/Setup\.exe$/i) || merged.assets.find((a) => /\.exe$/i.test(a.name) && !isRuntimePack(a)))
-      : (pick(/portable.*\.zip$/i) || pick(/win64.*\.zip$/i)
-        || merged.assets.find((a) => /\.zip$/i.test(a.name) && !isRuntimePack(a)));
-
-    // 增量资产：清单 + 代码包。两者都在、且本机 Electron 版本对得上时才可能走增量；
-    // 完整包始终作为兜底留在 asset 里——增量任何一步出问题都能无缝退回整包。
     const manifestAsset = pick(inc.MANIFEST_RE);
     const appAsset = pick(inc.APP_PACK_RE);
-
     this.latest = {
-      version: merged.version,
-      tag: merged.tag,
-      name: merged.name,
-      notes: merged.notes,
-      htmlUrl: merged.htmlUrl,
-      publishedAt: merged.publishedAt,
-      // 注意带上 parts：Gitee 的分片包没有单一 url，丢掉 parts 就变成「有资产但没地址」
-      asset: asset
-        ? {
-          name: asset.name,
-          size: asset.size,
-          url: asset.url,
-          // 同名资产在 GitHub / Gitee 都有：两个地址都带着，prepare() 里测速择快。
-          // sizes 是「每个地址各自的大小」——两个源压出来的字节数并不相同。
-          urls: asset.urls,
-          sizes: asset.sizes,
-          source: asset.source,
-          parts: asset.parts,
-          partial: asset.partial,
-        }
-        : null,
-      assets: merged.assets,
-      // 两个源各自的最新版本 / 谁不可达，界面上可以如实显示「这次走的哪个源」
-      sources: merged.sources,
-      unreachable: merged.unreachable,
-      flavor: this.flavor,
-      hasUpdate: cmpVer(merged.tag, this.current) > 0,
+      version: release?.version || '',
+      tag: release?.tag || '',
+      name: release?.name || '',
+      notes: release?.notes || '',
+      htmlUrl: release?.htmlUrl || RELEASES_URL,
+      publishedAt: release?.publishedAt || '',
+      releasePublished: !!release,
+      asset: asset || null,
+      assets,
+      sources: release ? [{ source: 'github', name: 'GitHub', tag: release.tag }] : [],
+      flavor,
+      hasUpdate: !!release && cmpVer(release.version, this.current) > 0,
       current: this.current,
-      canAutoApply: !!asset && (!!asset.url || !!(asset.parts && asset.parts.length)),
-      // 是否有可能走增量：prepare() 会下载清单解析后再做最终判定（版本/哈希）
-      incremental: this.flavor === 'portable' && !!manifestAsset && !!appAsset
+      canAutoApply: !!asset,
+      // 只有便携版尝试增量；完整包始终保留为兜底。
+      incremental: flavor === 'portable' && manifestAsset && appAsset
         ? { manifest: manifestAsset, app: appAsset }
         : null,
     };
-    this._last = this.latest;
     return this.latest;
   }
 
   /**
-   * 下载并准备好「载荷」：便携版解压到 update/<ver>/payload，安装版直接留 Setup.exe。
-   * @returns {Promise<{mode:'zip'|'setup', payload:string, version:string}>}
+   * 下载并准备载荷：便携版解压到 update-q/<ver>/payload，安装版保留 Setup.exe。
+   * @returns {Promise<{mode:'zip'|'app'|'setup', payload:string, version:string}>}
    */
   async prepare(info) {
     const it = info || this.latest;
-    if (!it || !it.asset) throw new Error('这个版本没有可自动安装的安装包，请到 GitHub 发布页手动下载');
+    if (!it?.asset) throw new Error('这个版本没有可自动安装的安装包，请到 GitHub 发布页手动下载');
+    const url = releaseAssetUrl(it.asset, it.tag);
+    if (!url || versionFromTag(it.tag) !== it.version || cmpVer(it.version, this.current) <= 0) {
+      throw new Error('此安装包不属于可用的 Apk Start --Q 更新，请到 GitHub 发布页下载');
+    }
     const dir = path.join(this.updateDir, it.version);
     fs.mkdirSync(dir, { recursive: true });
 
@@ -180,60 +154,38 @@ class Updater {
         });
       }
     }
-    return this._prepareFull(it, dir);
+    return this._prepareFull(it, dir, url);
   }
 
-  /** 完整包路径：下载 portable zip / Setup.exe 并解压备好（原来的逻辑） */
-  async _prepareFull(it, dir) {
+  /** 下载并准备便携版或 NSIS 安装包。 */
+  async _prepareFull(it, dir, url) {
     const file = path.join(dir, it.asset.name);
-    let total = it.asset.size || 0;
-    const conns = Math.max(1, Math.min(16, Number((this.settings().runtime || {}).downloadConnections) || 8));
-
-    // Gitee 附件单文件上限 100MB，所以发布时会把包切成 .part1/.part2。
-    // 每个分片单独测速选源（可以一部分来自 Gitee、一部分来自 GitHub 镜像），
-    // 下完按顺序拼回整包 —— 对用户来说仍然只是「下载 + 解压」。
-    if (it.asset.parts && it.asset.parts.length) {
-      await this._downloadParts(it.asset, file, conns, total);
-    } else {
-      this.onProgress({ stage: 'download', percent: 1, message: `正在下载 ${it.asset.name}…` });
-      // 候选地址 = 源站 + 镜像前缀；先各下 256KB 实测速度，再拿最快的那个分块下载。
-      // 这是「GitHub 直连几十 KB/s、镜像能跑几 MB/s」时唯一靠谱的选路方式：
-      // 按域名猜没用，同一天不同时段差别很大。
-      const cands = this.sources.candidates(it.asset);
-      const ranked = await this.sources.rank(cands, { onProgress: (p) => this.onProgress(p) }).catch(() => cands);
-      // 进度用的总大小要取「真正在下那个源」的：GitHub 与 Gitee 的包不是同一份字节
-      // （压缩器不同，能差好几 MB），拿错就会一直显示 92% 再突然跳到完成。
-      const sizes = it.asset.sizes || {};
-      for (const u of ranked) {
-        if (sizes[u]) { total = sizes[u]; break; }
-      }
-      // downloadMulti：分块同时从「GitHub 直连」和「镜像」拉，带宽叠加；
-      // 只有一个源可用或对方不支持 Range 时，它自己退回单源分块。
-      await downloadMulti(ranked, file, {
-        connections: conns,
-        onProgress: (pr) => {
-          const pct = pr.percent != null ? pr.percent : (total ? Math.round((pr.got / total) * 100) : 0);
-          const mb = `${(pr.got / 1048576).toFixed(1)} MB${total ? ` / ${(total / 1048576).toFixed(1)} MB` : ''}`;
-          const sp = Number(pr.speed) > 0 ? ` · ${(pr.speed / 1048576).toFixed(2)} MB/s` : '';
-          this.onProgress({
-            stage: 'download',
-            percent: Math.max(1, Math.min(99, pct)),
-            message: `下载中 ${mb}${sp}`,
-            speed: pr.speed,
-          });
-        },
-      });
+    const out = path.join(dir, 'payload');
+    const isZip = /\.zip$/i.test(file);
+    if (isZip && this._payloadReady(out, it.version)) {
+      this.onProgress({ stage: 'ready', percent: 100, message: '已有下载好的更新包，直接复用' });
+      return { mode: 'zip', payload: out, version: it.version };
     }
+    const total = it.asset.size || 0;
+    const connections = Math.max(1, Math.min(16, Number((this.settings().runtime || {}).downloadConnections) || 8));
 
-    if (/\.zip$/i.test(file)) {
-      const out = path.join(dir, 'payload');
-      // issue #98：上一次已经下载+解压完成，但替换/重启没成功时，
-      // 直接复用这份载荷，绝不再下一遍 100MB —— 这正是「更新死循环」的来源。
-      // 就绪标记由本函数写、替换脚本成功后清掉，所以只有完整解压过的载荷才会被复用。
-      if (this._payloadReady(out, it.version)) {
-        this.onProgress({ stage: 'ready', percent: 100, message: '已有下载好的更新包，直接复用' });
-        return { mode: 'zip', payload: out, version: it.version };
-      }
+    this.onProgress({ stage: 'download', percent: 1, message: `正在下载 ${it.asset.name}…` });
+    await downloadParallel(url, file, {
+      connections,
+      onProgress: (pr) => {
+        const pct = pr.percent != null ? pr.percent : (total ? Math.round((pr.got / total) * 100) : 0);
+        const mb = `${(pr.got / 1048576).toFixed(1)} MB${total ? ` / ${(total / 1048576).toFixed(1)} MB` : ''}`;
+        const sp = Number(pr.speed) > 0 ? ` · ${(pr.speed / 1048576).toFixed(2)} MB/s` : '';
+        this.onProgress({
+          stage: 'download',
+          percent: Math.max(1, Math.min(99, pct)),
+          message: `下载中 ${mb}${sp}`,
+          speed: pr.speed,
+        });
+      },
+    });
+
+    if (isZip) {
       fs.rmSync(out, { recursive: true, force: true });
       fs.mkdirSync(out, { recursive: true });
       await this._extract(file, out);
@@ -252,14 +204,13 @@ class Updater {
    */
   async _prepareApp(it, dir) {
     if (!it.incremental || !it.incremental.manifest || !it.incremental.app) return null;
-    const conns = Math.max(1, Math.min(16, Number((this.settings().runtime || {}).downloadConnections) || 8));
 
-    // 1) 清单与代码包都很小，用双源候选 + 测速排序（GitHub / Gitee / 镜像）下载。
     const fetchAsset = async (asset, name, label) => {
+      const url = releaseAssetUrl(asset, it.tag);
+      if (!url) throw new Error(label + '不在 Apk Start --Q 发布中');
       const target = path.join(dir, name);
-      const ranked = await this.sources.rank(this.sources.candidates(asset), {}).catch(() => this.sources.candidates(asset));
       this.onProgress({ stage: 'download', percent: 1, message: `正在获取${label}…` });
-      await downloadAny(ranked, target, {});
+      await download(url, target);
       return target;
     };
 
@@ -287,71 +238,20 @@ class Updater {
 
     const payload = path.join(dir, 'app-payload');
     // 上次下载解压成功但替换失败：直接复用（和完整包的 .apkstart-ready 同理）
-    if (this._payloadReady(payload, it.version)) {
+    if (this._payloadReady(payload, it.version, 'app')) {
       this.onProgress({ stage: 'ready', percent: 100, message: '已有下载好的增量包，直接复用' });
       return { mode: 'app', payload, version: it.version, manifest };
     }
     fs.rmSync(payload, { recursive: true, force: true });
     fs.mkdirSync(payload, { recursive: true });
     await this._extract(appFile, payload);
-    // 逐文件校验：下载被截断 / 镜像给了错文件都能在这里拦下
+    // 逐文件校验：防止不完整或不匹配的代码层落盘。
     const bad = await inc.verifyExtracted({ payload, files: manifest.app.files });
     if (bad.length) throw new Error(`增量代码包有 ${bad.length} 个文件校验不通过`);
 
     this._markPayloadReady(payload, it.version, 'app');
     this.onProgress({ stage: 'ready', percent: 100, message: '增量包已校验完成' });
     return { mode: 'app', payload, version: it.version, manifest };
-  }
-
-  /**
-   * 下载并拼装分片包。
-   * @param {{name:string, size:number, parts:Array<{index:number,size:number,urls:string[]}>}} asset
-   */
-  async _downloadParts(asset, target, conns, total) {
-    const dir = path.dirname(target);
-    let doneBytes = 0;
-    const fd = fs.openSync(target, 'w');
-    try {
-      for (const part of asset.parts) {
-        const tmp = path.join(dir, `${asset.name}.${part.index}.tmp`);
-        const cands = [];
-        for (const u of part.urls) {
-          for (const c of this.sources.candidates(u)) if (!cands.includes(c)) cands.push(c);
-        }
-        // eslint-disable-next-line no-await-in-loop
-        const ranked = await this.sources.rank(cands, {
-          onProgress: (p) => this.onProgress({ ...p, percent: Math.max(1, Math.min(99, Math.round((doneBytes / (total || 1)) * 100))) }),
-        }).catch(() => cands);
-        // eslint-disable-next-line no-await-in-loop
-        await downloadAnyParallel(ranked, tmp, {
-          connections: conns,
-          onProgress: (pr) => {
-            const got = doneBytes + (pr.got || 0);
-            const pct = total ? Math.round((got / total) * 100) : 0;
-            const sp = Number(pr.speed) > 0 ? ` · ${(pr.speed / 1048576).toFixed(2)} MB/s` : '';
-            this.onProgress({
-              stage: 'download',
-              percent: Math.max(1, Math.min(99, pct)),
-              message: `下载中 ${(got / 1048576).toFixed(1)} MB${total ? ` / ${(total / 1048576).toFixed(1)} MB` : ''}`
-                + `（第 ${part.index}/${asset.parts.length} 片）${sp}`,
-              speed: pr.speed,
-            });
-          },
-        });
-        const buf = fs.readFileSync(tmp);
-        if (part.size && buf.length !== part.size) {
-          throw new Error(`分片 ${part.index} 大小不对（${buf.length} ≠ ${part.size}），已中止，可重试`);
-        }
-        fs.writeSync(fd, buf, 0, buf.length, doneBytes);
-        doneBytes += buf.length;
-        fs.rmSync(tmp, { force: true });
-      }
-    } finally {
-      fs.closeSync(fd);
-    }
-    if (total && doneBytes !== total) {
-      throw new Error(`更新包拼装后大小不对（${doneBytes} ≠ ${total}），已中止，可重试`);
-    }
   }
 
   async _extract(zipPath, dest) {
@@ -384,17 +284,16 @@ class Updater {
 
   _markPayloadReady(payload, version, mode = 'zip') {
     try {
-      fs.writeFileSync(this._readyFile(payload), JSON.stringify({ version, at: Date.now(), mode }), 'utf8');
+      fs.writeFileSync(this._readyFile(payload), JSON.stringify({ channel: CHANNEL, version, at: Date.now(), mode }), 'utf8');
     } catch (_) { /* 标记写不了就下次重下，不影响正确性 */ }
   }
 
-  _payloadReady(payload, version) {
+  _payloadReady(payload, version, mode = 'zip') {
     try {
       if (!fs.existsSync(this._readyFile(payload))) return false;
       const m = JSON.parse(fs.readFileSync(this._readyFile(payload), 'utf8'));
-      // 版本不符 = 上次下的是别的版本，不能复用
-      if (m.version !== version) return false;
-      if (m.mode === 'app') {
+      if (m.channel !== CHANNEL || m.version !== version || m.mode !== mode) return false;
+      if (mode === 'app') {
         // 增量载荷没有 exe；它的「主文件」是 resources/app/package.json
         return fs.existsSync(path.join(payload, 'resources', 'app', 'package.json'));
       }
@@ -409,13 +308,13 @@ class Updater {
   /**
    * 启动时调用：找回「上次已下载解压、但替换/重启失败」的更新并续做。
    * 直接走本地载荷，不再重新下载（issue #98 的死循环根治）。
-   * @returns {{mode:'zip', payload:string, version:string}|null}
+   * @returns {{mode:'zip'|'app', payload:string, version:string}|null}
    */
   findResumableJob() {
     try {
       if (!fs.existsSync(this.updateDir)) return null;
       const versions = fs.readdirSync(this.updateDir)
-        .filter((n) => cmpVer(n, this.current) > 0)   // 只认比当前更新的版本，避免反复重启
+        .filter((n) => versionFromTag(n) === n && cmpVer(n, this.current) > 0)
         .sort((a, b) => cmpVer(b, a));
       for (const v of versions) {
         // 完整包载荷
@@ -424,7 +323,7 @@ class Updater {
         // 增量载荷（上次增量替换失败标记了强制完整包 → 不重放）
         const appPayload = path.join(this.updateDir, v, 'app-payload');
         if (!fs.existsSync(path.join(this.updateDir, v, '.apkstart-force-full'))
-            && this._payloadReady(appPayload, v)) {
+            && this._payloadReady(appPayload, v, 'app')) {
           return { mode: 'app', payload: appPayload, version: v };
         }
       }
@@ -434,7 +333,7 @@ class Updater {
 
   /**
    * 生成并启动「替换 + 重启」脚本，然后调用方负责退出应用。
-   * @param {{mode:'zip'|'setup', payload:string, version:string}} job
+   * @param {{mode:'zip'|'app'|'setup', payload:string, version:string}} job
    * @param {{waitPid?:number, spawn?:boolean}} [opts] 测试时可指定别的 pid / 不真启动
    */
   apply(job, opts = {}) {
@@ -586,8 +485,10 @@ class Updater {
 
   /** 打不开 UI 的场景（或没有可自动安装的资产）时，把发布页丢给浏览器 */
   static repoUrl() {
-    return `https://github.com/${OWNER}/${REPO}/releases`;
+    return RELEASES_URL;
   }
+
+  static releasePageUrl(url) { return releasePageUrl(url); }
 }
 
 module.exports = { Updater, cmpVer, OWNER, REPO, findUninstaller };

@@ -28,12 +28,7 @@
         return;
       }
       if (info.hasUpdate) {
-        // 如实说明这次是哪个源给出的版本、另一个源为什么没参与 ——
-        // 用户排查「为什么检查更新很慢」时，这一行比任何日志都直接。
-        const src = (info.sources || []).map((x) => `${x.name} ${x.tag || ''}`.trim()).join(' / ');
-        const bad = (info.unreachable || []).map((x) => x.name).join('、');
-        const stale = info.stale ? '（离线缓存，可能不是最新）' : '';
-        st.textContent = `发现新版本 ${info.tag}${src ? `（${src}）` : ''}${bad ? `；${bad} 不可达` : ''}${stale}`;
+        st.textContent = `发现新版本 ${info.tag}`;
         showUpdateBtn(true);
         btn.textContent = info.asset ? '立即更新' : '打开下载页';
         btn.dataset.mode = info.asset ? 'auto' : 'manual';
@@ -44,9 +39,9 @@
         }
         if (bar) bar.hidden = true;
       } else {
-        const src = (info.sources || []).map((x) => x.name).join(' / ');
-        const stale = info.stale ? '（离线缓存）' : '';
-        st.textContent = `已是最新版本（v${info.current}）${src ? ` · 经由 ${src}` : ''}${stale}`;
+        st.textContent = info.releasePublished === false
+          ? `尚无正式发布（当前 v${info.current}）`
+          : `已是最新版本（v${info.current}）`;
         showUpdateBtn(false);
         if (bar) bar.hidden = true;
       }
@@ -88,7 +83,7 @@
           check.disabled = true;
           const old = check.textContent;
           check.textContent = '检查中…';
-          $('updateState').textContent = '正在连接 GitHub…';
+          $('updateState').textContent = '正在检查本项目的 GitHub 发行版…';
           try {
             const info = await api.updateCheck();
             renderUpdate(info);

@@ -6,6 +6,7 @@
 const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, shell, nativeImage, screen, globalShortcut } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const { productName: PRODUCT_NAME, homepage: PROJECT_HOME } = require('../package.json');
 
 const store = require('./core/store');
 const { validPackageName } = require('./core/pkgname');
@@ -69,6 +70,12 @@ app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
  */
 function relocateUserDataIfCrowded() {
   try {
+    // 显示名称可以变，沿用旧版 Chromium 目录以保留本地界面偏好。
+    if (process.platform === 'win32' && !app.commandLine.hasSwitch('user-data-dir')) {
+      const previousUserData = path.join(app.getPath('appData'), 'ApkStart');
+      fs.mkdirSync(previousUserData, { recursive: true });
+      app.setPath('userData', previousUserData);
+    }
     const doctor = require('./core/doctor');
     const freeMB = doctor.freeDiskMB(store.DATA_DIR);
     const avd = String(store.getSettings().runtime.avdDir || '').trim();
@@ -800,6 +807,7 @@ const MSIX_ACCEL_HINT = '商店版无法自行提权。请手动开启一次：'
 
 function createWindow({ show = true } = {}) {
   mainWindow = new BrowserWindow({
+    title: `${PRODUCT_NAME} ${app.getVersion()}`,
     width: Number(process.env.APKSTART_WIN_W) || 1140,
     height: Number(process.env.APKSTART_WIN_H) || 740,
     minWidth: 900,
@@ -845,7 +853,7 @@ function createWindow({ show = true } = {}) {
     if (quitting) return;
     e.preventDefault();
     mainWindow.hide();
-    notify('ApkStart 仍在后台运行', '点击托盘图标可重新打开；右键托盘可退出。');
+    notify(`${PRODUCT_NAME} 仍在后台运行`, '点击托盘图标可重新打开；右键托盘可退出。');
   });
 
   if (IS_DEV) mainWindow.webContents.openDevTools({ mode: 'detach' });
@@ -915,7 +923,7 @@ function openManual(payload = {}) {
         if (/^https?:\/\//i.test(url)) shell.openExternal(url);
       });
     }
-    manualWindow.setTitle(`ApkStart 使用手册 · ${target.title}`);
+    manualWindow.setTitle(`${PRODUCT_NAME} 使用手册 · ${target.title}`);
     manualWindow.loadFile(path.join(__dirname, 'ui', 'manual.html'), { hash: target.anchor });
     manualWindow.once('ready-to-show', () => {
       if (!manualWindow || manualWindow.isDestroyed()) return;
@@ -928,7 +936,7 @@ function openManual(payload = {}) {
   } catch (e) {
     appLog(`manual open failed: ${e && e.message}`);
     // 手册打不开也不能影响修复流程：至少给个能点的在线地址
-    shell.openExternal('https://github.com/RoutineMiku/apkstart#readme').catch(() => {});
+    shell.openExternal(PROJECT_HOME).catch(() => {});
   }
   return target;
 }
@@ -993,7 +1001,7 @@ async function runAutodebug({ force = false } = {}) {
       if (fresh.length) {
         const text = fresh.map((i) => i.title).join('；');
         send('toast', { type: 'error', message: `自动检测发现新问题：${text}（设置 → 诊断与修复）` });
-        notify('自动检测发现新问题', `${text}。打开 ApkStart 的「设置 → 诊断与修复」可以一键处理。`);
+        notify('自动检测发现新问题', `${text}。打开「设置 → 诊断与修复」可以一键处理。`);
         appLog(`autodebug new issues: ${fresh.map((i) => i.code).join(',')}`);
       }
     }
@@ -1039,7 +1047,7 @@ function buildTray() {
     const hasRunning = pkg && appSessions.hasActive(pkg);
     const runningLabel = pkg ? store.getApp(pkg)?.label || pkg : '';
     const menu = Menu.buildFromTemplate([
-      { label: '打开 ApkStart', click: () => showWindow() },
+      { label: `打开 ${PRODUCT_NAME}`, click: () => showWindow() },
       { label: '使用手册', click: () => openManual({ topic: 'overview', reason: 'tray' }) },
       { type: 'separator' },
       ...(apps.length
@@ -1079,15 +1087,16 @@ function buildTray() {
             const r = await dialog.showMessageBox(mainWindow || undefined, {
               type: 'question',
               title: '发现新版本',
-              message: `ApkStart ${info.tag} 已发布，当前版本 v${app.getVersion()}。现在更新吗？`,
+              message: `${PRODUCT_NAME} ${info.tag} 已发布，当前版本 v${app.getVersion()}。现在更新吗？`,
               detail: (info.notes || '').slice(0, 600),
               buttons: ['立即更新', '稍后'],
               defaultId: 0,
               cancelId: 1,
             });
             if (r.response === 0) runUpdate();
-          } else if (info && !info.hasUpdate) {
-            notify('已是最新版本', `ApkStart v${app.getVersion()}`);
+          } else if (info && info.ok && !info.hasUpdate) {
+            const title = info.releasePublished === false ? '尚无正式发布' : '已是最新版本';
+            notify(title, `${PRODUCT_NAME} ${app.getVersion()}`);
           }
         },
       },
@@ -1103,7 +1112,7 @@ function buildTray() {
     ]);
     tray.setContextMenu(menu);
   };
-  tray.setToolTip('ApkStart — 安卓应用运行器');
+  tray.setToolTip(`${PRODUCT_NAME} ${app.getVersion()}`);
   // Windows 托盘的惯例是单击就打开主窗口（双击当然也可以）。
   // 之前只绑了 double-click，用户单击没反应，会以为托盘图标坏了。
   // 右键才出菜单，所以这里单击直接 showWindow 不会和菜单冲突。
@@ -1421,7 +1430,7 @@ function initializeDesktopState() {
     store.ensureDirs();
   } catch (error) {
     const filename = error.path ? path.basename(error.path) : '本地数据';
-    dialog.showErrorBox('ApkStart 无法读取本地状态',
+    dialog.showErrorBox(`${PRODUCT_NAME} 无法读取本地状态`,
       `${filename}（${error.code || '未知错误'}）\n目录：${store.DATA_DIR}\n\n`
       + '未启动安卓运行时，也未重置文件。请检查目录权限，或从备份恢复出错的文件后重试。');
     app.exit(1);

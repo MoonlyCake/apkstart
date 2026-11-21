@@ -14,10 +14,10 @@
 !macro customInstall
   DetailPrint "正在创建桌面快捷方式…"
   CreateShortcut "$DESKTOP\ApkStart.lnk" "$INSTDIR\ApkStart.exe" "" "$INSTDIR\ApkStart.exe" 0 \
-    SW_SHOWNORMAL "" "ApkStart — 在电脑上直接运行安卓应用"
+    SW_SHOWNORMAL "" "${PRODUCT_NAME} — 在电脑上直接运行安卓应用"
   CreateDirectory "$SMPROGRAMS\ApkStart"
   CreateShortcut "$SMPROGRAMS\ApkStart\ApkStart.lnk" "$INSTDIR\ApkStart.exe" "" "$INSTDIR\ApkStart.exe" 0 \
-    SW_SHOWNORMAL "" "ApkStart — 在电脑上直接运行安卓应用"
+    SW_SHOWNORMAL "" "${PRODUCT_NAME} — 在电脑上直接运行安卓应用"
 !macroend
 
 !macro customUnInstall

@@ -3,9 +3,8 @@
 这个目录里的脚本和应用改动，目的是产出一个**「一次下载、装完即用」**的 Microsoft Store
 安装包：里面已经包含 Android 模拟器、platform-tools 和系统镜像，用户不需要任何联网部署。
 
-> 一句话现状：**打包链路已经就绪，能不能真上架只取决于你有没有 Partner Center 账号。**
-> 自动化能做的部分（清单、图标、打包、自签、校验）全部在这份文档里；
-> 需要在网页上人工完成的部分（注册账号、上传、填 listing、送审）在文末列成清单。
+> 此处是 MSIX 构建说明，不代表 Apk Start --Q 已上架。GitHub Release 独立发版；
+> 现有 MSIX 身份保留用于兼容旧包，只有有权使用该产品身份的账号才能上传更新。
 
 ---
 
@@ -51,7 +50,7 @@ node build/msix.js      # 自动把 build/runtime 复制进包，再打 MSIX
 npm run build:appx
 ```
 
-它会跑 `electron-builder --win appx --x64 --config electron-builder.yml`，产出
+它会跑 `electron-builder --win appx --x64 --config electron-builder.yml --publish never`，产出
 `dist/release/ApkStart-<版本>.appx`。⚠️ 这一步会从 CDN 下载 electron-builder 自己的
 工具集，**断网或网络不稳时会只解一半**（`win-unpacked` 里只剩 `electron.exe`，
 `resources/runtime` 没复制），后续打出来的包会缺运行时。遇到这种情况回到 A。
@@ -97,11 +96,11 @@ MSIX 清单里的 `Identity/@Name` 和 `Identity/@Publisher` 必须**逐字**等
 Partner Center → **Product management → Product identity** 里给出的
 `Package/Identity/Name` 与 `Package/Identity/Publisher`，差一个字符都收不了。
 
-当前默认值（占位用，真上架要换）：
+当前默认值沿用原有商店身份，**不是 Apk Start --Q 的新商店产品身份**：
 
 ```
 Identity Name      = RoutineMiku.ApkStart
-Identity Publisher = CN=RoutineMiku
+Identity Publisher = CN=58CA1DED-8AB3-4D0D-AF50-62C9B781AA4D
 PublisherDisplayName = RoutineMiku
 ```
 
@@ -128,16 +127,18 @@ $env:APKSTART_MSIX_PUBLISHER="CN=1a2b3c4d-1111-2222-3333-444455556666"
 
 ```powershell
 node build/msix.js --sign          # 生成自签证书 + 尝试签名
+$version = node -p "require('./build/msix').msixVersion(require('./package.json').version)"
+$msix = "dist\store\ApkStart_${version}_x64.msix"
 # 如果上一步报 signtool 不可用，用 SDK 里的那一份手工签：
 & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe" `
   sign /fd SHA256 /a /f dist\store\ApkStart-test.pfx /p 'ApkStart!test' `
-  dist\store\ApkStart_0.6.3.0_x64.msix
+  $msix
 
 # 管理员 PowerShell 里信任证书（一次即可）
 Import-PfxCertificate -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' `
   -FilePath 'dist\store\ApkStart-test.pfx' `
   -Password (ConvertTo-SecureString 'ApkStart!test' -Force -AsPlainText)
-Add-AppxPackage -Path 'dist\store\ApkStart_0.6.3.0_x64.msix'
+Add-AppxPackage -Path $msix
 ```
 
 卸载：`Get-AppxPackage *ApkStart* | Remove-AppxPackage`

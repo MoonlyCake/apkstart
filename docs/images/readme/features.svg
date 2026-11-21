@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="306" viewBox="0 0 1200 306" role="img" aria-labelledby="title desc">
-  <title id="title">ApkStart 桌面体验</title>
+  <title id="title">Apk Start --Q 桌面体验</title>
   <desc id="desc">功能图示：Android 应用的桌面窗口、默认关闭的主机麦克风输入，以及用于定位运行时问题的日志和环境检查。</desc>
   <defs>
     <linearGradient id="surface" x1="0" y1="0" x2="1" y2="1" gradientUnits="objectBoundingBox">
@@ -38,7 +38,7 @@
   <g font-family="Segoe UI, system-ui, sans-serif">
     <path d="M40 35l5-5 5 5-5 5z" fill="#C4A6F6"/>
     <text x="62" y="41" fill="#DCE7FC" font-size="15" font-weight="700" letter-spacing="2.1">THE WINDOWS TOOLKIT</text>
-    <text x="1161" y="40" text-anchor="end" fill="#AABBD5" font-size="13" font-weight="600" letter-spacing="1.7">APKSTART / FEATURES</text>
+    <text x="1161" y="40" text-anchor="end" fill="#AABBD5" font-size="13" font-weight="600" letter-spacing="1.7">APK START --Q / FEATURES</text>
 
     <g transform="translate(34 62)">
       <rect width="360" height="214" rx="18" fill="url(#panel)" stroke="#3E516B"/>

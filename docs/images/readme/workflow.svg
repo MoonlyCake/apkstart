@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="250" viewBox="0 0 1200 250" role="img" aria-labelledby="title desc">
-  <title id="title">ApkStart 从安装包到桌面窗口</title>
-  <desc id="desc">三步工作流：选择 APK 安装包，交由 ApkStart 托管 Android 运行时，然后从 Windows 启动应用。</desc>
+  <title id="title">Apk Start --Q：从安装包到桌面窗口</title>
+  <desc id="desc">三步工作流：选择 APK 安装包，交由 Apk Start --Q 托管 Android 运行时，然后从 Windows 启动应用。</desc>
   <defs>
     <linearGradient id="surface" x1="0" y1="0" x2="1" y2="1" gradientUnits="objectBoundingBox">
       <stop stop-color="#172744"/>
@@ -36,7 +36,7 @@
   <g font-family="Segoe UI, system-ui, sans-serif">
     <path d="M40 35l5-5 5 5-5 5z" fill="#57E1CF"/>
     <text x="62" y="41" fill="#DCE7FC" font-size="15" font-weight="700" letter-spacing="2.1">FROM FILE TO WINDOW</text>
-    <text x="1161" y="40" text-anchor="end" fill="#AABBD5" font-size="13" font-weight="600" letter-spacing="1.7">APKSTART / FLOW</text>
+    <text x="1161" y="40" text-anchor="end" fill="#AABBD5" font-size="13" font-weight="600" letter-spacing="1.7">APK START --Q / FLOW</text>
 
     <g transform="translate(34 62)">
       <rect width="344" height="149" rx="17" fill="url(#card)" stroke="#3E516B"/>
@@ -61,7 +61,7 @@
         <path d="M19 11h.01" stroke-width="4"/>
       </g>
       <text x="99" y="79" fill="#F1F5FF" font-size="24" font-weight="700">Start the runtime</text>
-      <text x="99" y="105" fill="#B5C5DE" font-size="16">Android, managed by ApkStart</text>
+      <text x="99" y="105" fill="#B5C5DE" font-size="16">Android, ready when needed</text>
     </g>
 
     <g transform="translate(822 62)">

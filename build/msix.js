@@ -52,7 +52,7 @@ const CONFIRMED_PUBLISHER = 'CN=58CA1DED-8AB3-4D0D-AF50-62C9B781AA4D';
 const IDENTITY = arg('identity') || process.env.APKSTART_MSIX_IDENTITY || CONFIRMED_IDENTITY;
 const PUBLISHER = arg('publisher') || process.env.APKSTART_MSIX_PUBLISHER || CONFIRMED_PUBLISHER;
 const PUBLISHER_DISPLAY = arg('publisherDisplay') || process.env.APKSTART_MSIX_PUBLISHER_DISPLAY || 'RoutineMiku';
-const DISPLAY = arg('display') || process.env.APKSTART_MSIX_DISPLAY || 'ApkStart';
+const DISPLAY = arg('display') || process.env.APKSTART_MSIX_DISPLAY || pkg.productName;
 const APP_ID = arg('appId') || 'ApkStart';
 const DO_SIGN = !!arg('sign', false);
 

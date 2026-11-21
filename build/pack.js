@@ -240,16 +240,16 @@ function embedExeMeta(exe) {
     // 四段式文件版本（和 MSIX 的口径一致），产品版本用三段式
     '--set-file-version', `${PKG.version}.0`,
     '--set-product-version', PKG.version,
-    '--set-version-string', 'ProductName', 'ApkStart',
-    '--set-version-string', 'FileDescription', 'ApkStart 安卓应用运行器',
-    '--set-version-string', 'CompanyName', PKG.author || 'RoutineMiku',
+    '--set-version-string', 'ProductName', PKG.productName,
+    '--set-version-string', 'FileDescription', `${PKG.productName} 安卓应用运行器`,
+    '--set-version-string', 'CompanyName', PKG.author,
     '--set-version-string', 'LegalCopyright', 'Copyright (c) 2026 ApkStart',
     '--set-version-string', 'OriginalFilename', 'ApkStart.exe',
     '--set-version-string', 'InternalName', 'ApkStart',
   ];
   try {
     execFileSync(rcedit, args, { stdio: 'pipe', windowsHide: true });
-    console.log(`  exe 图标/版本已写入（${PKG.version}，FileDescription=ApkStart 安卓应用运行器）`);
+    console.log(`  exe 图标/版本已写入（${PKG.productName} ${PKG.version}）`);
     return true;
   } catch (e) {
     console.warn(`  [!] rcedit 失败：${e.message}`);
@@ -262,7 +262,7 @@ embedExeMeta(exePath);
 const pkg = PKG;
 const fullNote = FULL ? '完整版（内置运行时，装完不联网）' : '轻量版（首次启动下载运行时）';
 fs.writeFileSync(path.join(OUT, 'VERSION.txt'),
-  `ApkStart ${pkg.version}\n${fullNote}\n构建时间：${new Date().toLocaleString('zh-CN')}\n`);
+  `${pkg.productName} ${pkg.version}\n${fullNote}\n构建时间：${new Date().toLocaleString('zh-CN')}\n`);
 
 // 6. 体积报告：每次打包都打印，避免以后又悄悄变胖
 function dirSize(dir) {

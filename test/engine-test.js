@@ -400,13 +400,15 @@ function assert(cond, msg) { if (!cond) throw new Error(msg || '断言失败'); 
     assert(info.ok && info.api === '34' && info.tag === 'google_apis_playstore', `应判定 API 34 兼容镜像就绪：${JSON.stringify(info)}`);
   });
 
-  await test('完整版品牌资产与抖音联系入口就位', async () => {
+  await test('完整版保留品牌标记和运行时组装入口，关于页指向独立项目', async () => {
     const root = path.join(__dirname, '..');
-    assert(fs.existsSync(path.join(root, 'src', 'ui', 'assets', 'douyin-qr.jpg')), '缺少抖音二维码图片');
+    const { productName, repository } = require('../package.json');
+    assert(fs.existsSync(path.join(root, 'src', 'ui', 'assets', 'logo.png')), '缺少品牌标记');
     assert(fs.existsSync(path.join(root, 'build', 'fetch-runtime.js')), '缺少完整版运行时组装脚本');
     const html = fs.readFileSync(path.join(root, 'src', 'ui', 'index.html'), 'utf8');
-    assert(html.includes('douyin-qr.jpg'), '关于区未引用抖音二维码');
-    assert(html.includes('https://v.douyin.com/9TIIxVCANig/'), '缺少抖音主页链接');
+    const repo = repository.url.replace(/^git\+/, '').replace(/\.git$/, '');
+    assert(html.includes(`<span id="aboutProductName">${productName}</span>`), '关于页未显示独立项目名');
+    assert(html.includes(`href="${repo}"`), '缺少独立仓库链接');
   });
 
   console.log(results.join('\n'));

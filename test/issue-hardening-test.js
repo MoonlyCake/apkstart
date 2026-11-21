@@ -134,7 +134,7 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'apkstart-hardening-'));
     fs.writeFileSync(exe, 'x');
     const u = new Updater({ currentVersion: '0.5.3', exePath: exe, isPackaged: true, dataDir });
 
-    const payload = path.join(dataDir, 'update', '0.5.4', 'payload');
+    const payload = path.join(u.updateDir, '0.5.4', 'payload');
     fs.mkdirSync(payload, { recursive: true });
     fs.writeFileSync(path.join(payload, 'ApkStart.exe'), 'new');
     assert.equal(u.findResumableJob(), null, '没有就绪标记不应复用');
@@ -146,7 +146,8 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'apkstart-hardening-'));
     const cur = new Updater({ currentVersion: '0.5.4', exePath: exe, isPackaged: true, dataDir });
     assert.equal(cur.findResumableJob(), null, '不低于当前版本的载荷不能续做');
     // 标记版本不符 → 不复用
-    fs.writeFileSync(u._readyFile(payload), JSON.stringify({ version: '0.5.2' }));
+    const marker = JSON.parse(fs.readFileSync(u._readyFile(payload), 'utf8'));
+    fs.writeFileSync(u._readyFile(payload), JSON.stringify({ ...marker, version: '0.5.2' }));
     assert.equal(u.findResumableJob(), null, '标记版本不符不能复用');
   });
   test('apply 脚本用字节数校验替换成功，且保留失败载荷、有双路径重启', () => {
@@ -155,7 +156,7 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'apkstart-hardening-'));
     fs.mkdirSync(dataDir, { recursive: true });
     fs.writeFileSync(exe, 'old');
     const u = new Updater({ currentVersion: '0.5.3', exePath: exe, isPackaged: true, dataDir });
-    const payload = path.join(dataDir, 'update', '0.5.4', 'payload');
+    const payload = path.join(u.updateDir, '0.5.4', 'payload');
     fs.mkdirSync(payload, { recursive: true });
     fs.writeFileSync(path.join(payload, 'ApkStart.exe'), 'new-version-bytes');
     const script = u.apply({ mode: 'zip', payload, version: '0.5.4' }, { spawn: false });
