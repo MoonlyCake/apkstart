@@ -1224,7 +1224,7 @@ class Runtime {
       // 真躺倒了：重新锁方向 + 忽略应用方向请求 + 恢复 density
       this.log(`方向自愈：init=${init[1]}x${init[2]} cur=${cur[1]}x${cur[2]} 已躺倒，重新收敛`);
       await c.resetDisplayOverrides(wantLand).catch(() => {});
-      await c.setOrientation(wantLand).catch(() => {});
+      await c.setOrientation(wantLand, { sendBackKey: false }).catch(() => {});
       return;
     }
     // 没躺倒 ≠ 状态就对。平板排版依赖两个易丢的运行时状态：
@@ -1362,44 +1362,124 @@ class Runtime {
    * @returns {{ok:boolean, reclaimed:number, avdDir:string, error?:string}}
    */
   async resetAndroidData() {
-    const fs = require('fs');
-    const path = require('path');
+    let reclaimed = 0;
+    let avdDir = '';
+    const busy = () => this.vmStarting || this.installing;
+    const unknownGuest = () => new Error('无法确认当前安卓运行时已停止，未清除数据。请先关闭 ApkStart 的安卓窗口再重试。');
+    const processAlive = (pid) => {
+      try { process.kill(pid, 0); return true; }
+      catch (e) { if (e.code === 'ESRCH') return false; throw e; }
+    };
     try {
-      if (this.vmRunning) await this.stop().catch(() => {});
-      const avdDir = path.join(this.provisioner.paths().avdHome, 'apkstart.avd');
-      let reclaimed = 0;
-      if (fs.existsSync(avdDir)) {
-        for (const e of fs.readdirSync(avdDir, { withFileTypes: true })) {
-          const p = path.join(avdDir, e.name);
-          // 删除：用户数据镜像（含 qcow2 差量 + 基址）、快速启动快照、残留锁文件/锁目录。
-          // 保留：config.ini / hardware-qemu.ini / AVD.conf / cache.img / encryptionkey* / initrd /
-          //       modem_simulator / 各类 *.ini / *.txt / *.cache —— 它们是 AVD 的身份与基础设施，
-          //       删了 AVD 直接失效或下次开机异常。下次点开应用，模拟器会按 -wipe-data 语义重建 /data。
+      // 清空前确认应用清单可读。不能在删除镜像后才发现清单已损坏。
+      store.getApps();
+      if (busy()) throw unknownGuest();
+      const { avdHome } = this.provisioner.paths();
+      avdDir = path.join(avdHome, 'apkstart.avd');
+      const root = fs.lstatSync(avdDir, { throwIfNoEntry: false }) ? fs.realpathSync(avdDir) : null;
+      if (root) {
+        const relative = path.relative(fs.realpathSync(avdHome), root);
+        if ((process.platform === 'win32' ? relative.toLowerCase() : relative) !== 'apkstart.avd') {
+          throw new Error('安卓数据目录不在当前 AVD 位置，未清除数据');
+        }
+      }
+      const activeOwner = () => {
+        if (!root) return 0;
+        const lock = path.join(root, 'hardware-qemu.ini.lock');
+        const st = fs.lstatSync(lock, { throwIfNoEntry: false });
+        if (!st) return 0;
+        if (!st.isFile() && !st.isDirectory()) throw unknownGuest();
+        const pidFile = st.isDirectory() ? path.join(lock, 'pid') : lock;
+        if (!fs.lstatSync(pidFile, { throwIfNoEntry: false })?.isFile()) throw unknownGuest();
+        const text = fs.readFileSync(pidFile, 'utf8').trim();
+        const pid = Number(text);
+        if (!/^[1-9]\d*$/.test(text) || pid > 0x7fffffff || pid === process.pid) throw unknownGuest();
+        return processAlive(pid) ? pid : 0;
+      };
+      const avdName = async (consoleClient) => {
+        const { stdout } = await consoleClient.exec(['emu', 'avd', 'name'], { timeout: 3000 });
+        const name = stdout.trim().replace(/\r?\nOK$/, '');
+        return /^[A-Za-z0-9_.-]+$/.test(name) ? name.toLowerCase() : '';
+      };
+      // 接管的 guest 没有本地进程句柄。用 AVD 自身的锁 PID 关联监听端口，
+      // 再检查控制台名称。不能仅凭 ADB 在线或端口号调用兜底清理（它会扫其它进程）。
+      const owner = activeOwner();
+      const ports = (await this.emulatorPorts()).filter((p) => Number.isInteger(p) && p >= EMU_PORT && p < 65535 && p % 2 === 0);
+      if (owner) {
+        let ownedPort = 0;
+        for (const port of ports) {
+          if (await this.pidOnPort(port) === owner) {
+            if (ownedPort) throw unknownGuest();
+            ownedPort = port;
+          }
+        }
+        if (!ownedPort) throw unknownGuest();
+        const consoleClient = this.client(`emulator-${ownedPort}`);
+        if (await avdName(consoleClient) !== 'apkstart' || await this.pidOnPort(ownedPort) !== owner
+          || activeOwner() !== owner || busy()) throw unknownGuest();
+        this.emulator.cancelSnapshotSave();
+        const { stdout } = await consoleClient.exec(['emu', 'kill'], { timeout: 10000 });
+        if (/^KO:/im.test(stdout)) throw unknownGuest();
+        const deadline = Date.now() + 30000;
+        while (processAlive(owner) || this.vmRunning) {
+          if (Date.now() >= deadline) throw unknownGuest();
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+        this._lastNetwork = null;
+        this._activeApps.clear();
+        this._tombstoned.clear();
+      } else {
+        if (this.vmRunning || await this.client().isOnline()) throw unknownGuest();
+        for (const port of ports) {
+          // 无法判断属于哪一个 AVD 的本地控制台，不冒险删除。
+          const name = await avdName(this.client(`emulator-${port}`)).catch(() => '');
+          if (!name || name === 'apkstart') throw unknownGuest();
+        }
+      }
+      // 禁止在等待关机/识别期间有新启动者接管目标；重读等待期间可能变化的清单。
+      if (busy() || this.vmRunning || activeOwner()) throw unknownGuest();
+      store.getApps();
+      if (root) {
+        for (const e of fs.readdirSync(root, { withFileTypes: true })) {
+          const p = path.join(root, e.name);
+          // 只清用户数据、快照和残留锁，保留 AVD 配置与基础镜像。
           const isUserdata = /^userdata(-qemu)?(-[0-9]+)?\.img(\.qcow2)?$/.test(e.name)
             || /^userdata\.img(\.qcow2)?\.\d+$/.test(e.name);
           const isSnapshot = /^snapshots(\.stale-\d+)?$/.test(e.name);
           const isLock = /\.lock$/.test(e.name);
-          if (!e.isDirectory() && !isUserdata && !isLock) continue;
-          if (e.isDirectory() && !isSnapshot && !isLock) continue;
+          if (!isUserdata && !isSnapshot && !isLock) continue;
           try {
-            if (e.isDirectory()) {
-              const s = require('./layers').dirSize(p);
-              fs.rmSync(p, { recursive: true, force: true });
-              reclaimed += s;
-            } else {
-              const s = fs.statSync(p).size;
-              fs.rmSync(p, { force: true });
-              reclaimed += s;
+            if ((isUserdata && !e.isFile()) || (isSnapshot && !e.isDirectory())) {
+              throw new Error('条目类型不符');
             }
-          } catch (_) { /* 占用中的暂跳，下次再清 */ }
+            let size;
+            if (e.isDirectory()) {
+              const target = fs.realpathSync(p);
+              if (path.relative(root, target) !== e.name) throw new Error('条目不在当前 AVD 内');
+              size = require('./layers').dirSize(target);
+              fs.rmSync(target, { recursive: true, force: true });
+            } else {
+              size = fs.lstatSync(p).size;
+              fs.rmSync(p, { force: true });
+            }
+            if (fs.lstatSync(p, { throwIfNoEntry: false })) throw new Error('条目仍存在');
+            reclaimed += size;
+          } catch (e2) {
+            if (isUserdata || isSnapshot) {
+              throw new Error(`安卓数据清理未完成，应用清单未清除：${e.name}（${e2.message}）`);
+            }
+          }
         }
       }
-      // 用户数据镜像被删后，用户侧「已安装 app」的记录也要清掉，
-      // 否则桌面/启动器还显示着其实已不存在的 app。
-      try { store.saveApps([]); } catch (_) { /* ignore */ }
+      try {
+        store.saveApps([]);
+      } catch (e) {
+        // 磁盘操作已经执行，不应把清单写入失败误报为成功或承诺数据仍在。
+        return { ok: false, reclaimed, avdDir, error: `已执行安卓数据清理，但应用清单未能更新：${e.message}` };
+      }
       return { ok: true, reclaimed, avdDir };
     } catch (e) {
-      return { ok: false, reclaimed: 0, avdDir: '', error: e.message };
+      return { ok: false, reclaimed, avdDir, error: e.message };
     }
   }
 

@@ -556,6 +556,13 @@ async function installFiles(paths) {
         t.update({ title: pr.meta ? `正在安装 ${pr.meta.label}` : `正在安装 ${name}`, body: pr.message, progress: pct });
       });
       const r = await api.installApk(p);
+      if (r?.ok === false) {
+        failed++;
+        t.dismiss();
+        if (installToast === t) installToast = null;
+        toast({ title: '未安装', body: r.error });
+        continue;
+      }
       t.update({ title: `${r.app.label} 已安装`, body: r.app.shortcutPath ? '桌面快捷方式已创建，双击即可直接打开。' : '可在应用卡片右键创建桌面快捷方式。', progress: 100, type: 'ok' });
       t.el.querySelector('.spinner')?.remove();
       setTimeout(t.dismiss, 3600);
@@ -1819,14 +1826,15 @@ function bindSettings() {
       toast({ title: '已恢复系统组件', body: '深度裁剪关闭，后台包正在恢复', type: 'info' });
     }
   });
+  const renderCompatImage = (env) => {
+    const image = env.playImage;
+    $('compatInstallField').hidden = !image || !!image.ok;
+    $('compatImgStatus').textContent = image?.ok
+      ? `已就绪（${(image.size / 1073741824).toFixed(2)} GB）` : '未下载';
+  };
   $('setCompat').addEventListener('change', async (e) => {
-    const on = e.target.checked;
-    await save({ runtime: { compatImage: on } });
-    const env = ((state.status = await api.runtimeStatus()).env) || {};
-    const ok = env.playImage && env.playImage.ok;
-    $('compatInstallField').hidden = !on || !!ok;
-    if (on && !ok) toast({ title: 'ARM 兼容模式已开启', body: '还需要下载 Google Play 兼容镜像（Android 14，约 1.5GB），点击下方按钮开始', type: 'info' });
-    else if (on) toast({ title: 'ARM 兼容模式已开启', body: '重启运行时后生效', type: 'info' });
+    await save({ runtime: { compatImage: e.target.checked } });
+    renderCompatImage((state.status = await api.runtimeStatus()).env || {});
   });
   $('setAutoShortcut').addEventListener('change', (e) => save({ createShortcutOnInstall: e.target.checked }));
   $('setStartMenuShortcut').addEventListener('change', (e) => save({ createStartMenuShortcut: e.target.checked }));
@@ -2185,18 +2193,11 @@ function bindSettings() {
     }
   });
 
-  // 兼容镜像状态显示
-  (async () => {
-    const env = ((state.status = await api.runtimeStatus()).env) || {};
-    const s = state.settings;
-    const on = !!(s && s.runtime && s.runtime.compatImage);
-    const ok = env.playImage && env.playImage.ok;
-    $('compatInstallField').hidden = !on || !!ok;
-    if (env.playImage) {
-      $('compatImgStatus').textContent = ok
-        ? `已就绪（${(env.playImage.size / 1073741824).toFixed(2)} GB）` : '未下载';
-    }
-  })();
+  // 下载入口取决于镜像是否就绪，不再依赖旧版兼容开关。
+  api.runtimeStatus().then((status) => {
+    state.status = status;
+    renderCompatImage(status.env || {});
+  }).catch(() => {});
   $('btnOpenData').addEventListener('click', async () => {
     const info = await api.info();
     const dir = info.runtimeDir || info.dataDir;

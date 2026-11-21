@@ -8,6 +8,9 @@ const fs = require('fs');
 const path = require('path');
 
 const store = require('./core/store');
+const { validPackageName } = require('./core/pkgname');
+const { OperationQueue } = require('./application/operation-queue');
+const { createWindowAttachment } = require('./application/window-attachment');
 const { Runtime } = require('./core/engine');
 const { Installer } = require('./core/installer');
 const { Sharer } = require('./core/sharer');
@@ -116,8 +119,7 @@ process.on('exit', (code) => appLog(`process exit code=${code}`));
  * app\resources\runtime）。非空 = 模拟器和镜像都是本地的：开机动画不该提
  * 「下载」，autoDeploy 也不该联网。
  *
- * 必须在 bootstrapBundledRuntime() 之前声明：那个函数在模块加载时立刻执行，
- * 用 `let` 声明在它后面会撞上 TDZ（赋值直接抛错，被 catch 吞掉，标志永远为空）。
+ * 启动时先确认本地状态可读，再决定是否接管内置运行时。
  */
 let bundledRuntimeDir = null;
 
@@ -222,7 +224,6 @@ function bootstrapBundledRuntime() {
     bundledRuntimeDir = bundled;
   } catch (_) { /* 接管失败不阻塞启动，走在线引导 */ }
 }
-bootstrapBundledRuntime();
 
 // 冒烟截图等自动化场景下跳过注册表探测（避免依赖 reg.exe）
 const NO_SHELL_PROBE = process.argv.includes('--smoke') || process.env.APKSTART_NO_SHELL_PROBE === '1';
@@ -265,17 +266,22 @@ let splashDone = () => {};
 
 function parseArgs(argv) {
   const args = argv.slice(IS_DEV ? 2 : 1).filter((a) => !a.startsWith('--allow-file-access'));
-  const out = { apk: null, launch: null, silent: false };
+  const out = { apk: null, launch: null, silent: false, error: null };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === '--launch') {
       // Electron 会往 argv 里塞自己的开关和 app 路径，只认形如 com.foo.bar 的包名
-      const v = args.slice(i + 1).find((x) => x && /^[a-zA-Z][\w]*(\.[\w]+)+$/.test(x));
+      const v = args.slice(i + 1).find(isLaunchPackage);
       if (v) { out.launch = v; out.silent = true; }
+      else out.error = '快捷方式没有有效的安卓应用包名。';
     } else if (a === '--silent' || a === '--autostart') out.silent = true;
     else if (/\.(apk|xapk|apks)$/i.test(a) && !a.startsWith('--')) out.apk = a;
   }
-  return out;
+  return out.error ? { apk: null, launch: null, silent: false, error: out.error } : out;
+}
+
+function isLaunchPackage(pkg) {
+  return validPackageName(pkg) && pkg === pkg.trim();
 }
 
 /** Chromium 能解 WebP，nativeImage 不能；用隐藏窗口把 APK 图标转成 PNG */
@@ -523,9 +529,13 @@ async function restartForOrientation(landscape, { reloadApp = true } = {}) {
  *   - 嵌入：SetParent 进我们自己的窗口，观感统一、标题栏带旋转按钮。
  *   由设置 display.windowEmbed 控制（true 才是嵌入）。
  */
-async function attachAppWindow() {
-  if (!appWin) return false;
+async function attachAppWindow(isCurrent = () => true) {
+  const target = appWin;
+  const window = target?.win;
+  if (!window) return false;
   const embedMode = displaySettings().windowEmbed === true;
+  const active = () => isCurrent() && target === appWin && target.win === window
+    && target.isOpen && (displaySettings().windowEmbed === true) === embedMode;
   if (!embedMode) {
     /**
      * 原生窗口接管要重试。
@@ -537,26 +547,29 @@ async function attachAppWindow() {
      * 而且再也接不上画面（日志里的 attach failed (detached): unknown）。
      */
     for (let i = 0; i < 4; i += 1) {
-      if (!appWin.isOpen) {
+      if (!active()) {
         appLog(`attach detached: 壳窗口已关闭（第 ${i + 1} 轮）`);
         return false;
       }
       // eslint-disable-next-line no-await-in-loop
-      const ok = await appWin.openDetached().catch((e) => {
-        appWin.lastEmbedError = (e && e.message) || 'threw';
+      const ok = await target.openDetached().catch((e) => {
+        target.lastEmbedError = (e && e.message) || 'threw';
         return false;
       });
+      if (!active()) return false;
       if (ok) return true;
-      appLog(`attach detached #${i + 1} 失败: ${appWin.lastEmbedError || 'unknown'}`);
+      appLog(`attach detached #${i + 1} 失败: ${target.lastEmbedError || 'unknown'}`);
       // 逐轮拉长等待：窗口代理的 show/layout 也可能正好撞上窗口重建
       // eslint-disable-next-line no-await-in-loop
-      await new Promise((r) => setTimeout(r, 400 + i * 600));
+      if (i < 3) await new Promise((r) => setTimeout(r, 400 + i * 600));
     }
     // 四轮都没露出来（远程桌面 / 显卡驱动异常 / 模拟器被 --no-window 起过）：
     // 与其留一屏黑或者一张永远转圈的等待页，不如先用嵌入把画面接上，
     // 并明确告诉用户这是兜底 —— 下次启动仍然优先原生窗口。
+    if (!active()) return false;
     appLog('attach detached: 重试全部失败，临时退回嵌入模式');
-    const fallback = await appWin.embed().catch(() => false);
+    const fallback = await target.embed().catch(() => false);
+    if (!active()) return false;
     if (fallback) {
       try {
         send('toast', { type: 'info', message: '模拟器原生窗口没能显示，本次临时用内置窗口接管画面' });
@@ -564,12 +577,14 @@ async function attachAppWindow() {
     }
     return fallback;
   }
-  const ok = await appWin.embed().catch(() => false);
-  if (!ok) {
-    setTimeout(() => { if (appWin.isOpen) appWin.embed().catch(() => {}); }, 1500);
-    setTimeout(() => { if (appWin.isOpen) appWin.embed().catch(() => {}); }, 4000);
+  // 绑定到本次启动和窗口；不留下会跨到下次启动的回调。
+  for (const delay of [0, 1500, 2500]) {
+    if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+    if (!active()) return false;
+    const ok = await target.embed().catch(() => false);
+    if (ok && active()) return true;
   }
-  return ok;
+  return false;
 }
 
 /**
@@ -1147,14 +1162,15 @@ function buildTray() {
 }
 
 // ---------------- 核心动作 ----------------
+const appOperations = new OperationQueue();
 
 let installBusy = null;   // 正在安装的文件路径：双击 APK 连点会走 second-instance，不能并发装
 let lastInstallErr = { msg: '', at: 0 };
 
 async function runInstall(filePath) {
-  showWindow();
   // 同一个包正在装（用户连点了几次图标 / 拖了好几次）→ 只提示一次，别重复跑一遍安装
   if (installBusy) {
+    showWindow();
     if (installBusy === filePath) {
       send('toast', { type: 'info', message: '这个 APK 正在安装中，请稍等…' });
       return { ok: false, error: '正在安装中' };
@@ -1163,8 +1179,13 @@ async function runInstall(filePath) {
     return { ok: false, error: '已有安装任务在进行' };
   }
   installBusy = filePath;
-  send('install:start', { file: filePath });
+  return appOperations.run('install', () => installOne(filePath));
+}
+
+async function installOne(filePath) {
   try {
+    showWindow();
+    send('install:start', { file: filePath });
     const result = await installer.install(filePath, (p) => send('install:progress', p));
     send('install:done', result);
     // 新建的桌面图标要让资源管理器立刻刷新，否则用户会以为「没创建快捷方式」
@@ -1227,46 +1248,37 @@ async function runUpdate() {
   }
 }
 
-/**
- * 启动串行化。
- *
- * 一次启动最长要 80 秒（换面板重启 + 冷启动）。这期间用户完全可能再点一个应用、
- * 或者双击同一个图标两次、或者托盘菜单里点一下 —— 以前这些都会真的并发跑第二遍：
- * openAppWindow 会把正在启动的那个应用关掉（close + endApp），而虚拟机正在重启，
- * 结果两边一起失败，日志里是 `cmd: Can't find service: activity` / `device not found`，
- * 用户看到的是「点了没反应，然后弹回主界面」。
- *
- * 现在：同一个应用 → 直接复用进行中的那次（连点等于一次）；换应用 → 等前一次
- * 收尾再开始，而不是把它的运行时抽走。
- */
-let launchInFlight = null;
-// 「软件模拟」提醒每个进程只弹一次，避免每次切应用都来一条系统通知
+// 「软件模拟」提醒每个进程只弹一次。
 let accelWarned = false;
+let launchSequence = 0;
 
 async function runLaunch(pkg) {
-  if (launchInFlight) {
-    if (launchInFlight.pkg === pkg) {
-      appLog(`launch reused in-flight ${pkg}`);
-      return launchInFlight.promise;
-    }
-    appLog(`launch queued ${pkg}（等待 ${launchInFlight.pkg} 启动完成）`);
-    await launchInFlight.promise.catch(() => {});
-  }
-  const entry = { pkg };
-  entry.promise = launchOne(pkg).finally(() => {
-    if (launchInFlight === entry) launchInFlight = null;
-  });
-  launchInFlight = entry;
-  return entry.promise;
+  if (!isLaunchPackage(pkg)) return { ok: false, error: '无效的安卓应用包名' };
+  const key = `launch:${pkg}`;
+  if (appOperations.has(key)) appLog(`launch reused in-flight ${pkg}`);
+  else if (appOperations.size) appLog(`launch queued ${pkg}`);
+  return appOperations.run(key, () => launchOne(pkg));
 }
 
 async function launchOne(pkg) {
   const t0 = Date.now();
   const mark = (s) => appLog(`launch ${pkg} ${s} +${Date.now() - t0}ms`);
-  // 「提前接画面」的状态：进程一出现就接，但最终成败要等回调回来才知道。
-  // 放在函数作用域，供后面的最终判定使用。
-  let attachDoneEarly = false;
-  let earlyAttachOk = false;
+  const launchId = ++launchSequence;
+  let attaching = true;
+  let discoveryTimer = null;
+  let discoveryPending = null;
+  let discoveringNative = true;
+  const isCurrent = () => attaching && launchId === launchSequence;
+  const stopDiscovery = () => {
+    discoveringNative = false;
+    if (discoveryTimer) clearTimeout(discoveryTimer);
+    return discoveryPending?.catch(() => {});
+  };
+  const attachment = createWindowAttachment(async () => {
+    await stopDiscovery();
+    return attachAppWindow(isCurrent);
+  });
+  let watchingFirstFrame = false;
   // 启动动画统一收尾：早期 splash 窗口 + 应用窗口的 boot 遮罩一起淡出。
   // 幂等（onAppUp 首帧判定 / launch 结束兜底 / 定时保险丝都可能调它），并保证
   // boot 遮罩要等「应用画出首帧」才收，绝不在白底 Splash 阶段提前消失 —— 这正是
@@ -1277,8 +1289,23 @@ async function launchOne(pkg) {
     if (bootAnimDone) return;
     bootAnimDone = true;
     if (bootFuse) { clearTimeout(bootFuse); bootFuse = null; }
+    if (launchId !== launchSequence) return;
     if (appWin && appWin.isOpen) appWin.setState({ ready: true, tip: '' });
     if (typeof splashDone === 'function') splashDone();
+  };
+  const watchFirstFrame = async (attached) => {
+    if (!attached || watchingFirstFrame || !isCurrent()) return;
+    watchingFirstFrame = true;
+    let painted = true;
+    try {
+      const client = runtime.client();
+      if (typeof client?.waitForAppFirstFrame === 'function') {
+        painted = await client.waitForAppFirstFrame(pkg, { timeoutMs: 20000 });
+      }
+    } catch (_) { /* 首帧探测失败时也收起过渡动画 */ }
+    if (!isCurrent()) return;
+    mark(`first frame=${painted}`);
+    finishBootAnimation();
   };
   // 总保险丝：waitForAppFirstFrame 最多等 20 秒，留 4 秒余量。任何路径（首帧判定
   // 抛错、onAppUp 没触发、launch 提前返回）导致没人收动画时，24 秒后强制收掉，
@@ -1309,23 +1336,22 @@ async function launchOne(pkg) {
     if (displaySettings().windowEmbed === false && appWin && appWin.isOpen) {
       let tries = 0;
       let rounds = 0;
-      const preAttach = async () => {
-        if (!appWin || !appWin.isOpen) return;
-        rounds += 1;
-        // 硬上限：无论让路还是失败，最多跑 45 轮（约 1 分钟）就收手，
-        // 避免换向失败后这个定时器一直挂着空转。
-        if (rounds > 45) return;
-        // 正在换面板方向、准备重启运行时：这时候去接画面只会把刚亮起的
-        // 等待窗口藏掉，屏幕上就没东西了。让路，等重启完成再接手。
-        if (appWin.waitingForRestart) {
-          setTimeout(preAttach, 1500);
-          return;
-        }
+      const preAttach = () => {
+        if (!isCurrent() || !discoveringNative || !appWin?.isOpen) return;
+        if (++rounds > 45) return;
+        const target = appWin;
+        const window = target.win;
+        const active = () => isCurrent() && discoveringNative && appWin === target
+          && target.win === window && target.isOpen && displaySettings().windowEmbed === false;
+        if (!active()) return;
+        const schedule = () => { discoveryTimer = setTimeout(preAttach, 1500); };
+        if (target.waitingForRestart) { schedule(); return; }
         tries += 1;
-        // eslint-disable-next-line no-await-in-loop
-        const ok = await appWin.openDetached().catch(() => false);
-        if (ok) { appLog(`pre-attach detached ok（第 ${tries} 次）`); return; }
-        if (tries < 20) setTimeout(preAttach, 1500);
+        discoveryPending = target.openDetached().catch(() => false).then((ok) => {
+          if (!active()) return;
+          if (ok) appLog(`pre-attach detached ok（第 ${tries} 次）`);
+          else if (tries < 20) schedule();
+        });
       };
       preAttach();
     }
@@ -1346,37 +1372,13 @@ async function launchOne(pkg) {
       // 观感差别很大（实测点开到出画面 7.2s → 约 3s）。
       // 这里故意不 await：接画面和存活判定并行，谁先完成都不影响另一边。
       onAppUp: () => {
-        attachDoneEarly = true;
         mark('app up (提前接画面)');
-        attachAppWindow()
-          .then(async (ok) => {
-            earlyAttachOk = ok;
-            mark(`early attach=${ok}`);
-            if (!ok) return;
-            // 画面接上 ≠ 首帧画出来：Android 12+ 在 Activity 首帧之前会先挂一屏
-            // 系统 Splash（应用图标 + 白底）。开机动画此时如果淡出，用户看到的就是
-            // 一张白底图，以为卡死。守到系统 Splash 撤掉（首帧上屏）再收动画，
-            // 超时也照常收（不能因为判定失败把用户永远关在动画里）。
-            let painted = true;
-            try {
-              const c = runtime.client();
-              if (c && typeof c.waitForAppFirstFrame === 'function') {
-                // 红果这类重应用从 am start 到真正画出首帧可能超过 15 秒，
-              // 12 秒就放弃会让开机动画提前收掉、露出系统 Splash 的白底图标。
-              // 20 秒给足余量；真画不出来也只是多等一会儿，不会卡死流程。
-              painted = await c.waitForAppFirstFrame(pkg, { timeoutMs: 20000 });
-              }
-            } catch (_) { /* 判定失败按已就绪处理 */ }
-            mark(`first frame=${painted}`);
-            // 首帧（或 20 秒兜底）到了才收动画：早期 splash 窗口和应用窗口的
-            // boot 遮罩一起收，别让带应用图标的启动动画在白底 Splash 之前就消失。
-            finishBootAnimation();
-          })
-          .catch(() => { earlyAttachOk = false; finishBootAnimation(); });
+        attachment.startEarly().then(watchFirstFrame);
         // 应用刚起来时 Activity 还在重建，会按自己声明的方向（portrait）再转一次，
         // 把刚锁好的方向覆盖掉 —— 这就是「平板/横屏模式下画面总是 90 度躺着」。
         // 等它稳定后补一次方向自愈（读 init/cur，只有真躺倒才写）。
         setTimeout(() => {
+          if (!isCurrent() || appWin?.pkg !== pkg) return;
           runtime._healOrientation?.().catch(() => {});
           // 顺带记下这个应用真正的方向（清单里全是 sensor 的应用只能这样学）
           learnAppOrientation(pkg).catch(() => {});
@@ -1416,16 +1418,9 @@ async function launchOne(pkg) {
     });
     mark('app started');
 
-    // 2) 应用真的活下来了，才把画面接到用户眼前（否则用户会看到闪一下的桌面/崩溃页）
-    // 但如果 onAppUp 已经把画面接上了（提前接管），这里只做一次「确认」，不重复接 ——
-    // 重复接在独立窗口模式下会把刚摆好的窗口再隐藏/显示一遍，画面会闪。
-    let embedded;
-    if (attachDoneEarly) {
-      embedded = !!earlyAttachOk;
-      mark(`early attached already (${embedded})`);
-    } else {
-      embedded = await attachAppWindow();
-    }
+    // 稳定后复用成功的提前接管；早接失败则做最后一次接管。
+    const embedded = await attachment.finish();
+    watchFirstFrame(embedded);
     // 日志措辞要分清两种模式：独立窗口模式下 embedded=true 的意思是
     // 「画面已经接到用户眼前（在模拟器原生窗口里）」，而不是「嵌进我们的窗口」。
     // 否则看日志的人会以为设置没生效。
@@ -1450,10 +1445,7 @@ async function launchOne(pkg) {
         }, 700);
       } catch (_) { /* 窗口可能刚关闭 */ }
     }
-    // 只有「没走提前接画面」的路径才在这里直接收动画。走了 onAppUp 的，
-    // 首帧判定还在异步进行，交给 finishBootAnimation（首帧完成/超时/保险丝），
-    // 否则会在白底 Splash 阶段就把 boot 遮罩收掉，露出系统 Splash 的白图标。
-    if (!attachDoneEarly) finishBootAnimation();
+    if (!embedded) finishBootAnimation();
     // 容器会话：环境已经就绪，这里只做「按应用裁剪 + 打开后台轮询」，
     // 不再为这个 App 重新引导一遍 Android。鼠标键位钩子由窗口 focus 事件
     // 按设置决定，失焦即卸载。
@@ -1479,10 +1471,12 @@ async function launchOne(pkg) {
           : '设置 → 环境自检 → 修复 可一键开启（需管理员授权），之后重启一次。');
       }).catch(() => {});
     }
-    // 兜底：如果 early attach 没触发（比如嵌入模式），这里补一次。幂等，已收则无事。
-    finishBootAnimation();
     return { ok: true, embedded };
   } catch (e) {
+    attaching = false;
+    await stopDiscovery();
+    await attachment.settleEarly();
+    finishBootAnimation();
     appLog(`launch failed ${pkg}: ${e && (e.stack || e.message)}`);
     try { appWin.close({ keepApp: true }); } catch (_) { /* ignore */ }
     // 启动失败也把模拟器窗口继续压住（不要让它以「独立的模拟器窗口」形式露出来），
@@ -1644,6 +1638,7 @@ function registerIpc() {
 
   ipcMain.handle('apk:install', async (_e, filePath) => {
     const r = await runInstall(filePath);
+    if (r.ok === false) return r;
     return { ok: true, app: r.app, warnings: r.warnings };
   });
 
@@ -2227,11 +2222,17 @@ function registerIpc() {
     const freeMB = doctor.freeDiskMB(runtime.provisioner.paths().root);
     const want = res.clampDataGB(gb, freeMB).gb;
     if (!want) return { ok: false, error: '目标容量不合法' };
-    store.saveSettings({ engine: { dataPartitionGB: want } });
-    await runtime.stop().catch(() => {});
-    const r = await runtime.resetAndroidData().catch((e) => ({ ok: false, error: e.message }));
-    appLog(`reset+resize -> ${want}GB: ${JSON.stringify(r)}`);
-    return { ok: !!(r && r.ok), wantGB: want, ...r };
+    return appOperations.run(`reset:resize:${want}`, async () => {
+      const r = await runtime.resetAndroidData().catch((e) => ({ ok: false, error: e.message }));
+      appLog(`reset+resize -> ${want}GB: ${JSON.stringify(r)}`);
+      if (!r.ok) return { ...r, wantGB: want };
+      try {
+        store.saveSettings({ engine: { dataPartitionGB: want } });
+        return { ...r, wantGB: want };
+      } catch (error) {
+        return { ...r, ok: false, wantGB: want, error: `安卓数据已重置，但未能保存新容量：${error.message}` };
+      }
+    });
   });
 
   // 数据分区（/data）容量：应用、游戏与它们的更新包都装在这里。
@@ -2299,7 +2300,7 @@ function registerIpc() {
 
   // 彻底重置安卓数据：清空 /data 用户分区 + 已装应用 + 快速启动快照，
   // AVD 还原成「刚装好系统」的干净状态。会真实删除数 GB 数据，UI 必须二次确认。
-  ipcMain.handle('runtime:resetData', async () => {
+  ipcMain.handle('runtime:resetData', () => appOperations.run('reset:android-data', async () => {
     try {
       const r = await runtime.resetAndroidData();
       if (!r.ok) return { ok: false, error: r.error };
@@ -2307,7 +2308,7 @@ function registerIpc() {
     } catch (e) {
       return { ok: false, error: e.message };
     }
-  });
+  }));
 
   // 修复虚拟机网络：重置 /data（保留应用清单，点开应用会自动重装）。
   // 典型场景：安卓里所有联网页面一直黑屏，其实是 wlan0 没起来、没有默认路由。
@@ -2871,13 +2872,29 @@ if (!gotLock) {
 } else {
   app.on('second-instance', (_evt, argv) => {
     const args = parseArgs(argv);
+    if (args.error) {
+      app.whenReady().then(() => dialog.showErrorBox('无法打开安卓应用', args.error));
+      return;
+    }
     if (args.launch) { runLaunch(args.launch); return; }
     if (args.apk) { runInstall(args.apk).catch(() => {}); return; }
     showWindow();
   });
 
   app.whenReady().then(async () => {
-    store.ensureDirs();
+    try {
+      store.getSettings();
+      store.getApps();
+      store.ensureDirs();
+    } catch (error) {
+      const filename = error.path ? path.basename(error.path) : '本地数据';
+      dialog.showErrorBox('ApkStart 无法读取本地状态',
+        `${filename}（${error.code || '未知错误'}）\n目录：${store.DATA_DIR}\n\n`
+        + '未启动安卓运行时，也未重置文件。请检查目录权限，或从备份恢复出错的文件后重试。');
+      app.exit(1);
+      return;
+    }
+    bootstrapBundledRuntime();
     /**
      * 记下「当前是谁在管这台运行时」。
      *
@@ -3176,7 +3193,11 @@ if (!gotLock) {
     } catch (_) { /* ignore */ }
 
     const args = parseArgs(process.argv);
-    if (args.apk) runInstall(args.apk).catch(() => {});
+    if (args.error) {
+      showWindow();
+      splashDone();
+      dialog.showErrorBox('无法打开安卓应用', args.error);
+    } else if (args.apk) runInstall(args.apk).catch(() => {});
     else if (args.launch) await runLaunch(args.launch);
     else {
       // 没有直接启动应用：splash 在主窗口 ready 后淡出

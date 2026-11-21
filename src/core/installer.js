@@ -10,6 +10,9 @@ const crypto = require('crypto');
 const store = require('./store');
 const { parseApk } = require('./apk');
 const { ZipFile } = require('./zip');
+const { parsePidList } = require('./adb');
+const { validPackageName } = require('./pkgname');
+const { runLaunchPolicy } = require('../application/launch-policy');
 const { iconToIco, writeShortcut, removeShortcut, safeFileName, shortcutExt } = require('./shortcut');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -72,6 +75,52 @@ async function parseBundle(filePath) {
   }
 }
 
+const PID_ABSENT = '__APKSTART_PID_ABSENT__';
+async function probeAppPids(client, pkg, opts) {
+  // pidof exits 1 when no process matches. Print that fact on the Android
+  // side so adb offline/unauthorized/timeouts can never look like an exit.
+  const cmd = 'pidof ' + pkg + ' 2>&1; rc=$?; if [ "$rc" -eq 1 ]; then echo '
+    + PID_ABSENT + '; else exit "$rc"; fi';
+  const out = await client.shell(cmd, opts);
+  if (out === PID_ABSENT) return [];
+  const pids = parsePidList(out);
+  if (!pids) throw new Error('ADB 返回了无法识别的应用进程状态');
+  return pids;
+}
+
+function compatRequired(cause) {
+  return Object.assign(new Error(
+    '当前安卓镜像可能不兼容此应用的原生库。本次启动未切换镜像。请核对镜像安装状态、实际运行的镜像及 APK 架构；如果尚未安装兼容镜像并确有需要，请先备份安卓数据，再下载兼容镜像并重启运行时。',
+    { cause },
+  ), { code: 'APP_COMPAT_REQUIRED' });
+}
+
+async function restoreMissingCachedApp(runtime, client, pkg, app, onLog) {
+  if (!app?.apkPath || !fs.existsSync(app.apkPath)) return;
+  let installed;
+  try {
+    installed = await client.isInstalled(pkg, { strictProbe: true });
+  } catch (error) {
+    onLog('无法确认安装状态，未自动重装：' + error.message);
+    return;
+  }
+  if (installed !== false) return;
+  onLog('应用文件缺失（快照与数据不一致），正在用本地备份自动重装…');
+  try {
+    if (!app.bundle) {
+      await client.install(app.apkPath, { grantPermissions: false });
+    } else {
+      const bundle = await parseBundle(app.apkPath);
+      try { await client.installMultiple(bundle.files); } finally { bundle.cleanup(); }
+    }
+  } catch (error) {
+    if (error?.code === 'NO_MATCHING_ABIS') throw compatRequired(error);
+    onLog('自动安装失败：' + error.message);
+    return;
+  }
+  try { runtime.emulator?.invalidateSnapshot(); } catch (_) { /* app was already restored */ }
+}
+
 function accentOf(pkg) {
   let h = 0;
   for (let i = 0; i < pkg.length; i++) h = (h * 31 + pkg.charCodeAt(i)) >>> 0;
@@ -80,8 +129,9 @@ function accentOf(pkg) {
 }
 
 class Installer {
-  constructor(runtime, ctx) {
+  constructor(runtime, ctx, { launchPolicy = runLaunchPolicy } = {}) {
     this.runtime = runtime;
+    this.launchPolicy = launchPolicy;
     this.ctx = ctx; // { launcherTarget, launcherArgs, cwd, isDev, desktopDir }
   }
 
@@ -159,8 +209,7 @@ class Installer {
           // eslint-disable-next-line no-await-in-loop
           const b = await parseBundle(app.apkPath);
           // eslint-disable-next-line no-await-in-loop
-          await rt.client.installMultiple(b.files);
-          b.cleanup();
+          try { await rt.client.installMultiple(b.files); } finally { b.cleanup(); }
         } else {
           // eslint-disable-next-line no-await-in-loop
           await rt.client.install(app.apkPath);
@@ -482,6 +531,7 @@ class Installer {
   }
 
   async launch(pkg, { onLog = () => {}, beforeStart = null, onMark = () => {}, onAppUp = null } = {}) {
+    if (!validPackageName(pkg) || pkg !== pkg.trim()) throw new Error('无效的安卓应用包名');
     const app = store.getApp(pkg);
     // 用 let：beforeStart 可能因为「面板方向和应用方向不一致」而重启运行时并
     // 返回一个新的 rt（旧 client 已随 stop 失效）。以前这里是 const，一旦真的
@@ -550,133 +600,26 @@ class Installer {
       }
     }
     const settings = store.getSettings();
-    const start = () => rt.client.startApp(app ? app.package : pkg, app ? app.activity : null, {
-      freeform: settings.freeform,
-      bounds: app ? app.bounds : null,
-    });
-    // 应用可能还没装进当前运行时（镜像重建 / 清过数据 / 首次），直接拉起会报
-    // "Invalid packageName"。先在本地缓存里把它装上再启动，这样「点开应用」永远能进，
-    // 不用先手动装一遍——这正是「点击已安装应用直接进入系统」想要的体验。
-    // 关键：用 isInstalled()（pm path + 逐个核对 APK 文件真实存在）而不是
-    // `pm list packages`。快照与数据分区不一致时 PackageManager 仍报 installed=true，
-    // 但 /data/app 下文件已被回滚掉 —— 这时 am start 必然失败。文件校验不通过就重装。
-    if (app && app.apkPath && fs.existsSync(app.apkPath)) {
-      let installed = false;
-      try { installed = await rt.client.isInstalled(pkg); } catch (_) { /* 当作未安装，走重装 */ }
-      if (!installed) {
-        onLog('应用文件缺失（快照与数据不一致），正在用本地备份自动重装…');
-        // 重装前作废快照：否则旧快照的 packages.xml 仍说「已装」，下次又不对
-        try { this.runtime.emulator?.invalidateSnapshot(); } catch (_) { /* ignore */ }
-        await rt.client.install(app.apkPath).catch((e) => onLog(`自动安装失败：${e.message}`));
-      }
-    }
-    // 观察 25 秒并要求「连续存活 5 秒」才算启动成功。
-    // 关键：进程"还没起来"和"起来过又没了"必须分开看。以前一看到 pidof 为空就判失败，
-    // 结果大型应用（红果这种首启要十几秒的）在加载途中就被 force-stop 重启，
-    // 反复三轮才勉强起来，用户感知就是"点了要等一分钟"。
-    const staysAlive = async () => {
-      const t0 = Date.now();
-      let aliveSince = 0;
-      let seen = false;
-      while (Date.now() - t0 < 25000) {
-        // 先查再睡：常驻容器里热启动往往 1 秒内就能看到进程，
-        // 先 sleep 1 秒等于把最快的那条路径硬生生拖慢一秒。
-        // eslint-disable-next-line no-await-in-loop
-        const pid = await rt.client.shell(`pidof ${pkg}`, { timeout: 6000 }).catch(() => '');
-        if (!String(pid).trim()) {
-          if (seen) return false; // 起来过又消失 = 真的崩了
-        } else {
-          if (!seen && typeof onAppUp === 'function') {
-            // 进程刚出现就把画面接上去（不等那 4 秒观察期）。
-            // 这 4 秒是在等「确认不会马上崩」，但用户看到的是「点了没反应」；
-            // 先让他看到应用在加载，观感比藏 4 秒好得多。
-            // 回调是 fire-and-forget：它失败了也不影响后面的存活判定。
-            try { onAppUp(); } catch (_) { /* ignore */ }
-          }
-          seen = true;
-          if (!aliveSince) aliveSince = Date.now();
-          if (Date.now() - aliveSince >= 4000) return true;
-        }
-        // eslint-disable-next-line no-await-in-loop
-        await sleep(700);
-      }
-      return seen; // 一直没见过进程才算失败
-    };
+    await restoreMissingCachedApp(this.runtime, rt.client, pkg, app, onLog);
     try {
-      // 先确保运行时权限齐备：安装时的 -g 在清过数据后可能失效，
-      // 缺权限时应用会被系统授权框挡住，用户看到的就是「点了没反应/打不开」。
-      await rt.client.grantRuntimePermissions(pkg).catch(() => {});
-      onMark('permissions granted');
-      let ok = false;
-      for (let attempt = 1; attempt <= 3 && !ok; attempt += 1) {
-        if (attempt > 1) {
-          // eslint-disable-next-line no-await-in-loop
-          await rt.client.forceStop(pkg).catch(() => {});
-          // 授权框挡在最前面时，应用看起来就是「打不开」；先补授权再收掉弹窗
-          // eslint-disable-next-line no-await-in-loop
-          await rt.client.grantRuntimePermissions(pkg).catch(() => {});
-          // eslint-disable-next-line no-await-in-loop
-          await rt.client.dismissPermissionDialog().catch(() => {});
-          // eslint-disable-next-line no-await-in-loop
-          await sleep(600 * attempt);
-        }
-        let started = true;
-        try {
-          // eslint-disable-next-line no-await-in-loop
-          await start();
-        } catch (e) {
-          // 有明确崩溃日志才交给外层（可能要切兼容镜像）；没有证据多半只是启动慢，重试即可
-          if (e.code === 'APP_CRASHED' && e.crash) throw e;
-          started = false;
-        }
-        onMark(`am start #${attempt} ${started ? 'ok' : 'fail'}`);
-        // Activity 起来后立刻把方向锁死。放在这里是因为应用启动过程本身会触发
-        // 配置变更（Activity 重建），启动前设的 user-rotation 可能被系统重置回 0 ——
-        // 一旦回 0，横屏面板上的画面就会躺倒 90°（用户看到的就是「转不正」）。
-        if (started) {
-          // eslint-disable-next-line no-await-in-loop
-          await rt.client.setOrientation(!!(store.getSettings().display || {}).landscape).catch(() => {});
-        }
-        // eslint-disable-next-line no-await-in-loop
-        ok = started ? await staysAlive() : false;
-        onMark(`alive #${attempt} ${ok}`);
-        if (!ok && attempt < 3) onLog(`应用启动后退出（第 ${attempt} 次），正在自动重试…`);
-      }
-      if (!ok) {
-        // 兜底：异常退出会留下「半初始化」的数据，导致之后每次都崩。
-        // 清一次应用数据再拉起来，成功率最高（用户不必自己去设置里清缓存）。
-        onLog('应用连续退出，正在重置应用数据后重试…');
-        await rt.client.shell(`pm clear ${pkg}`, { timeout: 20000 }).catch(() => '');
-        await sleep(800);
-        // pm clear 会把运行时权限一并清掉，必须重新授，否则会卡在系统授权框
-        await rt.client.grantRuntimePermissions(pkg).catch(() => {});
-        await start().catch((e) => {
-          if (e.code === 'APP_CRASHED' && e.crash) throw e;
-        });
-        ok = await staysAlive();
-        if (!ok) await rt.client.dismissPermissionDialog().catch(() => {});
-      }
-      if (!ok) {
-        const err = new Error('应用启动后立即退出，已自动重试并重置应用数据仍未成功');
-        err.code = 'APP_UNSTABLE';
-        throw err;
-      }
-    } catch (e) {
-      if (e.code === 'APP_CRASHED' && !this.runtime.provisioner.playImageInfo().ok) {
-        // 崩溃来自 ARM 翻译层：自动切镜像、重装备份 APK、再启动一次
-        onLog('检测到 ARM 翻译层崩溃，正在自动切换兼容镜像…');
-        await this.ensureCompatImage(onLog ? (m) => onLog(m.message || '') : () => {});
-        const rt2 = await this.switchToCompat((m) => onLog(m.message || ''));
-        if (app && app.apkPath && fs.existsSync(app.apkPath)) {
-          try { await rt2.client.install(app.apkPath); } catch (_) { /* 保留原包 */ }
-        }
-        await rt2.client.startApp(app ? app.package : pkg, app ? app.activity : null, {
+      await this.launchPolicy({
+        start: () => rt.client.startApp(pkg, app?.activity, {
           freeform: settings.freeform,
-          bounds: app ? app.bounds : null,
-        });
-      } else {
-        throw e;
-      }
+          bounds: app?.bounds || null,
+          observeProcess: false,
+        }),
+        probe: (opts) => probeAppPids(rt.client, pkg, opts),
+        // Starting an Activity can reset user-rotation; re-apply after each start.
+        onStarted: () => rt.client.setOrientation(!!settings.display?.landscape, { sendBackKey: false }).catch(() => {}),
+        onLog,
+        onMark,
+        onAppUp,
+      });
+    } catch (error) {
+      // Changing AOSP/Play images may require wiping guest data. Ordinary
+      // launch reports the compatibility issue without making that change.
+      if (error?.code === 'NO_MATCHING_ABIS') throw compatRequired(error);
+      throw error;
     }
     this.runtime.touch();
     if (app) {

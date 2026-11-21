@@ -8,6 +8,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const { performance } = require('node:perf_hooks');
 const store = require('./store');
 const { autoRotateSetting } = require('./orientation');
 
@@ -86,24 +87,33 @@ function friendlyInstallError(raw) {
   return msg ? `${msg}（${tag}）` : `安装失败：${raw}`;
 }
 
-/** 把启动后的崩溃日志翻译成能看懂的原因 */
+/** 将本次启动命令的明确错误转换为可读提示。 */
 function friendlyLaunchError(raw, pkg) {
   const t = String(raw || '');
   if (/DoBadTrampoline|libndk_translation|houdini|SIGABRT.*arm/i.test(t)) {
-    return `${pkg || '应用'} 启动后崩溃：ARM 翻译层与该应用的信号处理不兼容。`
-      + 'ApkStart 会自动切换到 Android 14 兼容镜像后重试。';
+    return (pkg || '应用') + ' 启动失败：诊断信息提示 ARM 翻译层可能不兼容。请核对实际运行的镜像及 APK 架构；如未安装兼容镜像，可备份安卓数据后下载并重启运行时。';
   }
   if (/UnsatisfiedLinkError|dlopen failed|couldn't find "lib|\.so.*not found/i.test(t)) {
-    return `${pkg || '应用'} 启动后崩溃：缺少设备原生库（应用可能只提供 ARM 版本）。`
-      + '会自动切换到带 ARM 翻译层的兼容镜像后重试。';
+    return (pkg || '应用') + ' 启动失败：未能加载设备原生库。请确认实际运行的镜像与 APK 架构是否匹配。';
   }
   if (/ClassNotFoundException|NoClassDefFoundError|AndroidRuntime/i.test(t)) {
-    return `${pkg || '应用'} 启动即崩溃（应用内部异常，可能与模拟器环境或缺少 Google 服务有关）。`;
+    return (pkg || '应用') + ' 启动失败：应用报告内部错误，请核对应用版本及所需系统服务。';
   }
   if (/java\.lang\.SecurityException|Permission Denial/i.test(t)) {
-    return `${pkg || '应用'} 启动失败：系统拒绝了启动请求（权限或签名问题）。`;
+    return (pkg || '应用') + ' 启动失败：系统拒绝了启动请求（权限或签名问题）。';
   }
-  return `${pkg || '应用'} 未能启动${t ? `：${t.slice(0, 240)}` : '（进程未存活）'}`;
+  return (pkg || '应用') + ' 未能启动' + (t ? '：' + t.slice(0, 240) : '（未获知失败原因）');
+}
+
+const AM_START_REJECTED = /^\s*(?:Error\b|Exception\b|Security exception\b|Permission Denial\b|Unknown option\b)/im;
+const MONKEY_REJECTED = /^\s*(?:\*\*\s*)?(?:No activities found|Error\b|Exception\b|Events injected:\s*0\b)/im;
+
+function rejectedStart(pkg, raw, cause) {
+  const error = new Error(friendlyLaunchError(raw, pkg), cause ? { cause } : undefined);
+  error.code = /(?:^|\W)(?:INSTALL_FAILED_)?NO_MATCHING_ABIS(?:$|\W)/i.test(raw)
+    ? 'NO_MATCHING_ABIS' : 'APP_START_FAILED';
+  error.raw = raw;
+  return error;
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -136,6 +146,11 @@ function isUnauthorizedError(raw) {
 function parsePmPaths(text) {
   return String(text || '').split(/\r?\n/).map((l) => l.trim())
     .filter((l) => /^package:/.test(l)).map((l) => l.slice(8).trim()).filter(Boolean);
+}
+
+function parsePidList(text) {
+  const out = String(text || '').trim();
+  return /^[1-9]\d*(?:\s+[1-9]\d*)*$/.test(out) ? out.split(/\s+/) : null;
 }
 
 /** 已解析过的启动入口（adbPath|pkg → activity），10 分钟有效 */
@@ -451,13 +466,13 @@ class AdbClient {
    *  - adb 版本不认该参数 / 中文路径 / 传输错误时自动换写法重试；
    *  - NO_MATCHING_ABIS 抛带 code 的错误，交给上层自动切换兼容镜像。
    */
-  async install(apkPath) {
+  async install(apkPath, { grantPermissions = true } = {}) {
     if (!fs.existsSync(apkPath)) throw new Error(`APK 不存在: ${apkPath}`);
     const staged = stageApk(apkPath);
     const file = staged.path;
     const variants = [
       // -g 自动授予运行时权限，省掉应用里的授权弹窗；部分镜像不支持则自动降级去掉
-      ['install', '-r', '-t', '-g', '--bypass-low-target-sdk-block', file],
+      ...(grantPermissions ? [['install', '-r', '-t', '-g', '--bypass-low-target-sdk-block', file]] : []),
       ['install', '-r', '-t', '--bypass-low-target-sdk-block', file],
       ['install', '-r', '-t', file],
       ['install', '-r', file],
@@ -480,7 +495,7 @@ class AdbClient {
           const tag = (/INSTALL_[A-Z_]+/.exec(raw) || [])[0] || '';
 
           if (tag === 'INSTALL_FAILED_NO_MATCHING_ABIS') {
-            const err = new Error(friendlyInstallError(raw));
+            const err = new Error(friendlyInstallError(raw), { cause: e });
             err.code = 'NO_MATCHING_ABIS';
             err.raw = raw;
             throw err;
@@ -530,8 +545,9 @@ class AdbClient {
           const raw = String(e.raw || e.stdout || e.message || '');
           if (/Unknown option|unrecognized option/i.test(raw)) continue;
           if (/INSTALL_FAILED_NO_MATCHING_ABIS/.test(raw)) {
-            const err = new Error(friendlyInstallError(raw));
+            const err = new Error(friendlyInstallError(raw), { cause: e });
             err.code = 'NO_MATCHING_ABIS';
+            err.raw = raw;
             throw err;
           }
           throw new Error(friendlyInstallError(raw));
@@ -562,14 +578,32 @@ class AdbClient {
    *
    * @returns {Promise<boolean>}
    */
-  async isInstalled(pkg) {
-    const out = await this.shell(`pm path ${pkg}`);
+  async isInstalled(pkg, { strictProbe = false } = {}) {
+    const absent = '__APKSTART_ABSENT__';
+    const present = '__APKSTART_PRESENT__';
+    const command = 'pm path ' + pkg;
+    // Turn a remote exit 1 into an explicit marker without masking ADB transport failures.
+    const out = await this.shell(strictProbe
+      ? command + ' 2>&1; rc=$?; if [ "$rc" -eq 1 ]; then echo ' + absent + '; else exit "$rc"; fi'
+      : command);
     const paths = parsePmPaths(out);
-    if (!paths.length) return false;
-    // 分片 APK 全部要在；任一片丢了都启动不了。合并成一条 shell，省一次 adb 往返。
-    const checks = paths.map((p) => `[ -s "${p}" ]`).join(' && ');
-    const probe = await this.shell(`${checks} && echo __APKSTART_PRESENT__`, { timeout: 10000 }).catch(() => '');
-    return /__APKSTART_PRESENT__/.test(String(probe));
+    if (!paths.length) {
+      if (!strictProbe || out === absent) return false;
+      throw new Error('无法确认安卓应用的安装状态');
+    }
+    // Single-quote guest-reported file paths without interpreting shell syntax.
+    const checks = paths.map((p) => "[ -s '" + p.replace(/'/g, "'\\''") + "' ]").join(' && ');
+    if (!strictProbe) {
+      const probe = await this.shell(checks + ' && echo ' + present, { timeout: 10000 }).catch(() => '');
+      return probe.includes(present);
+    }
+    const probe = await this.shell(
+      'if ' + checks + '; then echo ' + present + '; else echo ' + absent + '; fi',
+      { timeout: 10000 },
+    );
+    if (probe === absent) return false;
+    if (probe === present) return true;
+    throw new Error('无法确认安卓应用的 APK 文件状态');
   }
 
   async listPackages() {
@@ -603,98 +637,79 @@ class AdbClient {
     return null;
   }
 
-  /** 应用是否真的活着：am start 返回成功 ≠ 进程没崩 */
-  async waitAppAlive(pkg, timeoutMs = 12000) {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      // eslint-disable-next-line no-await-in-loop
-      const pid = await this.shell(`pidof ${pkg}`, { timeout: 6000 }).catch(() => '');
-      if (String(pid).trim()) return { ok: true };
-      // 350ms 轮询（原 1000ms）：进程一出现就更快确认存活、让启动流程往下走。
-      // pidof 是轻量 shell，密一点不会增加可感知负担，但对「点开到出画面」有直接收益。
-      // eslint-disable-next-line no-await-in-loop
-      await sleep(350);
+  /** Legacy direct callers may wait briefly for a positive PID observation. */
+  async waitAppAlive(pkg, timeoutMs = 12000, onProcessSeen) {
+    const deadline = performance.now() + timeoutMs;
+    while (performance.now() < deadline) {
+      const remaining = Math.max(1, Math.floor(deadline - performance.now()));
+      const pid = await this.shell('pidof ' + pkg, { timeout: Math.min(6000, remaining) }).catch(() => '');
+      if (parsePidList(pid) && performance.now() <= deadline) {
+        onProcessSeen?.();
+        return { ok: true };
+      }
+      const pause = Math.min(350, deadline - performance.now());
+      if (pause > 0) await sleep(pause);
     }
-    let crash = '';
-    try {
-      crash = await this.shell(
-        `logcat -d -t 250 -v brief AndroidRuntime:E DEBUG:E libc:E 2>/dev/null | `
-        + `grep -i -E '${pkg}|FATAL|ndk_translation|SIGABRT|SIGSEGV|UnsatisfiedLink' | tail -n 30`,
-        { timeout: 12000 },
-      );
-    } catch (_) { /* ignore */ }
-    const text = String(crash || '').trim();
-    // 没有崩溃日志时不能断言失败：部分大型应用首次启动要 20-40 秒
-    return { ok: false, crash: text, uncertain: !text };
+    // Shared log buffers cannot attest the PID or time of this attempt.
+    return { ok: false, crash: '', uncertain: true };
   }
 
   /**
-   * 启动应用，带三级降级：
-   *   freeform 独立窗口 → 普通全屏 → monkey 兜底；
-   * 每次都验证进程是否存活，崩溃时抓 logcat 并抛带 code 的错误供上层自动切镜像。
+   * Resolve the package's launcher and dispatch an intent. For the Installer,
+   * launch-policy owns the only process observation window. Fallbacks are for
+   * explicit command/intent rejection, not absence of a PID or ADB transport
+   * errors that may have occurred after delivery of the command.
    */
-  async startApp(pkg, activity, { freeform = true, bounds = null, forceStop = false } = {}) {
+  async startApp(pkg, activity, {
+    freeform = true, bounds = null, forceStop = false, onProcessSeen, observeProcess = true,
+  } = {}) {
     if (forceStop) await this.forceStop(pkg);
-    // 必须用系统解析出来的 LAUNCHER 入口，不能只用 APK 里解析到的主 Activity：
-    // 很多应用（红果短剧等）的启动页才做真正的初始化，直接进主 Activity 会
-    // 抛 "had you called RpcService.init"，表现为点开闪一下就没了。
     const resolved = (await this.resolveLauncher(pkg).catch(() => '')) || activity;
-    // resolved 可能是完整组件（pkg/class），也可能只是类名（老 apps.json）；
-    // 这里统一成 am start -n 要的完整组件，避免 pkg/pkg/class 被系统取消。
     const comp = componentArg(pkg, resolved);
     const intent = comp
       ? ['-n', comp]
       : ['-a', 'android.intent.action.MAIN', '-c', 'android.intent.category.LAUNCHER', '-p', pkg];
-    const modes = freeform
-      ? [['--windowingMode', '5'], []]
-      : [[]];
-    let lastError = '';
+    const modes = freeform ? [['--windowingMode', '5'], []] : [[]];
 
     for (const mode of modes) {
       const parts = ['am', 'start', ...mode, '--activity-clear-top', ...intent];
-      let out = '';
+      let out;
       try {
-        // eslint-disable-next-line no-await-in-loop
         out = await this.shell(parts.join(' '), { timeout: 20000 });
-      } catch (e) {
-        lastError = String(e.message || e);
+      } catch (error) {
+        const raw = String(error.raw || error.stdout || error.stderr || error.message || '');
+        if (!AM_START_REJECTED.test(raw)) throw error;
+        const rejected = rejectedStart(pkg, raw, error);
+        if (rejected.code === 'NO_MATCHING_ABIS') throw rejected;
         continue;
       }
-      if (/Error|Exception/i.test(out)) { lastError = out; continue; }
+      if (AM_START_REJECTED.test(out)) {
+        const rejected = rejectedStart(pkg, out);
+        if (rejected.code === 'NO_MATCHING_ABIS') throw rejected;
+        continue;
+      }
 
       if (bounds) this.resizeTaskOfPackage(pkg, bounds).catch(() => {});
-      // eslint-disable-next-line no-await-in-loop
-      const alive = await this.waitAppAlive(pkg, 6000);
-      if (alive.ok) return out;
-      if (alive.uncertain) return `${out}\n（应用仍在加载中）`;
-      lastError = alive.crash || lastError;
-      // 崩溃日志明确指向 ARM 翻译层时不再重试，直接交给上层切换兼容镜像
-      if (/DoBadTrampoline|libndk_translation|UnsatisfiedLinkError|dlopen failed/i.test(alive.crash || '')) {
-        const err = new Error(friendlyLaunchError(alive.crash, pkg));
-        err.code = 'APP_CRASHED';
-        err.crash = alive.crash;
-        throw err;
-      }
+      if (!observeProcess) return out;
+      const alive = await this.waitAppAlive(pkg, 6000, onProcessSeen);
+      return alive.ok ? out : out + '\n（应用仍在加载中）';
     }
 
-    // monkey 兜底：部分镜像的 am start -a/-c/-p 解析不到 launcher
+    // Some guests cannot resolve an explicit launcher intent. Keep the
+    // package-limited fallback, but don't call a rejected request a crash.
+    let out;
     try {
-      const out = await this.shell(
-        `monkey -p ${pkg} -c android.intent.category.LAUNCHER 1`, { timeout: 20000 },
+      out = await this.shell(
+        'monkey -p ' + pkg + ' -c android.intent.category.LAUNCHER 1', { timeout: 20000 },
       );
-      const alive = await this.waitAppAlive(pkg, 12000);
-      if (alive.ok || alive.uncertain) return out;
-      lastError = alive.crash || lastError;
-    } catch (e) {
-      // 有明确崩溃信息时优先用它，否则保留原始启动错误
-      if (!lastError) lastError = String(e.message || e);
+    } catch (error) {
+      const raw = String(error.raw || error.stdout || error.stderr || error.message || '');
+      if (!MONKEY_REJECTED.test(raw)) throw error;
+      throw rejectedStart(pkg, raw, error);
     }
-
-    if (!lastError) return 'started';
-    const err = new Error(friendlyLaunchError(lastError, pkg));
-    err.code = 'APP_CRASHED';
-    err.crash = lastError;
-    throw err;
+    if (MONKEY_REJECTED.test(out)) throw rejectedStart(pkg, out);
+    if (observeProcess) await this.waitAppAlive(pkg, 12000, onProcessSeen);
+    return out;
   }
 
   async forceStop(pkg) {
@@ -950,7 +965,7 @@ class AdbClient {
    *   - 190dpi -> smallestWidth 606dp（>=600dp）-> 平板 / 分栏排版
    * 尺寸、方向、点击映射全部不变，因此不会躺倒、不会有黑边、点击永远对应。
    */
-  async setOrientation(landscape) {
+  async setOrientation(landscape, { sendBackKey = true } = {}) {
     try {
       // 自动旋转开关默认打开（0.5.9）：写 guest 的 accelerometer_rotation=1，
       // 让系统设置里那个开关是「开」的。方向本身由下面的 wm user-rotation lock 0
@@ -971,7 +986,7 @@ class AdbClient {
       // （"Double-tap outside an app to reposition it…"）。它盖在应用上面，
       // 用户以为程序坏了。这里预先把它标记为已确认，再兜底按一次返回。
       await this.shell('settings put secure freeform_mode_confirmations confirmed', { timeout: 10000 });
-      if (landscape) await this.shell('input keyevent KEYCODE_BACK', { timeout: 8000 });
+      if (landscape && sendBackKey) await this.shell('input keyevent KEYCODE_BACK', { timeout: 8000 });
       await this.shell(`wm density ${tabletDensity()}`, { timeout: 15000 });
       return true;
     } catch (_) {
@@ -1186,6 +1201,7 @@ class AdbClient {
 }
 
 module.exports = {
+  parsePidList,
   AdbClient, AdbError, parseStatList, friendlyInstallError, friendlyLaunchError,
   componentArg, parseResolvedActivity, parseDeviceState, isUnauthorizedError, parsePmPaths,
 };

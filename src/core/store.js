@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { safeFilePart } = require('./pkgname');
+const { assertShape, readJsonFile, writeJsonFile } = require('../application/json-state');
 
 /**
  * 是不是 Microsoft Store（MSIX / APPX）打包版？
@@ -44,7 +45,7 @@ const DEFAULT_SETTINGS = {
   drivers: { state: {}, disabled: [] },
   engine: {
     // 只有一个运行时：自带运行时（builtin）。字段保留是为了兼容老 settings.json 的合并，
-    // 读设置时会被强制写回 'builtin'（见 getSettings 的迁移）。
+    // 读设置时会被统一为 'builtin'（只在显式保存设置时写入磁盘）。
     mode: 'builtin',
     qemuPath: '',
     systemImage: '',
@@ -205,36 +206,64 @@ function ensureDirs() {
   }
 }
 
-function readJson(file, fallback) {
-  try {
-    let text = fs.readFileSync(file, 'utf8');
-    // 去掉可能的 UTF-8 BOM。带 BOM 时 JSON.parse 会直接抛错，于是整个配置
-    // 静默回落到默认值 —— 用户会看到「设置全丢了」，却完全不知道为什么。
-    // 这个文件会被设置页、同步工具、甚至用户手工编辑，必须容忍 BOM。
-    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-    return JSON.parse(text);
-  } catch (_) {
-    return fallback;
-  }
-}
-
-function writeJson(file, data) {
-  ensureDirs();
-  const tmp = file + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
-  fs.renameSync(tmp, file);
-}
+const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const SETTINGS_GROUPS = ['engine', 'runtime', 'display'];
+const NULLABLE_LEGACY_GROUPS = ['drivers', 'welcome', 'debug'];
+const isSettingsDocument = (value) => isRecord(value)
+  && SETTINGS_GROUPS.every((key) => !Object.hasOwn(value, key) || isRecord(value[key]))
+  && NULLABLE_LEGACY_GROUPS.every((key) => !Object.hasOwn(value, key) || value[key] === null || isRecord(value[key]));
+const isAppRecord = (value) => isRecord(value) && typeof value.package === 'string' && value.package.length > 0;
+const isAppList = (value) => Array.isArray(value) && value.every(isAppRecord);
+const isAppsDocument = (value) => isRecord(value)
+  && (!Object.hasOwn(value, 'apps') || value.apps === null || isAppList(value.apps));
 
 function deepMerge(base, patch) {
-  const out = { ...base };
-  for (const [k, v] of Object.entries(patch || {})) {
-    if (v && typeof v === 'object' && !Array.isArray(v) && base[k] && typeof base[k] === 'object') {
-      out[k] = deepMerge(base[k], v);
-    } else {
-      out[k] = v;
-    }
+  const entries = new Map(Object.entries(base));
+  for (const [key, value] of Object.entries(patch || {})) {
+    const previous = entries.get(key);
+    entries.set(key, isRecord(value) && isRecord(previous) ? deepMerge(previous, value) : value);
   }
-  return out;
+  return Object.fromEntries(entries);
+}
+
+function settingsFrom(raw) {
+  // 旧版驱动、欢迎页和自检把 null 当作未配置；在内存里恢复默认值即可。
+  const overrides = { ...raw };
+  for (const key of NULLABLE_LEGACY_GROUPS) if (overrides[key] === null) delete overrides[key];
+  const s = deepMerge(structuredClone(DEFAULT_SETTINGS), overrides);
+  s.engine.mode = 'builtin';
+  for (const k of ['mumuPath', 'mumuIndex', 'mumuRenderProfile', 'mumuMemoryGB', 'mumuCores', 'fydeosHost']) {
+    delete s.engine[k];
+  }
+  // 独立原生窗口需要可见的运行时；旧的退出壳层和自由小窗选项不再适用。
+  s.engine.headless = false;
+  s.hideAfterLaunch = false;
+  s.freeform = false;
+
+  // 窗口承载方式的最终裁决：默认是原生窗口，保留用户主动选过的嵌入模式。
+  // 以主动选择标记为准；读取只迁移内存，旧字节保留到用户显式保存。
+  const d = raw.display || {};
+  if (d.windowEmbedChosen !== true && d.windowEmbed !== false) {
+    s.display.windowEmbed = false;
+    s.display.windowEmbedMigrated2 = true;
+  }
+  return s;
+}
+
+function readSettings() {
+  return readJsonFile(SETTINGS_FILE, {}, isSettingsDocument);
+}
+
+function readApps() {
+  // 旧版把缺省 apps 或 null 视作空清单；保留文件原有的扩展字段。
+  const current = readJsonFile(APPS_FILE, {}, isAppsDocument);
+  if (!Object.hasOwn(current.value, 'apps') || current.value.apps === null) current.value.apps = [];
+  return current;
+}
+
+function writeApps(apps, current) {
+  assertShape(APPS_FILE, apps, isAppList);
+  writeJsonFile(APPS_FILE, { ...current.value, apps }, current);
 }
 
 /**
@@ -263,89 +292,42 @@ const store = {
   STORE_BUILD,
 
   getSettings() {
-    const s = deepMerge(DEFAULT_SETTINGS, readJson(SETTINGS_FILE, {}));
-    /**
-     * 0.5.6 起没有第三方底座了：老配置里的 mode=mumu / fydeos / attach，
-     * 或者手改出来的任何其它值，一律当 builtin 处理，并把残留的第三方字段删掉。
-     *
-     * 只在读的时候改内存里的对象，不立刻回写磁盘：设置文件是用户的，等他下次
-     * 保存设置时自然落盘；这样「打开一次 ApkStart 就改了他的 settings.json」不会发生。
-     */
-    s.engine.mode = 'builtin';
-    for (const k of ['mumuPath', 'mumuIndex', 'mumuRenderProfile', 'mumuMemoryGB', 'mumuCores', 'fydeosHost']) {
-      delete s.engine[k];
-    }
-    // 旧版本默认无头运行：应用进程能起来但屏幕上没有窗口，等效于「打不开」。
-    // 无条件迁移到带窗口模式，且不再允许通过旧配置把它关掉。
-    s.engine.headless = false;
-    // 旧版本退出壳层时会杀掉整个 Android 运行时，导致桌面图标点开闪一下就没了。
-    s.hideAfterLaunch = false;
-    // 旧版本用 Android freeform 小窗，现在整个模拟器窗口就是应用窗口，
-    // 应用必须铺满这块屏幕，否则会出现「窗口里再套一个小窗」。
-    s.freeform = false;
-
-    /**
-     * 窗口承载方式的最终裁决：**默认必须是模拟器原生窗口**。
-     *
-     * 0.5.9 曾把所有人强制迁到嵌入模式，结果嵌入方式（SetParent + 反复
-     * SetWindowPos 重排别人的窗口）在缩放/旋转/切应用时掉帧，并伴随黑边、
-     * 坐标错位、铺不满，是用户反馈最集中的一类问题。原生窗口由模拟器自己
-     * 渲染和排布，这些问题不存在，所以默认改回它。
-     *
-     * 这里不再只看「迁移标记」：只要用户**没有在设置页主动选过**
-     * （windowEmbedChosen 由设置页写入），读到的值一律纠正为原生，并存回磁盘。
-     * 之前的写法只要 windowEmbedMigrated2 已经是 true 就放手不管，于是老配置里
-     * 那句 windowEmbed:true 会一直生效 —— 用户升级后启动看到的仍是美化壳窗口，
-     * 却以为「默认设置没改」。判定基准只认「有没有主动选过」，其它标记都不算数。
-     */
-    try {
-      const raw = readJson(SETTINGS_FILE, {});
-      const d = (raw && raw.display) || {};
-      if (d.windowEmbedChosen !== true && d.windowEmbed !== false) {
-        s.display.windowEmbed = false;
-        s.display.windowEmbedMigrated2 = true;
-        // 立刻回写，保证配置文件本身也回到原生；用户其它字段原样保留。
-        writeJson(SETTINGS_FILE, {
-          ...raw,
-          display: { ...d, windowEmbed: false, windowEmbedMigrated2: true },
-        });
-      }
-    } catch (_) { /* 迁移失败不影响启动，保持读到的值 */ }
-
-    return s;
+    return settingsFrom(readSettings().value);
   },
 
   saveSettings(patch) {
-    const next = deepMerge(this.getSettings(), patch);
-    // 只改了「资源策略」时，把它翻译成具体的三个开关，避免两套配置各说各话
+    const current = readSettings();
+    const next = deepMerge(settingsFrom(current.value), patch);
+    // 资源策略依然映射为旧版运行时读取的三个具体开关。
     if (patch && patch.engine && patch.engine.resourceMode) {
       Object.assign(next.engine, resourcePreset(next.engine.resourceMode));
     }
-    writeJson(SETTINGS_FILE, next);
+    assertShape(SETTINGS_FILE, next, isSettingsDocument);
+    writeJsonFile(SETTINGS_FILE, next, current);
     return next;
   },
 
   getApps() {
-    const data = readJson(APPS_FILE, { apps: [] });
-    return Array.isArray(data.apps) ? data.apps : [];
+    return readApps().value.apps;
   },
 
   saveApps(apps) {
-    writeJson(APPS_FILE, { apps });
+    writeApps(apps, readApps());
   },
 
   upsertApp(app) {
-    const apps = this.getApps();
+    const current = readApps();
+    const { apps } = current.value;
     const i = apps.findIndex((a) => a.package === app.package);
     if (i >= 0) apps[i] = { ...apps[i], ...app };
     else apps.push(app);
-    this.saveApps(apps);
+    writeApps(apps, current);
     return app;
   },
 
   removeApp(pkg) {
-    const apps = this.getApps().filter((a) => a.package !== pkg);
-    this.saveApps(apps);
+    const current = readApps();
+    writeApps(current.value.apps.filter((a) => a.package !== pkg), current);
   },
 
   getApp(pkg) {
