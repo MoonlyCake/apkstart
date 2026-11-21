@@ -92,7 +92,8 @@ function ownsPort(listeners, port, pid) {
 
 async function readConsoleName(client) {
   const { stdout } = await client.exec(['emu', 'avd', 'name'], { timeout: 3000 });
-  const name = String(stdout || '').trim().replace(/\r?\nOK$/, '');
+  // Windows adb can return CRCRLF for the emulator console's final status line.
+  const name = String(stdout || '').trim().replace(/\r*\nOK$/, '');
   return /^[A-Za-z0-9_.-]+$/.test(name) ? name : '';
 }
 

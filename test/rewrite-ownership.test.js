@@ -99,6 +99,17 @@ test('a single live lock PID must match the console, AVD name and final re-read'
   assert.equal(commands, 2);
 });
 
+test('Windows adb console extra CR does not hide the owned AVD or accept a foreign name', async () => {
+  const inspect = (stdout) => findOwnedEmulator({
+    readOwner: () => ({ state: 'live', pid, generation: 'windows-adb' }),
+    readListeners: async () => endpoints([5554, pid], [5555, pid]),
+    consoleClient: () => ({ exec: async () => ({ stdout }) }),
+  });
+  assert.equal((await inspect('apkstart\r\r\nOK\r\r\n')).state, 'owned');
+  assert.equal((await inspect('Another_AVD\r\r\nOK\r\r\n')).state, 'unknown');
+  assert.equal((await inspect('apkstart\r\r\nextra\r\r\nOK\r\r\n')).state, 'unknown');
+});
+
 function fakeRuntime() {
   const runtime = Object.create(Runtime.prototype);
   Object.defineProperty(runtime, 'settings', { value: { engine: {}, runtime: { installed: false } } });

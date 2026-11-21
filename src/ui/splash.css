@@ -15,9 +15,19 @@ html, body {
 }
 
 .splash {
+  --logo-size: clamp(62px, 25.56vmin, 122px);
+  --brand-gap: clamp(10px, 4.17vw, 27px);
+  --brand-size: clamp(21px, 5.625vw, 36px);
+  --tagline-gap: clamp(4px, 1.46vw, 9px);
+  --progress-gap: clamp(16px, 11.11vh, 53px);
+  --status-gap: clamp(8px, 4.17vh, 20px);
+  --body-size: clamp(11px, 2.6vw, 16.5px);
   width: 100%; height: 100%;
-  display: flex; flex-direction: column;
-  align-items: center; justify-content: center;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  justify-items: center;
+  gap: clamp(4px, 2.2vh, 11px);
+  padding: clamp(6px, 3.33vh, 16px) clamp(10px, 4.58vw, 30px) clamp(6px, 4.17vh, 20px);
   position: relative;
   overflow: hidden;
   background: radial-gradient(120% 100% at 50% 42%, #15181b 0%, #0d0e10 58%, #08090b 100%);
@@ -25,6 +35,28 @@ html, body {
               transform .55s cubic-bezier(.4, 0, .2, 1),
               filter .55s cubic-bezier(.4, 0, .2, 1);
 }
+
+/* 页脚独占一行。说明较长时仅滚动内容，不压扁进度条或裁掉 Logo。 */
+.splash-content {
+  position: relative;
+  width: 100%; min-height: 0;
+  padding: 5px 0;
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: safe center;
+  overflow: hidden auto;
+  scrollbar-width: thin;
+}
+.splash-content > * { flex: none; }
+
+.splash:has(.first-run:not([hidden])) {
+  --logo-size: clamp(48px, 16.67vmin, 79px);
+  --brand-gap: clamp(4px, 1.46vw, 9px);
+  --brand-size: clamp(19px, 5vw, 32px);
+  --tagline-gap: clamp(3px, 1.04vw, 7px);
+  --progress-gap: clamp(8px, 4.44vh, 22px);
+  --status-gap: clamp(5px, 2.22vh, 11px);
+}
+.splash:has(.first-run:not([hidden])) .splash-content { -webkit-app-region: no-drag; }
 
 /* 淡出：整体轻微放大 + 失焦，化进应用 */
 .splash.out {
@@ -62,7 +94,7 @@ html, body {
 /* logo 背后的柔光，随 logo 一起呼吸 */
 .logo-glow {
   position: absolute;
-  top: 48px; left: 50%;
+  top: calc(var(--logo-size) / 2); left: 50%;
   width: 132px; height: 132px;
   margin: -66px 0 0 -66px;
   background: radial-gradient(circle, rgba(18, 184, 134, .28) 0%, rgba(15, 157, 99, .10) 45%, transparent 72%);
@@ -73,15 +105,16 @@ html, body {
 }
 .logo {
   position: relative;
-  width: 92px; height: 92px;
+  width: var(--logo-size); height: var(--logo-size);
   object-fit: contain;
   animation: breathe 4s ease-in-out infinite;
   filter: drop-shadow(0 8px 22px rgba(0, 0, 0, .4));
 }
 .brand {
   position: relative;
-  margin-top: 20px;
-  font-size: 27px; font-weight: 600;
+  margin-top: var(--brand-gap);
+  font-size: var(--brand-size); font-weight: 600;
+  line-height: 1.2;
   letter-spacing: .8px;
   color: #f2f5f3;
   opacity: 0;
@@ -89,8 +122,8 @@ html, body {
 }
 .tagline {
   position: relative;
-  margin-top: 7px;
-  font-size: 12.5px; color: #74817a;
+  margin-top: var(--tagline-gap);
+  font-size: var(--body-size); color: #74817a;
   letter-spacing: .4px;
   opacity: 0;
   animation: fadeUp .85s ease-out .34s both;
@@ -99,8 +132,8 @@ html, body {
 /* ---- 进度条 ---- */
 .progress-wrap {
   position: relative;
-  margin-top: 40px;
-  width: 260px; height: 2px;
+  margin-top: var(--progress-gap);
+  width: min(clamp(140px, 54.17vw, 345px), 100%); height: clamp(2px, .55vh, 3px);
   background: rgba(255, 255, 255, .08);
   border-radius: 2px;
   overflow: hidden;
@@ -117,10 +150,14 @@ html, body {
 /* ---- 状态文字 ---- */
 .status {
   position: relative;
-  margin-top: 15px;
-  font-size: 12.5px; color: #8a9a92;
+  margin-top: var(--status-gap);
+  max-width: 100%;
+  text-align: center;
+  overflow-wrap: anywhere;
+  font-size: var(--body-size); color: #8a9a92;
   letter-spacing: .2px;
-  min-height: 18px;
+  line-height: 1.44;
+  min-height: 1.44em;
   opacity: 0;
   animation: fadeUp .85s ease-out .62s both;
   transition: opacity .35s;
@@ -129,24 +166,24 @@ html, body {
 /* ---- 首次安装提示 ---- */
 .first-run {
   position: relative;
-  margin-top: 26px;
-  padding: 15px 22px;
+  margin-top: clamp(6px, 2.78vh, 14px);
+  padding: clamp(6px, 2.5vh, 12px) clamp(10px, 3.75vw, 24px);
   background: rgba(255, 255, 255, .035);
   border: 1px solid rgba(255, 255, 255, .055);
   border-radius: 12px;
-  max-width: 372px;
+  max-width: min(clamp(200px, 77.5vw, 491px), 100%);
   opacity: 0;
   animation: fadeUp .7s ease-out .78s both;
 }
 .first-run-title {
-  font-size: 12.5px; font-weight: 600;
+  font-size: var(--body-size); font-weight: 600;
   color: #12b886;
-  margin-bottom: 9px;
+  margin-bottom: clamp(4px, 1.39vh, 7px);
 }
 .first-run-list {
   list-style: none;
-  font-size: 11.5px; color: #8a9a92;
-  line-height: 1.85;
+  font-size: clamp(10.5px, 2.3958vw, 15.2px); color: #8a9a92;
+  line-height: 1.5;
 }
 .first-run-list li::before {
   content: '·';
@@ -156,8 +193,8 @@ html, body {
 
 /* ---- 底部 ---- */
 .footer {
-  position: absolute; bottom: 15px;
-  font-size: 10.5px; color: #46514b;
+  position: relative;
+  font-size: clamp(9px, 2.1875vw, 14px); color: #74817a;
   letter-spacing: .3px;
   opacity: 0;
   animation: fadeUp .85s ease-out .95s both;

@@ -1052,7 +1052,7 @@ class EmulatorEngine {
 
   /**
    * 启动 + 自动重试。
-   * @param {Function} probe 异步回调，返回 'ok' | 'pending' | 'fatal'
+   * @param {Function} probe 异步回调，返回 'ok' | 'booting' | 'pending' | 'fatal' | 'unauthorized'
    */
   async start({ headless = false, onLog = () => {}, probe = null, networkProbe, maxAttempts = 4, stopOwnedAttempt } = {}) {
     // 已启动实例只由 Runtime 按 AVD 身份接管，监听端口本身不能作为归属证明。
@@ -1178,6 +1178,7 @@ class EmulatorEngine {
     this.attempts = [];
     this.lastDiagnosis = null;
     let lastError = '';
+    let authColdRetried = false;
 
     for (let i = 0; i < variants.length; i += 1) {
       const base = variants[i];
@@ -1188,6 +1189,7 @@ class EmulatorEngine {
       this.port = port;
       // 每轮重置退出码：上一轮 0xC0000005 不能带进下一轮的诊断里
       this.lastExitCode = null;
+      this.lastDiagnosis = null;
       // 日志也按轮切分：内存日志是跨轮累积的，第 1 轮的崩溃行若留在尾部，
       // 第 2 轮（比如换后端后端口冲突）会被误诊成同一个崩溃。
       const logStart = this._log.length;
@@ -1207,7 +1209,8 @@ class EmulatorEngine {
       }
       this._assertAvdWritable();
       // _coldBoot 只对这次 spawn 生效，避免之后每次开机都退化成长时间冷启动
-      this.spawnOnce({ ...plan, wipe: plan.wipe || avd.wipePending }, { headless, onLog, logFile });
+      const { args } = this.spawnOnce({ ...plan, wipe: plan.wipe || avd.wipePending }, { headless, onLog, logFile });
+      const mayLoadSnapshot = args.includes('-snapshot') && !args.includes('-no-snapshot-load');
       this._coldBoot = false;
 
       // 参数错误 / DLL 缺失会立刻退出
@@ -1260,6 +1263,7 @@ class EmulatorEngine {
           state = await probe({ serial: this.serial, port, adbPort });
         } catch (_) { state = 'pending'; }
         if (state === 'ok') { ok = true; break; }
+        if (state === 'unauthorized') { fatal = true; break; }
         if (state === 'fatal') { fatal = true; break; }
         // 只要 adb 能执行 shell，说明内核已经在引导，日志里的普通 Vulkan/EGL 信息不算失败
         if (state === 'booting') sawBooting = true;
@@ -1320,13 +1324,28 @@ class EmulatorEngine {
       this.attempts.push({ plan: plan.label, diagnosis: d.code, timeout: !fatal, exitCode: this.lastExitCode });
       this.lastDiagnosis = d;
       lastError = fatal ? `${d.title}：${d.hint}` : '开机超时（可能是首次引导较慢或硬件加速未生效）';
-      onLog(`${lastError}，自动换一组参数重试…`);
-      // 授权对话框卡住不是渲染后端的问题，别把当前 GPU 记进「启动即崩」黑名单，
-      // 否则下次启动会无缘无故跳过用户机器本来能用的后端。
-      if (d.code !== 'ADB_UNAUTHORIZED') this._noteGpuFailure(plan);
+      const authBlocked = d.code === 'ADB_UNAUTHORIZED';
+      if (!authBlocked) {
+        onLog(`${lastError}，自动换一组参数重试…`);
+        this._noteGpuFailure(plan);
+      }
       // eslint-disable-next-line no-await-in-loop
       if (!await this.killAttempt(port, stopOwnedAttempt)) {
         throw new Error('本轮运行时未能安全关闭，已停止自动重试。');
+      }
+      if (authBlocked) {
+        // 未授权不是显卡故障。只有恢复过快照才值得用同一渲染器冷启一次；
+        // 确认冷启仍未授权就停止，防止连续重开音频设备和隐藏窗口。
+        if (!mayLoadSnapshot || authColdRetried || i + 1 >= maxAttempts) {
+          onLog(`${lastError} 已停止自动重试。`);
+          break;
+        }
+        authColdRetried = true;
+        this.invalidateSnapshot();
+        this._coldBoot = true;
+        variants.splice(i + 1, 0, { ...base, label: `${base.label}（授权检查，冷启动）` });
+        if (variants.length > maxAttempts) variants.length = maxAttempts;
+        onLog('从快照启动后未获得 ADB 授权，仅用原渲染器冷启动一次。');
       }
     }
 
@@ -1342,7 +1361,7 @@ class EmulatorEngine {
       },
     });
     const err = new Error(
-      `运行时多次尝试仍未能启动（${d.title}）。\n${d.hint}\n\n`
+      `${d.code === 'ADB_UNAUTHORIZED' ? '运行时启动已停止' : '运行时多次尝试仍未能启动'}（${d.title}）。\n${d.hint}\n\n`
       + `已尝试：${this.attempts.map((a) => `${a.plan} → ${a.diagnosis}`).join('；')}\n`
       + `诊断报告：${report.file}`,
     );

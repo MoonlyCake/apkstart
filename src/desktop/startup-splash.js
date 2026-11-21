@@ -6,6 +6,21 @@ const MIN_VISIBLE_MS = 1800;
 const CLOSE_GRACE_MS = 2500;
 const STARTUP_DEADLINE_MS = 180000;
 
+function splashBounds(workArea) {
+  const { x, y, width, height } = workArea;
+  // Electron reports work area in DIP; scale gently without turning a 4K splash into a full window.
+  const roomy = Math.min(width / 1280, height / 680);
+  const scale = Math.min(1.32, 1 + 0.2 * Math.max(0, Math.log2(roomy)),
+    (width - Math.min(32, width / 10)) / 480, (height - Math.min(32, height / 10)) / 360);
+  const splashWidth = Math.max(1, Math.floor(480 * scale));
+  const splashHeight = Math.max(1, Math.floor(360 * scale));
+  return {
+    width: splashWidth, height: splashHeight,
+    x: x + Math.round((width - splashWidth) / 2),
+    y: y + Math.round((height - splashHeight) / 2),
+  };
+}
+
 function createStartupSplash({
   BrowserWindow, screen, srcDir, registerIpc, log, now = Date.now,
   setTimer = setTimeout, clearTimer = clearTimeout,
@@ -24,8 +39,14 @@ function createStartupSplash({
     return timer;
   };
   const hasWindow = () => !!window && !window.isDestroyed();
+  const onDisplayMetrics = (_event, display, metrics) => {
+    if (shownAt === null || !hasWindow() || !metrics.some((m) => m === 'workArea' || m === 'bounds' || m === 'scaleFactor')) return;
+    // Resize only for a change on the display containing this splash, never on ordinary window moves.
+    if (screen.getDisplayMatching(window.getBounds()).id === display.id) window.setBounds(splashBounds(display.workArea));
+  };
   const retire = () => {
     window = null;
+    screen.removeListener('display-metrics-changed', onDisplayMetrics);
     clearTimer(minimumTimer);
     clearTimer(closeTimer);
     clearTimer(deadline);
@@ -55,13 +76,9 @@ function createStartupSplash({
   }
 
   try {
-    const { width, height } = screen.getPrimaryDisplay().workAreaSize;
-    const splashWidth = 480;
-    const splashHeight = 360;
+    const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
     const active = window = new BrowserWindow({
-      width: splashWidth, height: splashHeight,
-      x: Math.round((width - splashWidth) / 2),
-      y: Math.round((height - splashHeight) / 2),
+      ...splashBounds(display.workArea),
       frame: false, transparent: false, resizable: false,
       alwaysOnTop: true, skipTaskbar: true,
       backgroundColor: '#0b0c0e', show: false,
@@ -70,6 +87,7 @@ function createStartupSplash({
         contextIsolation: true, nodeIntegration: false, sandbox: false,
       },
     });
+    screen.on('display-metrics-changed', onDisplayMetrics);
     active.setAlwaysOnTop(true, 'screen-saver');
     active.once('closed', () => { if (window === active) retire(); });
     active.once('ready-to-show', () => {
@@ -104,4 +122,4 @@ function createStartupSplash({
   };
 }
 
-module.exports = { createStartupSplash };
+module.exports = { createStartupSplash, splashBounds };

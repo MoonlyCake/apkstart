@@ -3,7 +3,7 @@
 const { EventEmitter } = require('node:events');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { createStartupSplash } = require('../src/desktop/startup-splash');
+const { createStartupSplash, splashBounds } = require('../src/desktop/startup-splash');
 const { createStartupBackground } = require('../src/desktop/startup-background');
 
 function createClock() {
@@ -32,11 +32,17 @@ function createClock() {
   };
 }
 
-function splashSetup({ loadFile, create } = {}) {
+function splashSetup({ loadFile, create, workArea = { x: 0, y: 0, width: 1200, height: 1000 } } = {}) {
   const clock = createClock();
   const events = [];
   let ipc;
   let window;
+  const screen = new EventEmitter();
+  const display = { id: 2, workArea };
+  const cursor = { x: workArea.x + 30, y: workArea.y + 30 };
+  screen.getCursorScreenPoint = () => cursor;
+  screen.getDisplayNearestPoint = (point) => { assert.equal(point, cursor); return display; };
+  screen.getDisplayMatching = () => display;
   class Window extends EventEmitter {
     constructor(options) {
       super();
@@ -53,6 +59,8 @@ function splashSetup({ loadFile, create } = {}) {
       return loadFile?.(file);
     }
     show() { events.push(['show']); }
+    getBounds() { return this.options; }
+    setBounds(bounds) { events.push(['bounds', bounds]); }
     isDestroyed() { return this.destroyed; }
     close() {
       this.destroyed = true;
@@ -63,14 +71,44 @@ function splashSetup({ loadFile, create } = {}) {
 
   const splash = createStartupSplash({
     BrowserWindow: Window,
-    screen: { getPrimaryDisplay: () => ({ workAreaSize: { width: 1200, height: 1000 } }) },
+    screen,
     srcDir: 'fixture-src',
     registerIpc: (api) => { ipc = api; },
     log: (message) => events.push(['log', message]),
     ...clock,
   });
-  return { splash, window, ipc, events, clock };
+  return { splash, window, ipc, events, clock, screen, display };
 }
+
+test('splash fits 720p through 4K and centers inside a screen with an arbitrary origin', () => {
+  const sizes = [[1280, 680, 480, 360], [1920, 1040, 536, 402], [2560, 1400, 576, 432], [3840, 2120, 632, 474]];
+  for (const [width, height, w, h] of sizes) {
+    const x = -width + 36;
+    const y = 52;
+    const workArea = { x, y, width, height };
+    const { window, splash } = splashSetup({ workArea });
+    assert.equal(window.options.width, w);
+    assert.equal(window.options.height, h);
+    assert.equal(window.options.x, x + Math.round((width - w) / 2));
+    assert.equal(window.options.y, y + Math.round((height - h) / 2));
+    splash.close();
+  }
+  const small = splashBounds({ x: 50, y: -210, width: 360, height: 280 });
+  assert.ok(small.x > 50 && small.y > -210 && small.x + small.width < 410 && small.y + small.height < 70);
+});
+
+test('splash responds to changes on its current display and unregisters on close', () => {
+  const { splash, window, screen, display, events } = splashSetup();
+  window.emit('ready-to-show');
+  const changed = { ...display, workArea: { x: 1920, y: -30, width: 1920, height: 1040 } };
+  screen.emit('display-metrics-changed', {}, { ...changed, id: 3 }, ['workArea']);
+  screen.emit('display-metrics-changed', {}, changed, ['rotation']);
+  assert.equal(events.some(([name]) => name === 'bounds'), false);
+  screen.emit('display-metrics-changed', {}, changed, ['workArea', 'scaleFactor']);
+  assert.deepEqual(events.at(-1), ['bounds', splashBounds(changed.workArea)]);
+  splash.close();
+  assert.equal(screen.listenerCount('display-metrics-changed'), 0);
+});
 
 test('splash completion waits for 1800ms on screen and sends the finish message only once', async () => {
   const { splash, window, events, clock, ipc } = splashSetup();

@@ -351,18 +351,11 @@ class Runtime {
       let lastHeal = 0;
       let probeIdentity = null;
       let nextOwnerCheck = 0;
-      let authHealed = false;  // 本次 start() 是否已因「未授权」作废旧快照冷启动过
       const diagUnauthorized = () => ({
         code: 'ADB_UNAUTHORIZED',
-        title: '安卓调试授权未完成（需要点一次「允许」）',
-        // 旧文案让人去删 %USERPROFILE%\.android\adbkey —— 实测那是**反向操作**：
-        // 换了新密钥后，系统里已存的旧公钥仍然生效，两者对不上，反而永远授权不了
-        // （Android 只在 adb_keys 不存在时才写入新公钥）。正确做法是在模拟器窗口里
-        // 点一次「允许」，或者清空安卓数据让系统重建授权表。
-        hint: '模拟器停在「允许 USB 调试？」对话框。请在那个模拟器窗口里点「允许」——'
-          + '勾选「一律允许使用这台计算机进行调试」再点，之后就不会再问。'
-          + '若窗口点不动或一直不出现：设置 → 运行时 → 清空安卓数据后重试'
-          + '（会清掉已装应用，重新安装即可，不会影响 APK 文件）。',
+        title: '安卓尚未授权本机的 ADB 调试连接',
+        hint: '请使用可见的安卓模拟器窗口，确认「允许 USB 调试」后再重试。'
+          + '不需要删除本机 ADB 密钥或清空安卓数据。',
       });
       const probe = async ({ serial, port }) => {
         if (!this.emulator.running()) return 'fatal';
@@ -395,11 +388,7 @@ class Runtime {
             probeIdentity = null;
             return 'pending';
           }
-          // 关键分支：adb shell 报错可能是「还没开机」也可能是「授权对话框卡住」。
-          // 后者每轮 shell 都抛异常，旧实现只当普通 offline，继续按
-          // 240s×4 组参数干等，最后报「运行时未能完成开机」，让用户以为是显卡/虚拟化。
-          // 这里先按报错文本、再按 devices 的 state 列（get-state 分不清 authorized）
-          // 双重确认 unauthorized，命中就作废旧快照冷启动 + 给出准确诊断，不再空等。
+          // 区分尚未开机和未授权：get-state 不可靠，必要时读 devices 的状态列。
           const raw = String((e && (e.raw || e.stdout || e.message)) || '');
           let unauthorized = isUnauthorizedError(raw);
           if (!unauthorized) {
@@ -408,16 +397,7 @@ class Runtime {
           }
           if (unauthorized) {
             this.emulator.lastDiagnosis = diagUnauthorized();
-            if (!authHealed) {
-              authHealed = true;
-              onLog('adb 卡在「允许 USB 调试」授权对话框，正在作废旧快照并冷启动以重新注入公钥…');
-              try { this.emulator.invalidateSnapshot(); } catch (_) { /* ignore */ }
-              this.emulator._coldBoot = true; // 下一轮强制冷启动，让 emulator 重新注入 adb 公钥
-              await this.emulator.ensureAdbServer().catch(() => {});
-              this._probeClient = null;
-            }
-            // 交给 start() 立刻换一组参数重试；冷启动后 dialog 问题会消失
-            return 'fatal';
+            return 'unauthorized';
           }
           // 其它 adb 传输异常：重新检查监听，必要时补启动服务。
           const now = Date.now();
