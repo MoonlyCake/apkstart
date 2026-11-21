@@ -2321,8 +2321,8 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
   await test('安装与启动复用同一个操作队列，拒绝安装要保留失败状态', () => {
     const root = path.join(__dirname, '..');
     const mainJs = fs.readFileSync(path.join(root, 'src', 'main.js'), 'utf8');
-    // 排队顺序、并发、去重和失败恢复由 rewrite-queue.test.js 按行为验证。
-    assert(mainJs.includes("appOperations.run('install', () => installOne(filePath))"), '安装要入队');
+    // shell-apk-open.test.js 另行验证安装释放队列后才启动，失败不启动。
+    assert(mainJs.includes("appOperations.run('install', () => installOne(filePath, { shellOpen }))"), '安装要带入口标记入队');
     assert(mainJs.includes('appOperations.run(key, () => launchOne(pkg))'), '启动要走同一队列');
     const appsIpc = fs.readFileSync(path.join(root, 'src', 'ipc', 'handlers', 'apps.js'), 'utf8');
     assert(appsIpc.includes('if (r.ok === false) return r;'), '不能把拒绝安装返回成成功');

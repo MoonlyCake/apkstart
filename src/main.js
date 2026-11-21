@@ -22,6 +22,7 @@ const { createStartupBackground } = require('./desktop/startup-background');
 const { createRuntimeDeployment } = require('./desktop/runtime-deployment');
 const { backfillAppOrientations, warnAboutFreeSpace, repairMissingShortcuts } = require('./desktop/startup-maintenance');
 const { registerStartupSmoke } = require('./desktop/startup-smoke');
+const { createShellApkOpener, isWindowsShellApk } = require('./desktop/shell-apk-open');
 const { Runtime } = require('./core/engine');
 const { parseApk } = require('./core/apk');
 const { drawAppIcon } = require('./core/png');
@@ -1010,7 +1011,8 @@ const appOperations = new OperationQueue();
 let installBusy = null;   // 正在安装的文件路径：双击 APK 连点会走 second-instance，不能并发装
 let lastInstallErr = { msg: '', at: 0 };
 
-async function runInstall(filePath) {
+async function runInstall(filePath, { shellOpen = false } = {}) {
+  if (quitting) return { ok: false, error: 'Apk Start 正在退出' };
   // 同一个包正在装（用户连点了几次图标 / 拖了好几次）→ 只提示一次，别重复跑一遍安装
   if (installBusy) {
     showWindow();
@@ -1022,22 +1024,32 @@ async function runInstall(filePath) {
     return { ok: false, error: '已有安装任务在进行' };
   }
   installBusy = filePath;
-  return appOperations.run('install', () => installOne(filePath));
+  return appOperations.run('install', () => installOne(filePath, { shellOpen }));
 }
 
-async function installOne(filePath) {
+async function installOne(filePath, { shellOpen = false } = {}) {
   try {
     showWindow();
     // 安装由管理窗口接管；置顶的开机图不能挡住 Android 的 ADB 授权提示。
     startupSplash?.close();
     send('install:start', { file: filePath });
-    const result = await installer.install(filePath, (p) => send('install:progress', p));
-    send('install:done', result);
-    // 新建的桌面图标要让资源管理器立刻刷新，否则用户会以为「没创建快捷方式」
-    windowctl.refreshShell().catch(() => {});
-    notify('安装完成', `${result.app.label} 已安装${result.app.shortcutPath ? '，桌面快捷方式已创建' : ''}`);
-    return result;
+    const result = await installer.install(filePath, (p) => send('install:progress', p), { shellOpen });
+    if (result?.ok === false || !result?.app || (shellOpen && !isLaunchPackage(result.app.package))) {
+      throw new Error(result?.error || '安装未确认成功');
+    }
+    const confirmed = { ...result, ok: true };
+    send('install:done', confirmed);
+    if (result.reused) {
+      appLog(`shell apk reused ${result.app.package}`);
+    } else {
+      if (shellOpen) appLog(`shell apk installed ${result.app.package}`);
+      // 新建的桌面图标要让资源管理器立刻刷新，否则用户会以为「没创建快捷方式」
+      windowctl.refreshShell().catch(() => {});
+      notify('安装完成', `${result.app.label} 已安装${result.app.shortcutPath ? '，桌面快捷方式已创建' : ''}`);
+    }
+    return confirmed;
   } catch (e) {
+    if (shellOpen) appLog(`shell apk failed ${e.code || (e.needsSetup ? `needs-${e.needsSetup}` : 'INSTALL_FAILED')}`);
     send('install:error', { message: e.message, file: filePath });
     if (e.needsSetup) send('ui:navigate', 'setup');
     // 同一条错误 8 秒内只弹一次系统通知：连续重试时不会在右下角刷屏
@@ -1439,12 +1451,20 @@ function quitFromStartup() {
   app.quit();
 }
 
+const openShellApk = createShellApkOpener({ runInstall, runLaunch });
+
+function openArgumentApk(filePath) {
+  if (isWindowsShellApk(filePath)) return openShellApk(filePath);
+  return runInstall(filePath);
+}
+
 async function dispatchStartupArguments(args) {
   if (args.error) {
     showWindow();
     startupSplash?.finish();
     dialog.showErrorBox('无法打开安卓应用', args.error);
-  } else if (args.apk) runInstall(args.apk).catch(() => {});
+  } else if (args.apk && isWindowsShellApk(args.apk)) await openArgumentApk(args.apk).catch(() => {});
+  else if (args.apk) openArgumentApk(args.apk).catch(() => {});
   else if (args.launch) await runLaunch(args.launch);
   else setTimeout(() => startupSplash?.finish(), 800);
 }
@@ -1455,19 +1475,8 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  app.on('second-instance', (_evt, argv) => {
-    const args = parseArgs(argv);
-    if (args.error) {
-      app.whenReady().then(() => dialog.showErrorBox('无法打开安卓应用', args.error));
-      return;
-    }
-    if (args.launch) { runLaunch(args.launch); return; }
-    if (args.apk) { runInstall(args.apk).catch(() => {}); return; }
-    showWindow();
-  });
-
-  app.whenReady().then(async () => {
-    if (!initializeDesktopState()) return;
+  const desktopReady = app.whenReady().then(() => {
+    if (!initializeDesktopState()) return null;
     composeRuntime();
     openStartupSplash();
     const keymapEngine = composeStartupServices();
@@ -1485,11 +1494,18 @@ if (!gotLock) {
     warnAboutFreeSpace({ dataDir: store.DATA_DIR, log: appLog, notify, send });
     repairMissingShortcuts({ installer, notify, refreshShell: () => windowctl.refreshShell() });
     registerDesktopShortcuts();
+    return { args, background };
+  });
+
+  desktopReady.then(async (desktop) => {
+    if (!desktop || quitting) return;
+    const { args, background } = desktop;
 
     // A direct launch owns startup; only queue prewarm and downloads after this dispatch.
     await dispatchStartupArguments(args);
     background.scheduleRuntime({
-      args, runtime, autoDeploy, settings: () => store.getSettings(), apps: () => store.getApps(),
+      args: isWindowsShellApk(args.apk) ? { ...args, launch: true } : args,
+      runtime, autoDeploy, settings: () => store.getSettings(), apps: () => store.getApps(),
       getAgent: () => desktopAgent.current, armAgent: desktopAgent.arm,
     });
     background.scheduleUpdates({
@@ -1501,6 +1517,17 @@ if (!gotLock) {
       argv: process.argv, window: mainWindow, writeFile: fs.writeFileSync, requestQuit: quitFromStartup,
     });
     app.on('activate', () => showWindow());
+  });
+
+  app.on('second-instance', (_evt, argv) => {
+    const args = parseArgs(argv);
+    desktopReady.then((desktop) => {
+      if (!desktop || quitting) return;
+      if (args.error) return dialog.showErrorBox('无法打开安卓应用', args.error);
+      if (args.launch) return runLaunch(args.launch);
+      if (args.apk) return openArgumentApk(args.apk);
+      return showWindow();
+    }).catch(() => {});
   });
 
   app.on('window-all-closed', () => {
