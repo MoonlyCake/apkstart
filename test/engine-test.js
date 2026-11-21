@@ -336,12 +336,18 @@ function assert(cond, msg) { if (!cond) throw new Error(msg || '断言失败'); 
         sock.write('ok\r\n(qemu) ');
       });
     });
-    await new Promise((r) => srv.listen(5556, '127.0.0.1', r));
-
-    const rt = new Runtime(TMP);
-    await rt.monitorCmd('system_powerdown');
-    assert(srv.lastCmd === 'system_powerdown', `实际收到: ${srv.lastCmd}`);
-    await new Promise((r) => srv.close(r));
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    const connect = net.connect;
+    try {
+      // 5556 也可能是真实安卓模拟器的端口；只把这次测试连接导向隔离的假 monitor。
+      net.connect = (address) => connect.call(net, { ...address, port: srv.address().port });
+      const rt = new Runtime(TMP);
+      await rt.monitorCmd('system_powerdown');
+      assert(srv.lastCmd === 'system_powerdown', `实际收到: ${srv.lastCmd}`);
+    } finally {
+      net.connect = connect;
+      await new Promise((r) => srv.close(r));
+    }
   });
 
   await test('未安装系统时 ensure 返回 needsSetup', async () => {

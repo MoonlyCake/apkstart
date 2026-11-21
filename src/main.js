@@ -9,6 +9,7 @@ const path = require('path');
 const { productName: PRODUCT_NAME, homepage: PROJECT_HOME } = require('../package.json');
 
 const store = require('./core/store');
+const { APP_AUMID, appAumid, registerManagerShortcut, showAsManager } = require('./core/branding');
 const { validPackageName } = require('./core/pkgname');
 const { OperationQueue } = require('./application/operation-queue');
 const { AppSessions } = require('./application/app-sessions');
@@ -286,7 +287,7 @@ function displaySettings() { return store.getSettings().display || {}; }
  * Windows 任务栏 / 通知的身份。
  *
  * 为什么要按应用切换：每个安卓应用的桌面快捷方式都写了自己的 AUMID
- * （`RoutineMiku.ApkStart.<包名>`，见 installer.createShortcut），而且快捷方式的
+ * （`APP_AUMID.<包名>`，见 installer.createShortcut），而且快捷方式的
  * 图标是**那个应用自己的图标**。Windows 只有在「运行进程的 AUMID == 快捷方式的
  * AUMID」时，才会把正在运行的窗口和任务栏固定项合并成同一个按钮、并沿用快捷方式
  * 的图标。身份对不上就会出现「固定项是应用图标、任务栏上却另起一个 ApkStart 图标」。
@@ -295,9 +296,17 @@ function displaySettings() { return store.getSettings().display || {}; }
  * 一个进程跑多个应用的壳层就是这么做的）。这里只在开窗口之前切，且全程 try/catch ——
  * 万一某个 Windows 版本忽略它，也只是退化成按 exe 图标显示，不影响功能。
  */
-const APP_AUMID = 'RoutineMiku.ApkStart';
-function setAumid(id) {
-  try { app.setAppUserModelId(String(id || APP_AUMID).slice(0, 128)); } catch (_) { /* 非 Windows 或旧版本忽略 */ }
+let activeAumid = APP_AUMID;
+function setAumid(id = APP_AUMID) {
+  try {
+    app.setAppUserModelId(id);
+    activeAumid = id;
+  } catch (_) { /* 非 Windows 或旧版本忽略 */ }
+}
+
+function showWindowsNotification(publish) {
+  if (process.platform !== 'win32' || store.STORE_BUILD) return publish();
+  return showAsManager(publish, activeAumid, setAumid);
 }
 
 /**
@@ -551,7 +560,7 @@ async function openAppWindow(pkg, tip) {
   const splashVisible = startupSplash?.hasWindow() ?? false;
   const label = (rec && rec.label) || pkg;
   // 先把这个应用的身份切过去，再开窗口：任务栏才会沿用快捷方式里那个应用的图标
-  setAumid(`${APP_AUMID}.${pkg}`);
+  setAumid(appAumid(pkg));
   const session = appSessions.reserve(pkg, { reuse: appWin.isOpen && appWin.pkg === pkg });
   try {
     appWin.open({
@@ -814,7 +823,9 @@ function notify(title, body) {
   if (store.getSettings().notifyOnInstall === false) return;
   try {
     const { Notification } = require('electron');
-    if (Notification.isSupported()) new Notification({ title, body, icon: nativeImage.createFromBuffer(ICON_PNG) }).show();
+    showWindowsNotification(() => {
+      if (Notification.isSupported()) new Notification({ title, body, icon: nativeImage.createFromBuffer(ICON_PNG) }).show();
+    });
   } catch (_) { /* ignore */ }
 }
 
@@ -1262,6 +1273,7 @@ async function stopApp(pkg, { keepWindow = false } = {}) {
 function startNotifier() {
   if (!notifier) {
     notifier = new NotifyBridge({
+      showNotification: showWindowsNotification,
       getClient: () => runtime.client(),
       getAppLabel: (pkg) => (store.getApp(pkg) || {}).label || pkg,
       getAppIcon: (pkg) => (store.getApp(pkg) || {}).icoPath || '',
@@ -1325,6 +1337,13 @@ function initializeDesktopState() {
   // The quitting instance must not dispose a runtime already adopted by its successor.
   try { fs.writeFileSync(path.join(store.DATA_DIR, 'owner.pid'), String(process.pid)); } catch (_) { /* ignore */ }
   setAumid(APP_AUMID);
+  if (process.platform === 'win32' && app.isPackaged && !store.STORE_BUILD) {
+    try {
+      registerManagerShortcut({ shell, target: process.execPath, icon: APPICON_FILE,
+        programs: path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs'),
+        toastActivatorClsid: app.toastActivatorCLSID });
+    } catch (error) { appLog(`Windows notification identity: ${error.message}`); }
+  }
   return true;
 }
 

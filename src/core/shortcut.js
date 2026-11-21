@@ -7,6 +7,8 @@
  */
 const fs = require('fs');
 const path = require('path');
+const { appAumid } = require('./branding');
+const { validPackageName } = require('./pkgname');
 
 const ICO_SIZES = [16, 20, 24, 32, 40, 48, 64, 128, 256];
 
@@ -233,6 +235,27 @@ function writeShortcut(opt) {
   return opt.shortcutPath;
 }
 
+function migrateAppShortcutBrand(shortcutPath, pkg) {
+  if (process.platform !== 'win32' || typeof shortcutPath !== 'string' || !validPackageName(pkg)) return false;
+  const link = path.win32.normalize(shortcutPath);
+  if (!path.win32.isAbsolute(link) || path.win32.extname(link).toLowerCase() !== '.lnk'
+      || /\\User Pinned\\/i.test(link)) return false;
+  try {
+    if (!fs.lstatSync(link, { throwIfNoEntry: false })?.isFile()
+        || /\\User Pinned\\/i.test(fs.realpathSync.native(link))) return false;
+    const { shell } = require('electron');
+    const current = shell.readShortcutLink(link);
+    const launch = /(?:^|\s)--launch\s+(?:"([^"]+)"|([^\s"]+))\s*$/.exec(current.args || '');
+    const legacy = `RoutineMiku.ApkStart.${pkg}`.slice(0, 128);
+    if (current.appUserModelId !== legacy || (launch?.[1] || launch?.[2]) !== pkg
+        || !/^(ApkStart|electron)\.exe$/i.test(path.win32.basename(current.target || ''))) return false;
+    // Update the identity only: an existing link may have a user-selected icon or directory.
+    const id = appAumid(pkg);
+    return shell.writeShortcutLink(link, 'update', { appUserModelId: id })
+      && shell.readShortcutLink(link).appUserModelId === id;
+  } catch (_) { return false; }
+}
+
 function removeShortcut(p) {
   try {
     if (p && fs.existsSync(p)) fs.unlinkSync(p);
@@ -244,5 +267,5 @@ function removeShortcut(p) {
 
 module.exports = {
   pngToIco, pngBytesToIco, iconToIco,
-  writeShortcut, writeDesktopEntry, removeShortcut, safeFileName, shortcutExt, ICO_SIZES,
+  writeShortcut, writeDesktopEntry, migrateAppShortcutBrand, removeShortcut, safeFileName, shortcutExt, ICO_SIZES,
 };
