@@ -8,6 +8,7 @@ const os = require('os');
 const path = require('path');
 const store = require('./store');
 const { parseApk } = require('./apk');
+const { matchesInstalledApk } = require('./apk-installed');
 const { isArmAbi, preferredArmAbi } = require('./native-abi');
 const { ZipFile } = require('./zip');
 const { parsePidList } = require('./adb');
@@ -272,7 +273,7 @@ class Installer {
     return rt;
   }
 
-  async install(filePath, onProgress = () => {}) {
+  async install(filePath, onProgress = () => {}, { shellOpen = false } = {}) {
     onProgress({ stage: 'parse', message: '正在解析 APK…' });
     let bundle = null;
     // 大包先核对模拟器数据盘，避免无谓解包，或安装到一半才报告空间不足。
@@ -295,8 +296,11 @@ class Installer {
         message: `已识别 ${meta.label}（${meta.package}）`,
         meta: { label: meta.label, package: meta.package, versionName: meta.versionName },
       });
-      // 临时目录可能和模拟器同盘；解包后重新核对剩余空间，使用实际写入体积。
-      assertSpace(bundle?.sizeBytes ?? meta.sizeBytes);
+      const existing = shellOpen === true && /\.apk$/i.test(filePath) ? store.getApp(meta.package) : null;
+      const mayReuse = existing && !existing.bundle && existing.versionCode === meta.versionCode;
+      // 直接打开不需要安装空间；其他路径照旧在启动运行时前预检。
+      // 分片解包后使用实际写入体积重新核对。
+      if (!mayReuse) assertSpace(bundle?.sizeBytes ?? meta.sizeBytes);
 
       onProgress({ stage: 'runtime', message: '正在准备安卓运行时…' });
       let rt = await this.runtime.ensure({ onLog: (m) => onProgress({ stage: 'runtime', message: m }) });
@@ -304,6 +308,18 @@ class Installer {
         const err = new Error(rt.error || '运行时不可用');
         err.needsSetup = rt.needsSetup || 'provision';
         throw err;
+      }
+
+      if (mayReuse) {
+        await assertGuestLease(this.runtime, rt);
+        const identical = await matchesInstalledApk(rt.client, meta.package, filePath);
+        await assertGuestLease(this.runtime, rt);
+        if (identical) {
+          this.runtime.touch();
+          onProgress({ stage: 'done', message: `${existing.label} 已安装相同的 APK，正在打开…`, app: existing });
+          return { app: existing, warnings: [], engine: rt.engine, reused: true };
+        }
+        assertSpace(meta.sizeBytes);
       }
 
       // 零配置 ARM 兼容：先看「当前这台运行时」有没有翻译能力，而不是看镜像文件在不在磁盘上。
