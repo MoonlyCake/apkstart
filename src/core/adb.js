@@ -40,13 +40,30 @@ function tabletDensity() {
  * 系统里可能存在的 adb 位置。**故意只列 Android SDK 与常见手动安装目录**：
  * 第三方模拟器自带的 adb（MuMu / 雷电 / 蓝叠）不在这里 —— 用它们的 adb 会连带
  * 继承别人的 server 状态（端口、授权、offline 抖动），与「独立运行」冲突。
- * 自己那份 adb 在运行时目录里，优先级永远最高（见 engine.adbPath）。
+ * 自己那份 adb 在运行时目录里，优先级永远最高。
  */
 const COMMON_ADB_PATHS = [
-  path.join(process.env.LOCALAPPDATA || '', 'Android', 'Sdk', 'platform-tools', 'adb.exe'),
+  process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Android', 'Sdk', 'platform-tools', 'adb.exe'),
   'C:/Android/platform-tools/adb.exe',
   'C:/adb/adb.exe',
 ];
+
+function resolveAdbPath({ bundled, configured, appRoot, allowPath = true, exists = fs.existsSync } = {}) {
+  const candidates = [
+    bundled,
+    configured,
+    appRoot && path.join(appRoot, 'tools', 'platform-tools', 'adb.exe'),
+    appRoot && path.join(appRoot, 'engine', 'platform-tools', 'adb.exe'),
+    ...COMMON_ADB_PATHS,
+  ];
+  return candidates.find((file) => file && exists(file)) || (allowPath ? 'adb' : '');
+}
+
+const DEFAULT_ADB_PORT = 5044;
+function resolveAdbPort(port = process.env.APKSTART_ADB_PORT) {
+  const value = Number(port);
+  return Number.isInteger(value) && value >= 1 && value <= 65535 ? value : DEFAULT_ADB_PORT;
+}
 
 /**
  * 把 pm install 的原始失败原因翻译成用户能看懂的中文。
@@ -240,12 +257,12 @@ function parseStatList(text) {
 }
 
 // ADB_SERVER_SOCKET takes precedence over the port, so inherited selectors must not reroute the private transport.
-function adbEnvironment(port = process.env.APKSTART_ADB_PORT || '5044', source = process.env) {
+function adbEnvironment(port, source = process.env) {
   const env = { ...source };
   for (const key of Object.keys(env)) {
     if (/^(ADB_SERVER_SOCKET|ANDROID_ADB_SERVER_(ADDRESS|PORT))$/i.test(key)) delete env[key];
   }
-  env.ANDROID_ADB_SERVER_PORT = String(port);
+  env.ANDROID_ADB_SERVER_PORT = String(resolveAdbPort(port ?? source.APKSTART_ADB_PORT ?? null));
   // Play 商店镜像会强制 ADB 授权：host 的 adb server 与 guest 的 adbd 必须用同一把
   // adbkey。官方做法是 adb/emulator 共用 %USERPROFILE%\.android\adbkey{,.pub}，
   // emulator 启动时把 adbkey.pub 烤进 guest 的 /data/misc/adb/adb_keys。
@@ -260,24 +277,15 @@ function adbEnvironment(port = process.env.APKSTART_ADB_PORT || '5044', source =
 }
 
 class AdbClient {
-  constructor({ adbPath, serial }) {
+  constructor({ adbPath, serial, port, executeFile = execFile, startProcess = spawn } = {}) {
     this.adbPath = adbPath || 'adb';
     this.serial = serial || '';
+    this.serverPort = resolveAdbPort(port);
+    this._executeFile = executeFile;
+    this._startProcess = startProcess;
     this._input = null;        // 常驻 `adb shell` 进程
     this._inputSeq = 0;
     this._waiters = new Map(); // id -> { resolve, reject, timer, token }
-  }
-
-  static resolveAdb(explicit, appRoot) {
-    const candidates = [
-      explicit,
-      appRoot && path.join(appRoot, 'tools', 'platform-tools', 'adb.exe'),
-      ...COMMON_ADB_PATHS,
-    ].filter(Boolean);
-    for (const c of candidates) {
-      try { if (fs.existsSync(c)) return c; } catch (_) { /* ignore */ }
-    }
-    return 'adb'; // 交给 PATH
   }
 
   _args(args, withSerial = true) {
@@ -286,14 +294,14 @@ class AdbClient {
     return a.concat(args);
   }
 
-  _adbEnv() { return adbEnvironment(); }
+  _adbEnv() { return adbEnvironment(this.serverPort); }
 
-  exec(args, { timeout = 30000, withSerial = true, binary = false } = {}) {
+  exec(args, { timeout = 30000, withSerial = true, binary = false, maxBuffer = 64 * 1024 * 1024 } = {}) {
     return new Promise((resolve, reject) => {
       const finalArgs = this._args(args, withSerial);
-      execFile(this.adbPath, finalArgs, {
+      this._executeFile(this.adbPath, finalArgs, {
         timeout,
-        maxBuffer: 64 * 1024 * 1024,
+        maxBuffer,
         encoding: binary ? 'buffer' : 'utf8',
         windowsHide: true,
         // 与运行时模拟器共用专用 adb server 端口（默认 5044），与 5037 上的
@@ -314,6 +322,8 @@ class AdbClient {
     });
   }
 
+  startServer() { return this.exec(['start-server'], { timeout: 12000, withSerial: false }); }
+
   async shell(cmd, opts = {}) {
     const { stdout } = await this.exec(['shell', cmd], opts);
     return typeof stdout === 'string' ? stdout.trim() : stdout;
@@ -331,7 +341,7 @@ class AdbClient {
     if (old && old.exitCode === null && !old.killed && old.stdin && old.stdin.writable) return old;
     if (old) this.disposeInput();
 
-    const p = spawn(this.adbPath, this._args(['shell'], true), {
+    const p = this._startProcess(this.adbPath, this._args(['shell'], true), {
       stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: this._adbEnv(),
     });
     this._input = p;
@@ -412,7 +422,7 @@ class AdbClient {
   }
 
   async version() {
-    const { stdout } = await this.exec(['version'], { withSerial: false });
+    const { stdout } = await this.exec(['version'], { timeout: 10000, withSerial: false });
     const m = /version\s+([\d.]+)/i.exec(stdout);
     return m ? m[1] : stdout.trim();
   }
@@ -1215,6 +1225,6 @@ class AdbClient {
 
 module.exports = {
   parsePidList,
-  AdbClient, AdbError, adbEnvironment, parseStatList, friendlyInstallError, friendlyLaunchError,
+  AdbClient, AdbError, adbEnvironment, resolveAdbPath, resolveAdbPort, parseStatList, friendlyInstallError, friendlyLaunchError,
   componentArg, parseResolvedActivity, parseDeviceState, isUnauthorizedError, parsePmPaths,
 };

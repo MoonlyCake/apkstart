@@ -1,5 +1,7 @@
 'use strict';
 
+const { ipcFailure } = require('../failure');
+
 function createDesktopHandlers({
   app, APPICON_FILE, assoc, dialog, findUninstaller, fs, ICON_PNG, IS_DEV, launcherInfo,
   live, NO_SHELL_PROBE, openManual, parseArgs, path, send, shell, store,
@@ -124,7 +126,7 @@ function createDesktopHandlers({
         setTimeout(() => app.quit(), 300);
         return { ok: true, portable: false };
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
 

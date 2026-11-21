@@ -187,20 +187,14 @@ const GB = 1024 * 1024 * 1024;
     assert(/resources\(\) \{/.test(builtinSrc), 'builtin 缺少 resources()');
   });
 
-  test('设置 IPC 在保存前限制内存、CPU 和数据分区', () => {
+  test('设置 IPC 将原始补丁交给保存边界，而不是重复收敛资源', () => {
     let saved;
-    const handlers = captureHandlers({ store: { saveSettings(patch) { saved = patch; return patch; } } });
-    const host = hostProfile();
+    const canonical = { engine: { memoryMB: 24576, cores: 15, dataPartitionGB: 256 } };
+    const handlers = captureHandlers({ store: { saveSettings(patch) { saved = patch; return canonical; } } });
     const draft = { engine: { memoryMB: 1024 * 1024, cores: 8192, dataPartitionGB: 1024 } };
     const result = handlers.get('settings:set')({}, draft);
-    assert.strictEqual(result, saved);
-    assert.deepEqual(saved.engine, {
-      memoryMB: clampMemoryMB(draft.engine.memoryMB, host.totalMB).mb,
-      autoMemory: false,
-      cores: clampCores(draft.engine.cores, host.cores).cores,
-      dataPartitionGB: 256,
-    });
-    assert.equal(draft.engine.memoryMB, 1024 * 1024, '不能就地修改调用者的设置');
+    assert.strictEqual(saved, draft);
+    assert.strictEqual(result, canonical);
   });
 
   await test('资源总览与重置目标容量交给运行时处理', async () => {

@@ -366,17 +366,6 @@ async function freePortPair(start = 5554) {
 }
 
 /**
- * adb server 端口：固定不复用探测。
- * 之前是"从 5044 往上找一个空闲端口"，但 adb server 本身是常驻进程，占着这个端口，
- * 于是每启动一次 ApkStart 就会多一个 adb server（实测一次会话跑出 6 个），
- * 而且端口老是变，下次启动想接管上次的模拟器时对不上号。
- * 5044 是 ApkStart 专用端口（用户自己的 adb 在 5037），直接固定用。
- */
-async function freeAdbPort(start = 5044) {
-  return Number(process.env.APKSTART_ADB_PORT) || start;
-}
-
-/**
  * 配置指纹：只有「镜像 / 数据分区 / 引擎版本」变化才作废快照。
  * 故意不包含 GPU、加速方式、内存 —— 那些是自动重试会频繁切换的参数，
  * 若纳入会让每次重试都触发 -wipe-data，把用户已装的应用清空。
@@ -595,6 +584,6 @@ module.exports = {
   hostInfo, freeDiskMB, isAsciiPath, shortPath, lcdFor, liteProfile,
   versionNumbers, gpuCandidates, detectGpuVendor, chooseProfile, planVariants,
   overridesFromSettings, autoProfile,
-  freePortPair, freeAdbPort, snapshotKey, imageIdentity,
+  freePortPair, snapshotKey, imageIdentity,
   diagnose, describeProfile, writeReport, vcRedistOk,
 };

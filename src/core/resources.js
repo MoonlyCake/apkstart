@@ -22,6 +22,7 @@ const HOST_RESERVE_RATIO = 0.25;
 const TIGHT_RATIO = 0.8;
 /** 完全不够用（连系统都跑不动）的绝对下限 */
 const ABSOLUTE_MIN_MB = 768;
+const MAX_DATA_PARTITION_GB = 256;
 
 function toInt(v, fallback = 0) {
   const n = Math.floor(Number(v));
@@ -131,6 +132,11 @@ function diskRequiredMB(packageBytes, ratio = 1.8, reserveMB = 2048) {
   return Math.ceil((bytes / 1048576) * ratio) + reserveMB;
 }
 
+/** 配置容量不依赖清理前后的磁盘余量；实际扩容再校验可用空间。 */
+function configuredDataGB(gb) {
+  return Math.max(0, Math.min(MAX_DATA_PARTITION_GB, Number(gb) || 0));
+}
+
 /**
  * 数据分区可填上限。磁盘只剩一点时不能让人填 64GB 然后装到一半失败。
  * @returns {{ maxGB:number, warnGB:number, freeMB:number }}
@@ -138,7 +144,7 @@ function diskRequiredMB(packageBytes, ratio = 1.8, reserveMB = 2048) {
 function diskLimits(freeMB) {
   const free = Math.max(0, toInt(freeMB));
   // 分区镜像本身还要占宿主空间（动态镜像会涨到接近分区大小），留 20% 缓冲
-  const maxGB = Math.max(0, Math.floor((free / 1024) * 0.8));
+  const maxGB = configuredDataGB(Math.floor((free / 1024) * 0.8));
   return { maxGB, warnGB: Math.max(0, maxGB - 8), freeMB: free };
 }
 
@@ -149,16 +155,20 @@ function diskLimits(freeMB) {
 function clampDataGB(gb, freeMB) {
   const want = toInt(gb);
   if (want <= 0) return { gb: 0, capped: false, reason: 'auto' };
+  const configured = configuredDataGB(want);
   const lim = diskLimits(freeMB);
-  if (!lim.freeMB) return { gb: want, capped: false, reason: '' };
-  if (want > lim.maxGB) {
+  if (lim.freeMB && configured > lim.maxGB) {
     return {
       gb: Math.max(0, lim.maxGB),
       capped: true,
       reason: `所在磁盘只剩 ${(lim.freeMB / 1024).toFixed(1)} GB，最多能分 ${lim.maxGB} GB`,
     };
   }
-  return { gb: want, capped: false, reason: '' };
+  return {
+    gb: configured,
+    capped: configured !== want,
+    reason: configured !== want ? `数据分区最多可设置 ${MAX_DATA_PARTITION_GB} GB` : '',
+  };
 }
 
 /**
@@ -211,6 +221,7 @@ module.exports = {
   diskRequiredMB,
   diskVerdict,
   diskLimits,
+  configuredDataGB,
   clampDataGB,
   storageVerdict,
 };

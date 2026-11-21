@@ -1,5 +1,7 @@
 'use strict';
 
+const { ipcFailure } = require('../failure');
+
 function createRuntimeDataHandlers({ appLog, appOperations, dialog, live, notify }) {
   return {
     'runtime:usage': () => live.runtime.usage(),
@@ -15,8 +17,8 @@ function createRuntimeDataHandlers({ appLog, appOperations, dialog, live, notify
       const want = res.clampDataGB(gb, freeMB).gb;
       if (!want) return { ok: false, error: '目标容量不合法' };
       return appOperations.run(`reset:resize:${want}`, async () => {
-        const r = await live.runtime.resetAndroidData({ dataPartitionGB: want }).catch((e) => ({ ok: false, error: e.message }));
-        appLog(`reset+resize -> ${want}GB: ${JSON.stringify(r)}`);
+        const r = await live.runtime.resetAndroidData({ dataPartitionGB: want }).catch(ipcFailure);
+        appLog(`reset+resize -> ${want}GB: ${r.ok ? 'ok' : 'not completed'}`);
         return { ...r, wantGB: want };
       });
     },
@@ -40,11 +42,11 @@ function createRuntimeDataHandlers({ appLog, appOperations, dialog, live, notify
       try {
         // The lifecycle queue owns stop-and-resize; IPC must not release it between the two.
         const r = await live.runtime.resizeDataPartition(Math.round(want * 1024));
-        appLog(`data partition -> ${want}GB: ${JSON.stringify(r)}`);
+        appLog(`data partition -> ${want}GB: ${r.ok ? 'ok' : 'not completed'}`);
         if (r.ok && want) notify('数据分区已调整', `安卓可用空间约 ${want} GB${r.stopped ? '（运行时已停止）' : ''}`);
         return r;
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
 
@@ -77,7 +79,7 @@ function createRuntimeDataHandlers({ appLog, appOperations, dialog, live, notify
         if (!r.ok) return { ok: false, error: r.error };
         return { ok: true, reclaimed: r.reclaimed, reclaimedMB: Math.round(r.reclaimed / 1048576) };
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     }),
   };

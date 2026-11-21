@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { safeFilePart } = require('./pkgname');
+const resources = require('./resources');
 const { assertShape, readJsonFile, writeJsonFile } = require('../application/json-state');
 
 /**
@@ -287,6 +288,26 @@ function resourcePreset(mode) {
   }
 }
 
+function normalizeResourcePatch(patch) {
+  const input = patch?.engine;
+  if (!isRecord(input)) return patch;
+  const hasMemory = Object.hasOwn(input, 'memoryMB');
+  const hasCores = Object.hasOwn(input, 'cores');
+  const hasDisk = Object.hasOwn(input, 'dataPartitionGB');
+  if (!hasMemory && !hasCores && !hasDisk) return patch;
+
+  // 只约束本次写入的资源值，不因为无关设置发生变化而改写历史配置。
+  const engine = { ...input };
+  const host = hasMemory || hasCores ? resources.hostProfile() : null;
+  if (hasMemory) {
+    engine.memoryMB = resources.clampMemoryMB(input.memoryMB, host.totalMB).mb;
+    if (engine.memoryMB > 0) engine.autoMemory = false;
+  }
+  if (hasCores) engine.cores = resources.clampCores(input.cores, host.cores).cores;
+  if (hasDisk) engine.dataPartitionGB = resources.configuredDataGB(input.dataPartitionGB);
+  return { ...patch, engine };
+}
+
 const store = {
   DATA_DIR, ICON_DIR, APK_DIR,
   // 商店（MSIX）打包版标记：main.js 据此关掉自更新、跳过需要管理员权限的内核驱动安装
@@ -298,7 +319,7 @@ const store = {
 
   saveSettings(patch) {
     const current = readSettings();
-    const next = deepMerge(settingsFrom(current.value), patch);
+    const next = deepMerge(settingsFrom(current.value), normalizeResourcePatch(patch));
     // 资源策略依然映射为旧版运行时读取的三个具体开关。
     if (patch && patch.engine && patch.engine.resourceMode) {
       Object.assign(next.engine, resourcePreset(next.engine.resourceMode));

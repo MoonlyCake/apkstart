@@ -21,7 +21,7 @@ const SETTINGS = {
   adbPath: '',
   runtime: { isoPath: '', sourcePreference: 'auto', autoMirror: true, giteeToken: '', mirrorPrefix: '', downloadConnections: 8 },
   engine: {
-    memoryMB: 4096, cores: 4, idleShutdownMinutes: 15, audio: true, liteMode: true,
+    memoryMB: 4096, cores: 4, autoMemory: true, idleShutdownMinutes: 15, audio: true, liteMode: true,
     prewarm: true, priorityMode: 'balanced', deepTrim: false, mouseRightBack: true,
     mouseWheelMode: 'smooth', mouseSideButtons: false, keymapEnabled: true,
     resourceMode: 'balanced', renderSize: 'auto', dataPartitionGB: 6, fastDns: true,
@@ -48,8 +48,18 @@ const DEBUG_ISSUES = [
 ];
 
 const settingsWrites = [];
+const confirmations = [];
+let confirmCount = 0;
+let resetCount = 0;
+let shortcutCount = 0;
+let driverLoads = 0;
+let resourceLoads = 0;
 const OVERRIDES = {
   'settings:get': () => SETTINGS,
+  'runtime:stop': () => ({ ok: false, error: '未确认退出' }),
+  'shortcut:rebuild': () => { shortcutCount += 1; return { ok: true, fixed: ['测试应用'] }; },
+  'app:confirm': () => { confirmCount += 1; return { response: confirmations.shift() ?? 0 }; },
+  'runtime:resetData': () => { resetCount += 1; return { ok: true, reclaimedMB: 1 }; },
   'settings:set': (patch) => {
     settingsWrites.push(patch);
     if (patch.engine) Object.assign(SETTINGS.engine, patch.engine);
@@ -65,8 +75,9 @@ const OVERRIDES = {
   'runtime:status': () => ({ mode: 'builtin', backend: 'builtin', backendLabel: '内置', installed: true, vmRunning: false, deviceOnline: false, ready: false, phase: 'idle', needsSetup: null, error: '', env: { adb: { ok: true }, emulator: { ok: true }, sysimg: { ok: true }, playImage: { ok: false, size: 0 } }, accel: { ok: true }, network: null }),
   'runtime:dataInfo': () => ({ avdDir: 'C:\\data\\avd', configuredGB: 6, actualGB: 6 }),
   'android:status': () => ({ running: false, wifi: true, airplane: false, anim: true, volume: 50, font: 1, density: 320 }),
-  'drivers:list': () => ({ drivers: [], errors: [] }),
+  'drivers:list': () => { driverLoads += 1; return { drivers: [], errors: [] }; },
   'preflight:run': () => ({ items: [] }),
+  'preflight:apply': () => ({ ok: true, settings: SETTINGS, recommended: { cores: 4 }, driverFile: 'test-fixture.json' }),
   'autodebug:state': () => ({ issues: DEBUG_ISSUES, summary: { total: 3, errors: 1, warns: 2, infos: 0, health: 'error', byCategory: [] }, at: Date.now(), running: false }),
   'autodebug:run': () => ({ issues: DEBUG_ISSUES, summary: { total: 3, errors: 1, warns: 2, infos: 0, health: 'error', byCategory: [] }, at: Date.now(), running: false }),
   'autodebug:config': () => SETTINGS.debug,
@@ -74,7 +85,7 @@ const OVERRIDES = {
   'app:updateCheck': () => ({ ok: true, current: '0.6.0', hasUpdate: false, sources: [] }),
   'runtime:log': () => [],
   'leftovers:scan': () => ({ items: [] }),
-  'engine:resources': () => ({ memory: {}, cores: {} }),
+  'engine:resources': () => { resourceLoads += 1; return { memory: {}, cores: {} }; },
   'display:state': () => ({ mode: 'window' }),
   'keymap:getPresets': () => ({ presets: [] }),
   'keymap:isEnabled': () => ({ enabled: true }),
@@ -84,11 +95,11 @@ const OVERRIDES = {
 const CHANNELS = [
   'apk:pick', 'apk:parse', 'apk:install', 'apk:reveal', 'dialog:openDir',
   'settings:restoreSystem', 'settings:refreshPointer', 'settings:unhook', 'settings:setSharedDir',
-  'runtime:probe', 'runtime:start', 'runtime:stop', 'runtime:vcRedist', 'runtime:installVcRedist',
-  'runtime:cleanup', 'runtime:resetData', 'runtime:repairNetwork', 'runtime:checkNetwork',
+  'runtime:probe', 'runtime:start', 'runtime:vcRedist', 'runtime:installVcRedist',
+  'runtime:cleanup', 'runtime:repairNetwork', 'runtime:checkNetwork',
   'runtime:setDataSize', 'runtime:resetAndResize', 'runtime:autoDeploy', 'runtime:startInstaller',
-  'runtime:markInstalled', 'runtime:resetInstall', 'app:confirm', 'display:set', 'display:toggle',
-  'shortcut:rebuild', 'preflight:apply', 'drivers:import', 'drivers:openFolder',
+  'runtime:markInstalled', 'runtime:resetInstall', 'display:set', 'display:toggle',
+  'drivers:import', 'drivers:openFolder',
   'drivers:exportTemplate', 'drivers:setEnabled', 'app:clearLocks', 'app:removeSelf',
   'app:clearOrphans', 'app:clearSnapshot', 'runtime:restart', 'assoc:register', 'assoc:unregister',
   'share:sync', 'share:open', 'shell:open', 'window:minimize', 'window:maximize', 'window:close',
@@ -174,6 +185,48 @@ app.whenReady().then(async () => {
     && document.body.innerText.includes('才会停止传入麦克风声音')`);
   step('关闭麦克风明确提示如何停止已在运行的输入', micOff
     && JSON.stringify(settingsWrites.at(-1)) === JSON.stringify({ engine: { hostMicrophone: false } }));
+
+  await evalJs(`(() => {
+    const field = document.getElementById('setCores');
+    field.value = '6';
+    field.dispatchEvent(new Event('change'));
+  })()`);
+  await new Promise((r) => setTimeout(r, 100));
+  step('修改核心数不会改变自动内存策略', SETTINGS.engine.autoMemory === true
+    && JSON.stringify(settingsWrites.at(-1)) === JSON.stringify({ engine: { cores: 6 } }));
+
+  const beforeApply = { driverLoads, resourceLoads };
+  await evalJs(`document.getElementById('btnPreflightApply').click()`);
+  await new Promise((r) => setTimeout(r, 130));
+  step('应用体检配置后即时刷新驱动和资源', driverLoads > beforeApply.driverLoads && resourceLoads > beforeApply.resourceLoads);
+
+  await evalJs(`document.getElementById('btnRebuildShortcuts').click()`);
+  await new Promise((r) => setTimeout(r, 100));
+  step('重建快捷方式一次点击只请求一次', shortcutCount === 1);
+  await evalJs(`document.getElementById('btnRebuildIntegrationShortcuts').click()`);
+  await new Promise((r) => setTimeout(r, 100));
+  step('集成页的重建快捷方式入口也只请求一次', shortcutCount === 2);
+
+
+  await evalJs(`document.getElementById('btnRuntimeStop').click()`);
+  await new Promise((r) => setTimeout(r, 100));
+  step('关机失败时不显示已停止', await evalJs(`document.getElementById('probeResult').textContent === '停止失败：未确认退出'`));
+
+  confirmations.push(1, 0);
+  await evalJs(`document.getElementById('btnResetData').click()`);
+  await new Promise((r) => setTimeout(r, 100));
+  step('取消第二次确认时不请求清空安卓数据', confirmCount === 2 && resetCount === 0);
+  confirmations.push(1, 1);
+  await evalJs(`document.getElementById('btnResetData').click()`);
+  await new Promise((r) => setTimeout(r, 100));
+  step('两次确认后才执行一次重置请求', confirmCount === 4 && resetCount === 1);
+
+  win.webContents.send('update:state', { ok: true, current: '0.6.0', tag: 'v9.9.9', hasUpdate: true });
+  await new Promise((r) => setTimeout(r, 100));
+  step('更新状态从独立页面模块同步到欢迎提示', await evalJs(`
+    document.getElementById('updateState').textContent.includes('v9.9.9')
+      && document.getElementById('welcomeTips').textContent.includes('v9.9.9')
+  `));
 
   // 点「显示与窗口」
   await evalJs(`document.querySelector('#setNav .set-nav-item[data-cat="display"]').click()`);

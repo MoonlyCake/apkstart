@@ -38,7 +38,7 @@ function fixtureRuntime(trace) {
     return result;
   };
   const fakeClient = (serial) => ({
-    serial,
+    serial, adbPath: runtime.adbPath(),
     shell: async (command, options) => trace.call('adb.shell', serial, command, options),
     exec: async (argv, options) => {
       const reply = trace.call('adb.exec', serial, argv, options);
@@ -49,10 +49,10 @@ function fixtureRuntime(trace) {
   runtime.client = fakeClient;
   runtime._probeClient = fakeClient(SERIAL);
   emu.setPriority = async (level, identity) => trace.call('emulator.priority', level, identity.pid);
-  emu.scheduleSnapshotSave = (_adbPath, { delay }) => trace.call('snapshot.schedule', delay);
+  emu.scheduleSnapshotSave = ({ delay }) => trace.call('snapshot.schedule', delay);
   runtime.prepare = async (client) => trace.call('guest.prepare', client.serial);
   emu._avdOwner = () => trace.call('avd.owner');
-  emu._adbGuestHealthy = async (_adbPath, identity) => trace.call('guest.healthy', identity.serial);
+  emu._adbGuestHealthy = async (_client, identity) => trace.call('guest.healthy', identity.serial);
   emu._consoleAlive = async (port) => trace.call('console.alive', port);
   runtime.inspectEmulatorOwnership = () => findOwnedEmulator({
     readOwner: emu._avdOwner,

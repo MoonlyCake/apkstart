@@ -10,7 +10,7 @@
  *
  * probe 回调由上层（Runtime）提供，用于判断 Android 是否真正就绪。
  */
-const { spawn, spawnSync, execFile } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -20,7 +20,7 @@ const doctor = require('./doctor');
 const drivers = require('./drivers');
 const userdata = require('./userdata');
 const audio = require('./audio-policy');
-const { adbEnvironment } = require('./adb');
+const { adbEnvironment, resolveAdbPort } = require('./adb');
 const { AVD_NAME, readAvdOwner } = require('./runtime-ownership');
 const SNAPSHOT_NAME = 'apkstart';
 
@@ -51,13 +51,13 @@ function describeExitCode(code) {
 }
 
 class EmulatorEngine {
-  constructor(appRoot) {
+  constructor(appRoot, { provisioner = new Provisioner(appRoot) } = {}) {
     this.appRoot = appRoot;
-    this.provisioner = new Provisioner(appRoot);
+    this.provisioner = provisioner;
     this.proc = null;
     this._log = [];
     this.port = 5554;
-    this.adbPort = Number(process.env.APKSTART_ADB_PORT) || 5044;
+    this.adbPort = resolveAdbPort();
     this.profile = null;
     this.attempts = [];
     this.lastDiagnosis = null;
@@ -561,7 +561,7 @@ class EmulatorEngine {
     // AVD 目录必须与 provisioner.paths().avdHome 一致：bundled 只读运行时（EXE 旁
     // resources/runtime）时 root/avd 不存在也不可写，AVD 要落到用户数据目录。
     const avdHome = doctor.shortPath(this.provisioner.paths().avdHome);
-    const adbPort = String(plan.adbPort || this.adbPort || '5044');
+    const adbPort = plan.adbPort ?? this.adbPort;
     const env = adbEnvironment(adbPort, {
       ...process.env,
       ANDROID_EMULATOR_USE_SYSTEM_LIBS: '',
@@ -866,13 +866,8 @@ class EmulatorEngine {
     return owner.state === 'live' && await stopOwnedAttempt(port);
   }
 
-  async _startAdbServer(port) {
-    const adb = this.provisioner.adbVersionPath() || 'adb';
-    return new Promise((resolve, reject) => {
-      execFile(adb, ['start-server'], {
-        timeout: 12000, windowsHide: true, env: adbEnvironment(port),
-      }, (error) => error ? reject(error) : resolve());
-    });
+  _startAdbServer(port) {
+    return this.provisioner.adbClient({ port }).startServer();
   }
 
   async ensureAdbServer(port = this.adbPort) {
@@ -925,36 +920,18 @@ class EmulatorEngine {
    * wlan0 就会一直 NO-CARRIER、拿不到 IP。这时「需要联网的页面」在应用里就是一块
    * 黑屏 —— 用户看到的「红果点同意后黑屏」就是这么来的，跟 GPU/渲染完全无关。
    *
-   * @param {string} [adbPath] 显式指定 adb 可执行文件（Runtime 有更权威的解析）
+   * @param {import('./adb').AdbClient} client 已由 Runtime 核验的目标 ADB 客户端
    * @returns {Promise<{ok:boolean, reason:string, gateway?:string, ip?:string}>}
    */
-  async checkNetwork(adbPath = '', { waitMs = 0, interval = 3000 } = {}) {
-    const fs = require('fs');
-    const path = require('path');
-    // 同 repairWifi：防住「把函数当路径传进来」这种调用错误
-    let adb = typeof adbPath === 'function' ? adbPath() : (adbPath || '');
-    if (!adb) {
-      try { adb = this.provisioner.adbVersionPath() || ''; } catch (_) { adb = ''; }
-    }
-    if (!adb) {
-      // adbVersionPath() 只查「版本文件」，很多安装形态下是空的；
-      // 直接按运行时根目录找 bundled 的 platform-tools 才稳。
-      try { adb = path.join(this.locate().root, 'platform-tools', 'adb.exe'); } catch (_) { adb = ''; }
-    }
-    if (!adb || !fs.existsSync(adb)) adb = 'adb';
-    const env = adbEnvironment(this.adbPort);
-    const sh = (cmd, timeout = 8000) => new Promise((resolve) => {
-      try {
-        execFile(adb, ['-s', this.serial, 'shell', cmd], { timeout, windowsHide: true, env }, (e, out) => {
-          resolve(e ? '' : String(out || ''));
-        });
-      } catch (_) { resolve(''); }
-    });
+  async checkNetwork(client, { waitMs = 0, interval = 3000, canProbe = async () => true } = {}) {
+    const sh = (cmd, timeout = 8000) => client.shell(cmd, { timeout });
+    if (!await canProbe()) return { ok: false, reason: 'guest-changed' };
     // 安卓的多路由表会让 `ip route` 的主表看起来是空的（默认路由在 per-interface 表里），
     // 而且 shell 的 uid 不在应用的 network 组里，`ping` 经常误报 "Network is unreachable"，
     // 哪怕 Wi-Fi 其实已经连上、应用也能正常上网。所以这里只认「有没有拿到 IPv4 地址」，
     // 再叠加 `cmd wifi status` 的连接状态做交叉确认，不用 ping 判断。
-    const addr = await sh('ip -o addr');
+    const addr = await sh('ip -o addr').catch(() => null);
+    if (addr === null) return { ok: false, reason: 'device-offline' };
     const ips = [];
     const re = /inet ((?:\d{1,3}\.){3}\d{1,3})\//g;
     let m = re.exec(addr);
@@ -963,7 +940,7 @@ class EmulatorEngine {
       if (!/^127\./.test(ip)) ips.push(ip);
       m = re.exec(addr);
     }
-    const wifi = await sh('cmd wifi status');
+    const wifi = await sh('cmd wifi status').catch(() => '');
     const connected = /Wifi is connected/i.test(wifi);
     if (!ips.length) {
       // Wi-Fi 关联 + DHCP 往往比 sys.boot_completed 晚几十秒才完成。
@@ -974,8 +951,8 @@ class EmulatorEngine {
           // eslint-disable-next-line no-await-in-loop
           await new Promise((r) => setTimeout(r, interval));
           // eslint-disable-next-line no-await-in-loop
-          const again = await this.checkNetwork(adbPath, { waitMs: 0 });
-          if (again.ok) return again;
+          const again = await this.checkNetwork(client, { canProbe });
+          if (again.ok || again.reason === 'guest-changed' || again.reason === 'device-offline') return again;
         }
       }
       return { ok: false, reason: connected ? 'no-ip-address' : 'wifi-not-connected', addrs: ips };
@@ -989,12 +966,12 @@ class EmulatorEngine {
     // 就要花 4 秒探测，反而把启动拖慢。结论放进 reachable，不改 ok：有 IP 就先
     // 让应用起来，一次 DNS 抖动不该卡住整个启动。
     let reachable = null;
-    if (waitMs > 0) {
+    if (waitMs > 0 && await canProbe()) {
       const probe = await sh(
         "echo -e 'GET /generate_204 HTTP/1.0\\r\\nHost: connect.rom.miui.com\\r\\n\\r\\n' "
         + "| nc -w 4 connect.rom.miui.com 80 2>/dev/null | head -1",
         7000,
-      );
+      ).catch(() => '');
       reachable = /HTTP\/1\.[01]\s+204/.test(probe);
     }
     return { ok: true, reason: '', gateway: gw, ip, wifiConnected: connected, reachable };
@@ -1014,53 +991,38 @@ class EmulatorEngine {
    *
    * @returns {Promise<boolean>} 是否已连上
    */
-  async repairWifi(adbPath = '') {
-    const fs = require('fs');
-    const path = require('path');
-    // 防御：调用方可能误把函数本身传进来（rt.adbPath 是个方法）。
-    let adb = typeof adbPath === 'function' ? adbPath() : (adbPath || '');
-    if (!adb) {
-      try { adb = path.join(this.locate().root, 'platform-tools', 'adb.exe'); } catch (_) { adb = ''; }
-    }
-    if (!adb || !fs.existsSync(adb)) adb = 'adb';
-    const env = adbEnvironment(this.adbPort);
-    const sh = (cmd, timeout = 10000) => new Promise((resolve) => {
-      try {
-        execFile(adb, ['-s', this.serial, 'shell', cmd], { timeout, windowsHide: true, env }, (e, out) => {
-          resolve(e ? '' : String(out || ''));
-        });
-      } catch (_) { resolve(''); }
-    });
+  async repairWifi(client, { canMutate = async () => true, pause = sleep } = {}) {
+    const sh = (cmd, maxBuffer) => client.shell(cmd, { timeout: 10000, maxBuffer });
+    const wifi = () => sh('cmd wifi status').catch(() => '');
+    const write = async (cmd, bestEffort = false) => {
+      // Waiting for Settings/UI can outlive the owned guest; recheck before each write.
+      if (!await canMutate()) throw new Error('安卓运行时已更换，取消网络修复');
+      return bestEffort ? sh(cmd).catch(() => '') : sh(cmd);
+    };
     // 连上之后顺手把「联网验证」的探测地址换成国内可达的。
     // 安卓默认拿 connectifitycheck.gstatic.com 判断「是否真能上网」，国内连不上它，
     // 系统就一直给网络打「!」标记（已连接但无法访问互联网）。部分应用会因此
     // 自我判定为离线、拒绝加载内容。换成一个返回 204 的国内端点即可。
     const tune = async () => {
-      await sh('settings put global captive_portal_http_url http://connect.rom.miui.com/generate_204');
-      await sh('settings put global captive_portal_https_url https://connect.rom.miui.com/generate_204');
-      await sh('settings put global captive_portal_mode 0');
+      await write('settings put global captive_portal_http_url http://connect.rom.miui.com/generate_204', true);
+      await write('settings put global captive_portal_https_url https://connect.rom.miui.com/generate_204', true);
+      await write('settings put global captive_portal_mode 0', true);
     };
     // 已经连上就别折腾了
-    if (/Wifi is connected/i.test(await sh('cmd wifi status'))) {
+    if (/Wifi is connected/i.test(await wifi())) {
       await tune();
       return true;
     }
     // 开关被关掉时（用户手滑 / 之前 -svc wifi disable）先打开
-    await sh('svc wifi enable');
-    await new Promise((r) => setTimeout(r, 1500));
+    await write('svc wifi enable', true);
+    await pause(1500);
 
     // 打开 Wi-Fi 设置页，用 uiautomator 找到 AndroidWifi 那一行再点它。
     // 比按坐标点稳：不同分辨率 / 语言下坐标都不一样。
-    await sh('am start -a android.settings.WIFI_SETTINGS');
-    await new Promise((r) => setTimeout(r, 2500));
-    await sh('uiautomator dump /sdcard/ui.xml');
-    const xml = await new Promise((resolve) => {
-      try {
-        execFile(adb, ['-s', this.serial, 'shell', 'cat', '/sdcard/ui.xml'],
-          { timeout: 10000, windowsHide: true, env, maxBuffer: 8 * 1024 * 1024 },
-          (e, out) => resolve(e ? '' : String(out || '')));
-      } catch (_) { resolve(''); }
-    });
+    await write('am start -a android.settings.WIFI_SETTINGS');
+    await pause(2500);
+    await write('uiautomator dump /sdcard/ui.xml');
+    const xml = await sh('cat /sdcard/ui.xml', 8 * 1024 * 1024);
     // 节点形如 <node text="AndroidWifi" ... bounds="[x1,y1][x2,y2]" />
     const re = /<node[^>]*\btext="([^"]*)"[^>]*\bbounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/g;
     let m = re.exec(xml);
@@ -1069,9 +1031,9 @@ class EmulatorEngine {
       if (/AndroidWifi/i.test(label)) {
         const cx = Math.round((Number(m[2]) + Number(m[4])) / 2);
         const cy = Math.round((Number(m[3]) + Number(m[5])) / 2);
-        await sh(`input tap ${cx} ${cy}`);
-        await new Promise((r) => setTimeout(r, 6000));
-        if (/Wifi is connected/i.test(await sh('cmd wifi status'))) {
+        await write(`input tap ${cx} ${cy}`);
+        await pause(6000);
+        if (/Wifi is connected/i.test(await wifi())) {
           await tune();
           return true;
         }
@@ -1092,7 +1054,7 @@ class EmulatorEngine {
    * 启动 + 自动重试。
    * @param {Function} probe 异步回调，返回 'ok' | 'pending' | 'fatal'
    */
-  async start({ headless = false, onLog = () => {}, probe = null, maxAttempts = 4, stopOwnedAttempt } = {}) {
+  async start({ headless = false, onLog = () => {}, probe = null, networkProbe, maxAttempts = 4, stopOwnedAttempt } = {}) {
     // 已启动实例只由 Runtime 按 AVD 身份接管，监听端口本身不能作为归属证明。
     this._assertAvdWritable();
     if (this.running()) throw new Error('ApkStart 已有启动尝试在运行。');
@@ -1130,8 +1092,7 @@ class EmulatorEngine {
       onLog(msg);
       return { ok: false, error: msg, needsSpace: true, attempts: [] };
     }
-    const adbPort = await doctor.freeAdbPort(this.adbPort);
-    this.adbPort = adbPort;
+    const adbPort = this.adbPort;
 
     // 硬件探测、端口选择和 ADB 启动互不依赖。
     const [accelInfo, verInfo, startPort, adbReady] = await Promise.all([
@@ -1341,9 +1302,9 @@ class EmulatorEngine {
         // 而且不再建议破坏性操作。
         let network = null;
         try {
-          network = await this.checkNetwork('', { waitMs: 12000, interval: 3000 });
+          network = await networkProbe?.(this.serial, { waitMs: 12000, interval: 3000 }) ?? null;
         } catch (_) { /* 体检失败不算启动失败 */ }
-        if (network && !network.ok) {
+        if (['wifi-not-connected', 'no-ip-address'].includes(network?.reason)) {
           onLog('⚠ 安卓虚拟机暂时没连上网（Wi-Fi 未关联或没拿到地址）。'
             + '需要联网的应用打开后可能一直黑屏：稍后重开应用即可；'
             + '若持续无网，可在「设置 → 修复网络」重连（不会删除已装应用）。');
@@ -1401,9 +1362,8 @@ class EmulatorEngine {
    * （快照要写 1~3GB），体感反而更慢。改成「空闲时再存」，并由 Runtime 在
    * 最后一个应用窗口关闭时触发；关机前若还没来得及存，也会补一次。
    */
-  async saveSnapshotNow(adbPath, { timeout = 45000, identity } = {}) {
-    if (!adbPath) return false;
-    const ok = await this._saveViaAdb(adbPath, { timeout, identity });
+  async saveSnapshotNow({ client, timeout = 45000, identity } = {}) {
+    const ok = await this._saveViaAdb({ client, timeout, identity });
     // emulator 的 save 命令可能在写盘中途就回 OK，这里按文件完整性再确认一次，
     // 只有 snapshot.pb 真正落盘才算数（否则下次加载会失败并白等几秒）。
     if (!ok) return false;
@@ -1414,8 +1374,7 @@ class EmulatorEngine {
    * 安排一次「空闲时保存快照」。
    * 只排一次；如果到点时容器还有应用在前台，就推迟到真正空闲。
    */
-  scheduleSnapshotSave(adbPath, { delay = 20000, isIdle = () => true, resolveIdentity } = {}) {
-    if (!adbPath) return;
+  scheduleSnapshotSave({ delay = 20000, isIdle = () => true, resolveGuest } = {}) {
     if (this._snapTimer) clearTimeout(this._snapTimer);
     const arm = (ms) => {
       this._snapTimer = setTimeout(async () => {
@@ -1431,8 +1390,8 @@ class EmulatorEngine {
           return;
         }
         try {
-          const identity = await resolveIdentity?.();
-          if (identity) this._snapSaved = await this.saveSnapshotNow(adbPath, { identity });
+          const guest = await resolveGuest();
+          if (guest) this._snapSaved = await this.saveSnapshotNow(guest);
         } catch (_) { /* 下次空闲时可再试 */ }
       }, ms);
       if (this._snapTimer.unref) this._snapTimer.unref();
@@ -1446,12 +1405,12 @@ class EmulatorEngine {
   }
 
   /** 保存快照并关闭已经核验的实例，不把失败误报成退出成功。 */
-  async stop({ adbPath, identity } = {}) {
+  async stop({ client, identity } = {}) {
     if (!identity || !await identity.revalidate()) return false;
     this.cancelSnapshotSave();
-    const healthy = await this._adbGuestHealthy(adbPath, identity);
+    const healthy = await this._adbGuestHealthy(client, identity);
     if (healthy && this.snapshotWorthSaving !== false) {
-      await this._saveViaAdb(adbPath, { timeout: 60000, identity, healthy });
+      await this._saveViaAdb({ client, timeout: 60000, identity, healthy });
     }
     // 存盘可能耗时数十秒，关机前再次确认仍是同一份锁和监听者。
     if (!await identity.revalidate()) return false;
@@ -1512,13 +1471,11 @@ class EmulatorEngine {
    * 内存 + 磁盘，guest 里就没有 host 的 adbkey.pub，下次恢复还是 unauthorized，
    * 每轮探测的 shell 都抛异常，干等 240s 还被误诊成显卡/虚拟化问题。
    */
-  async _adbGuestHealthy(adbPath, identity) {
-    if (!adbPath || !identity || !await identity.revalidate({ adbPort: true })) return false;
+  async _adbGuestHealthy(client, identity) {
+    if (!client || !identity || !await identity.revalidate({ adbPort: true })) return false;
     try {
-      const { AdbClient } = require('./adb');
-      const probe = new AdbClient({ adbPath, serial: identity.serial });
-      const state = await probe.deviceState();
-      const out = await probe.shell('getprop sys.boot_completed', { timeout: 6000 }).catch(() => '');
+      const state = await client.deviceState();
+      const out = await client.shell('getprop sys.boot_completed', { timeout: 6000 }).catch(() => '');
       return state === 'device' && String(out).trim() === '1';
     } catch (_) {
       return false; // 读不到就按不健康处理
@@ -1529,9 +1486,8 @@ class EmulatorEngine {
    * 用 adb 触发一次快照保存（失败返回 false，调用方决定要不要再试）。
    * 只有 guest 健康时才存，宁可下次冷启动 20 多秒，也不能存一份「开机必失败」的毒快照。
    */
-  async _saveViaAdb(adbPath, { timeout = 45000, identity, healthy } = {}) {
-    if (!adbPath) return false;
-    if (!(healthy ?? await this._adbGuestHealthy(adbPath, identity))) {
+  async _saveViaAdb({ client, timeout = 45000, identity, healthy } = {}) {
+    if (!(healthy ?? await this._adbGuestHealthy(client, identity))) {
       this.log('跳过快照保存：guest 未授权或未开机完成（避免存入未授权的毒快照）');
       return false;
     }

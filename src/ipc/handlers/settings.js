@@ -1,6 +1,6 @@
 'use strict';
 
-const { sanitizeResourcePatch } = require('../resource-settings');
+const { ipcFailure } = require('../failure');
 
 function createSettingsHandlers({
   applyAutoStart, copyDirContents, displaySettings, fs, getCurrentAppPkg, live,
@@ -9,8 +9,7 @@ function createSettingsHandlers({
   return {
     'settings:get': () => store.getSettings(),
 
-    'settings:set': (_e, rawPatch) => {
-      const patch = sanitizeResourcePatch(rawPatch);
+    'settings:set': (_e, patch) => {
       const next = store.saveSettings(patch);
       if (patch && patch.autoStart !== undefined) applyAutoStart();
       if (patch && patch.display && live.appWin && live.appWin.isOpen) {
@@ -57,7 +56,7 @@ function createSettingsHandlers({
         store.saveSettings({ sharedDir: newDir });
         return { ok: true, oldDir, newDir };
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
 

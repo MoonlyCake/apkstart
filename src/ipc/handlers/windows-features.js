@@ -1,5 +1,7 @@
 'use strict';
 
+const { ipcFailure } = require('../failure');
+
 function createWindowsFeaturesHandlers({ enableWhpxFeatures, fs, live, MSIX_ACCEL_HINT, path, send, shell, store }) {
   // 微软 VC++ 2015-2022 x64 运行库：安卓模拟器（Qt6）与 qemu 都依赖它。
   // 缺了在「其他电脑」上会直接起不来（0xc0000135 / MSVCP140 缺失）。
@@ -49,7 +51,7 @@ function createWindowsFeaturesHandlers({ enableWhpxFeatures, fs, live, MSIX_ACCE
         const accel = await live.runtime.provisioner.emulatorAccel();
         return { ok: accel.ok, accel, error: accel.ok ? '' : accel.note };
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
 
@@ -113,7 +115,7 @@ function createWindowsFeaturesHandlers({ enableWhpxFeatures, fs, live, MSIX_ACCE
         const after = await live.runtime.provisioner.emulatorAccel();
         return { ok: after.ok, accel: after, note: after.ok ? 'AEHD 硬件加速已启用' : after.note };
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
 
@@ -134,7 +136,7 @@ function createWindowsFeaturesHandlers({ enableWhpxFeatures, fs, live, MSIX_ACCE
       } catch (e) {
         // 极少见：被组策略挡住 / 文件缺失。退到设置页，至少给用户一个入口
         shell.openExternal('ms-settings:optionalfeatures').catch(() => {});
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
   };

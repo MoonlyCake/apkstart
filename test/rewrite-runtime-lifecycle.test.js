@@ -149,7 +149,7 @@ test('failed Wi-Fi recovery never initiates a data reset', async () => {
   const runtime = runtimeFixture();
   const trace = [];
   Object.defineProperty(runtime, 'vmRunning', { value: true });
-  runtime.emulator.repairWifi = async () => { trace.push('wifi'); return false; };
+  runtime.repairWifi = async () => { trace.push('wifi'); return false; };
   runtime._lifecycle = { restart: async () => { trace.push('cold'); return { ok: true }; } };
   runtime.adbPath = () => 'fixture-adb';
   runtime.waitForNetwork = async () => { trace.push('network'); return { ok: false, reason: 'wifi-not-connected' }; };
@@ -167,7 +167,7 @@ test('confirmed stop retires its lease and discards already pending network prob
   const entered = deferred();
   runtime._ensureInner = async () => ({ ok: true, client: {} });
   runtime.adbPath = () => 'fixture-adb';
-  runtime.client = () => ({ isOnline: async () => true });
+  runtime._networkEndpoint = async () => ({ client: {}, revalidate: async () => true });
   runtime.inspectEmulatorOwnership = async () => ({ state: 'absent' });
   runtime.emulator.checkNetwork = async () => { entered.resolve(); return inFlight.promise; };
   const old = await runtime.ensure();

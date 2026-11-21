@@ -1,5 +1,7 @@
 'use strict';
 
+const { ipcFailure } = require('../failure');
+
 function createAndroidHandlers({ getCurrentAppPkg, keymapEngine, KEYMAP_PRESETS, live, store }) {
   return {
     'shell:back': async () => { await live.runtime.client().keyBack(); },
@@ -7,7 +9,7 @@ function createAndroidHandlers({ getCurrentAppPkg, keymapEngine, KEYMAP_PRESETS,
     'shell:forward': async () => { await live.runtime.client().keyForward(); },
 
     'android:status': async () => {
-      try { return { ok: true, ...(await live.androidSet.status()) }; } catch (e) { return { ok: false, error: e.message }; }
+      try { return { ok: true, ...(await live.androidSet.status()) }; } catch (e) { return ipcFailure(e); }
     },
 
     'android:set': async (_e, { key, value }) => {
@@ -21,23 +23,23 @@ function createAndroidHandlers({ getCurrentAppPkg, keymapEngine, KEYMAP_PRESETS,
           case 'density': return { ok: true, ...(await live.androidSet.setDensity(value)) };
           default: return { ok: false, error: `未知设置项 ${key}` };
         }
-      } catch (e) { return { ok: false, error: e.message }; }
+      } catch (e) { return ipcFailure(e); }
     },
 
     'android:open': async (_e, action) => {
-      try { return { ok: true, ...(await live.androidSet.open(action)) }; } catch (e) { return { ok: false, error: e.message }; }
+      try { return { ok: true, ...(await live.androidSet.open(action)) }; } catch (e) { return ipcFailure(e); }
     },
 
     'android:tune': async (_e, pkg) => {
-      try { return { ok: true, ...(await live.androidSet.tune({ pkg })) }; } catch (e) { return { ok: false, error: e.message }; }
+      try { return { ok: true, ...(await live.androidSet.tune({ pkg })) }; } catch (e) { return ipcFailure(e); }
     },
 
     'android:permissions': async (_e, pkg) => {
-      try { return { ok: true, rows: await live.androidSet.permissions(pkg) }; } catch (e) { return { ok: false, error: e.message }; }
+      try { return { ok: true, rows: await live.androidSet.permissions(pkg) }; } catch (e) { return ipcFailure(e); }
     },
 
     'android:grantAll': async (_e, pkg) => {
-      try { return { ok: true, ...(await live.androidSet.grantAll(pkg)) }; } catch (e) { return { ok: false, error: e.message }; }
+      try { return { ok: true, ...(await live.androidSet.grantAll(pkg)) }; } catch (e) { return ipcFailure(e); }
     },
 
     // ---- 按键映射 ----

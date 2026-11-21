@@ -11,7 +11,7 @@ const { spawn } = require('child_process');
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
-const { AdbClient, isUnauthorizedError } = require('./adb');
+const { isUnauthorizedError } = require('./adb');
 const store = require('./store');
 const { Provisioner } = require('./provision');
 const { EmulatorEngine } = require('./emulator');
@@ -57,7 +57,7 @@ class Runtime {
   constructor(appRoot) {
     this.appRoot = appRoot;
     this.provisioner = new Provisioner(appRoot);
-    this.emulator = new EmulatorEngine(appRoot);
+    this.emulator = new EmulatorEngine(appRoot, { provisioner: this.provisioner });
     this.vmProc = null;
     this.vmStarting = false;
     this.installing = false;
@@ -127,24 +127,20 @@ class Runtime {
 
   // ---------------- 基础 ----------------
 
-  adbPath() {
-    const s = this.settings;
-    const p = this.provisioner.paths();
-    // 自带 adb 永远排在第一位：同一台设备只认一份 adb 状态，不会出现 offline 反复抖动。
-    if (fs.existsSync(p.adbExe)) return p.adbExe;
-    if (s.adbPath && fs.existsSync(s.adbPath)) return s.adbPath;
-    const local = path.join(this.appRoot, 'tools', 'platform-tools', 'adb.exe');
-    if (fs.existsSync(local)) return local;
-    return AdbClient.resolveAdb('', this.appRoot);
+  adbPath() { return this.provisioner.adbPath(); }
+
+  adbClient(serial, adbPath = this.adbPath()) {
+    return this.provisioner.adbClient({ adbPath, serial, port: this.emulator.adbPort });
   }
 
   client(serial) {
     const useSerial = serial || this.emuSerial;
     const adbPath = this.adbPath();
-    if (!this._client || this._client.serial !== useSerial || this._client.adbPath !== adbPath) {
-      // 换端口/换 adb 时别把旧的常驻 adb shell 留在后台占着连接
-      if (this._client && this._client.disposeInput) this._client.disposeInput();
-      this._client = new AdbClient({ adbPath, serial: useSerial });
+    if (!this._client || this._client.serial !== useSerial || this._client.adbPath !== adbPath
+      || this._client.serverPort !== this.emulator.adbPort) {
+      // Releasing the old input pipe matters when the selected executable changes.
+      this._client?.disposeInput?.();
+      this._client = this.adbClient(useSerial, adbPath);
     }
     return this._client;
   }
@@ -180,7 +176,7 @@ class Runtime {
     const n = this._lastNetwork;
     if (n && Date.now() - n.at < 60000) return;  // 一分钟内刚查过，别重复
     this._netProbing = generation;
-    this.emulator.checkNetwork(this.adbPath())
+    this.checkNetwork()
       .then((r) => {
         if (generation !== this.guestGeneration || this._networkTransitioning()) return;
         this._lastNetwork = { ok: !!(r && r.ok), ip: (r && r.ip) || '', reason: (r && r.reason) || '', at: Date.now() };
@@ -378,8 +374,10 @@ class Runtime {
           if (probeIdentity?.serial !== serial) return 'pending';
           nextOwnerCheck = Date.now() + 2500;
         }
-        if (!this._probeClient || this._probeClient.serial !== serial) {
-          this._probeClient = new AdbClient({ adbPath: this.adbPath(), serial });
+        const adbPath = this.adbPath();
+        if (!this._probeClient || this._probeClient.serial !== serial || this._probeClient.adbPath !== adbPath
+          || this._probeClient.serverPort !== this.emulator.adbPort) {
+          this._probeClient = this.adbClient(serial, adbPath);
         }
         const c = this._probeClient;
         try {
@@ -437,6 +435,7 @@ class Runtime {
         headless: this.settings.engine.headless !== false,
         onLog,
         probe,
+        networkProbe: (startupSerial, options) => this._checkNetwork({ ...options, startupSerial }),
         stopOwnedAttempt: (port) => this.stopOwnedAttempt(port),
       });
       // start() 失败时是「返回 {ok:false}」而不是抛异常（磁盘不足、多次重试仍失败等）。
@@ -476,10 +475,10 @@ class Runtime {
   /** 空闲时保存 quickboot 快照：只在没有应用窗口时写盘，避免和应用启动抢 I/O */
   _armSnapshotSave(delay = 20000) {
     if (!this.emulator.running()) return;
-    this.emulator.scheduleSnapshotSave(this.adbPath(), {
+    this.emulator.scheduleSnapshotSave({
       delay,
       isIdle: () => this.sessionActivity?.isIdle ?? true,
-      resolveIdentity: () => this.ownedEmulator(),
+      resolveGuest: () => this._emulatorGuest(),
     });
   }
 
@@ -496,14 +495,14 @@ class Runtime {
    */
   forceSnapshotSave(delay = 3000) {
     if (!this.emulator.running()) return;
-    this.emulator.scheduleSnapshotSave(this.adbPath(), {
-      delay, isIdle: () => true, resolveIdentity: () => this.ownedEmulator(),
+    this.emulator.scheduleSnapshotSave({
+      delay, resolveGuest: () => this._emulatorGuest(),
     });
   }
 
   async saveOwnedSnapshot(timeout = 45000) {
-    const identity = await this.ownedEmulator();
-    return !!identity && this.emulator.saveSnapshotNow(this.adbPath(), { timeout, identity });
+    const guest = await this._emulatorGuest();
+    return !!guest && this.emulator.saveSnapshotNow({ ...guest, timeout });
   }
 
   /**
@@ -764,7 +763,7 @@ class Runtime {
     }
     const identity = ownership.emulator;
     if (identity) {
-      const stopped = await this.emulator.stop({ adbPath: this.adbPath(), identity });
+      const stopped = await this.emulator.stop({ client: this.client(this._emulatorGuestSerial(identity)), identity });
       return stopped ? this._recordGuestStopped() : false;
     }
     const proc = this.vmProc;
@@ -885,7 +884,7 @@ class Runtime {
       readOwner: () => this.avdOwner(),
       readListeners: () => this.loopbackOwners(),
       // 控制台不经过 adb server，单独的客户端也不会替换 guest 的常驻输入会话。
-      consoleClient: (serial) => new AdbClient({ adbPath: this.adbPath(), serial }),
+      consoleClient: (serial) => this.adbClient(serial),
     });
   }
 
@@ -909,14 +908,33 @@ class Runtime {
     } catch (_) { return false; }
   }
 
-  async trackedQemuClient() {
-    const proc = this.vmProc;
-    if (!proc || proc.killed || !proc.pid) return null;
+  async _ownsQemuAdb(proc) {
+    if (!proc?.pid || proc.killed) return false;
     try {
       const listeners = await this.loopbackOwners();
-      return this.vmProc === proc && !proc.killed && ownsPort(listeners, QEMU_ADB_PORT, proc.pid)
-        ? this.client(QEMU_SERIAL) : null;
-    } catch (_) { return null; }
+      return this.vmProc === proc && !proc.killed && ownsPort(listeners, QEMU_ADB_PORT, proc.pid);
+    } catch (_) { return false; }
+  }
+
+  async trackedQemuClient() {
+    return await this._ownsQemuAdb(this.vmProc) ? this.client(QEMU_SERIAL) : null;
+  }
+
+  _emulatorGuestSerial(identity) {
+    const alias = '127.0.0.1:' + (identity.port + 1);
+    // A previously verified TCP transport is useful for guest commands only, never 'adb emu'.
+    return this.emuSerial === alias ? alias : identity.serial;
+  }
+
+  async _emulatorGuest(startupSerial) {
+    const identity = await this.ownedEmulator();
+    if (!identity || (startupSerial && identity.serial !== startupSerial)) return null;
+    const serial = startupSerial || this._emulatorGuestSerial(identity);
+    return {
+      identity,
+      client: this.client(serial),
+      revalidate: () => identity.revalidate({ adbPort: serial !== identity.serial }),
+    };
   }
 
   async adoptExisting({ onLog = () => {} } = {}) {
@@ -1426,9 +1444,40 @@ class Runtime {
    *
    * @returns {Promise<boolean>} 是否已连上
    */
-  async repairWifi(adbPath = '') {
-    const adb = adbPath || (typeof this.adbPath === 'function' ? this.adbPath() : '');
-    return this.emulator.repairWifi(adb).catch(() => false);
+  async _networkEndpoint(startupSerial) {
+    if (!startupSerial && this.vmProc) {
+      const proc = this.vmProc;
+      if (!await this._ownsQemuAdb(proc)) return null;
+      return { client: this.client(QEMU_SERIAL), revalidate: () => this._ownsQemuAdb(proc) };
+    }
+    return this._emulatorGuest(startupSerial);
+  }
+
+  checkNetwork() { return this._checkNetwork(); }
+
+  async _checkNetwork({ startupSerial, waitMs, interval } = {}) {
+    const generation = this.guestGeneration;
+    const current = () => generation === this.guestGeneration && (!!startupSerial || !this._networkTransitioning());
+    const replaced = { ok: false, reason: 'guest-changed' };
+    if (!current()) return replaced;
+    const guest = await this._networkEndpoint(startupSerial);
+    if (!current()) return replaced;
+    if (!guest) return { ok: false, reason: 'device-offline' };
+    const canProbe = async () => current() && await guest.revalidate() && current();
+    const result = await this.emulator.checkNetwork(guest.client, { waitMs, interval, canProbe });
+    return result.reason !== 'guest-changed' && await canProbe() ? result : replaced;
+  }
+
+  async repairWifi() {
+    const generation = this.guestGeneration;
+    const current = () => generation === this.guestGeneration && !this._networkTransitioning();
+    if (!current()) return false;
+    const guest = await this._networkEndpoint();
+    if (!guest) return false;
+    const canMutate = async () => current() && await guest.revalidate() && current();
+    if (!await canMutate()) return false;
+    const repaired = await this.emulator.repairWifi(guest.client, { canMutate }).catch(() => false);
+    return repaired && await canMutate();
   }
 
   /**
@@ -1441,7 +1490,7 @@ class Runtime {
    *
    * @returns {Promise<{ok:boolean,reason:string,ip?:string,gateway?:string}>}
    */
-  async waitForNetwork({ timeoutMs = 90000, onLog = () => {}, adbPath = '' } = {}) {
+  async waitForNetwork({ timeoutMs = 90000, onLog = () => {} } = {}) {
     const generation = this.guestGeneration;
     const changed = () => generation !== this.guestGeneration || this._networkTransitioning();
     const replaced = { ok: false, reason: 'guest-changed' };
@@ -1467,18 +1516,15 @@ class Runtime {
     let notConnectedStreak = 0;
     while (Date.now() - t0 < timeoutMs) {
       if (changed()) return replaced;
-      const online = await this.client().isOnline().catch(() => false);
-      if (changed()) return replaced;
-      if (!online) {
+      last = await this.checkNetwork().catch(() => null);
+      if (changed() || last?.reason === 'guest-changed') return replaced;
+      if (last?.reason === 'device-offline') {
         // 刚重启的虚拟机会有一段时间连 adb 都还没上线，不能一看到 offline 就放弃
         // （之前就是这样：重置数据后立刻返回 device-offline，判定「修复失败」）。
         if (!offlineSince) offlineSince = Date.now();
         if (Date.now() - offlineSince > 45000) return done({ ok: false, reason: 'device-offline' });
       } else {
         offlineSince = 0;
-        // eslint-disable-next-line no-await-in-loop
-        last = await this.emulator.checkNetwork(adbPath || this.adbPath()).catch(() => null);
-        if (changed()) return replaced;
         if (last && last.ok) return done(last);
         // `wifi-not-connected` 是「Wi-Fi 压根没关联上」，不是「关联了还在等 DHCP」。
         // 这种状态下死等超时纯属浪费：本轮开机它不会自己连上（实机上 AndroidWifi
@@ -1526,7 +1572,7 @@ class Runtime {
       this._wifiRepairTried = true;
       onLog('虚拟机连不上 Wi-Fi，正在尝试重新连接…');
       try {
-        const fixed = await this.emulator.repairWifi(this.adbPath());
+        const fixed = await this.repairWifi();
         if (fixed) {
           net = await this.waitForNetwork({ onLog, timeoutMs: 15000 });
           if (net && net.ok) {
@@ -1578,7 +1624,7 @@ class Runtime {
       }
       this._wifiRepairTried = true;
       let fixed = false;
-      try { fixed = await this.emulator.repairWifi(this.adbPath()); } catch (_) { fixed = false; }
+      try { fixed = await this.repairWifi(); } catch (_) { fixed = false; }
       if (fixed) {
         const net1 = await this.waitForNetwork({ onLog, timeoutMs: 30000 });
         if (net1 && net1.ok) {

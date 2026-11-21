@@ -1,5 +1,7 @@
 'use strict';
 
+const { ipcFailure } = require('../failure');
+
 function createUpdatesHandlers({ app, cancelUpdate, live, quitForRestart, runUpdate, setUpdateInfo, shell, Updater }) {
   return {
     'app:updateCheck': async (_e, opts = {}) => {
@@ -9,7 +11,7 @@ function createUpdatesHandlers({ app, cancelUpdate, live, quitForRestart, runUpd
         setUpdateInfo(info);
         return { ok: true, ...info };
       } catch (e) {
-        return { ok: false, error: e.message, current: app.getVersion() };
+        return { ...ipcFailure(e), current: app.getVersion() };
       }
     },
 

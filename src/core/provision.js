@@ -16,6 +16,7 @@ const { ZipArchive, ZipFile, resolveZipEntry } = require('./zip');
 const { Sources } = require('./sources');
 const { cmpVer } = require('./version');
 const { createAehdPackage } = require('./aehd-package');
+const { AdbClient, resolveAdbPath } = require('./adb');
 
 const IS_WIN = process.platform === 'win32';
 const aehdPackage = createAehdPackage();
@@ -380,23 +381,28 @@ class Provisioner {
     return this._hypervisor;
   }
 
-  async adbVersion() {
-    // 30s 缓存，避免状态轮询频繁拉起外部进程
-    if (this._adbCache && Date.now() - this._adbCache.at < 30000) return this._adbCache.value;
-    const { adbExe, adbDir } = this.paths();
-    const candidates = [adbExe, path.join(this.appRoot, 'tools', 'platform-tools', 'adb.exe')];
-    for (const c of candidates) {
-      if (!fs.existsSync(c)) continue;
-      const r = await run(c, ['version'], { timeout: 10000 });
-      if (r.ok) {
-        const m = /version\s+([\d.]+)/i.exec(r.stdout);
-        const v = { ok: true, path: c, version: m ? m[1] : r.stdout.split('\n')[0].trim() };
-        this._adbCache = { at: Date.now(), value: v };
-        return v;
-      }
+  adbPath({ allowPath = true } = {}) {
+    return resolveAdbPath({
+      bundled: this.paths().adbExe, configured: store.getSettings().adbPath, appRoot: this.appRoot, allowPath,
+    });
+  }
+
+  adbClient({ adbPath = this.adbPath(), serial, port } = {}) {
+    return new AdbClient({ adbPath, serial, port });
+  }
+
+  async adbVersion(adbPath = this.adbPath()) {
+    // Cache only the version of the executable actually selected for this runtime.
+    if (this._adbCache?.adbPath === adbPath && Date.now() - this._adbCache.at < 30000) return this._adbCache.value;
+    let value;
+    try {
+      const version = await this.adbClient({ adbPath }).version();
+      value = { ok: true, path: adbPath, version };
+    } catch (_) {
+      value = { ok: false, path: '', version: '' };
     }
-    this._adbCache = { at: Date.now(), value: { ok: false, path: '', version: '' } };
-    return this._adbCache.value;
+    this._adbCache = { at: Date.now(), adbPath, value };
+    return value;
   }
 
   async qemuVersion() {
@@ -539,7 +545,8 @@ class Provisioner {
     onProgress({ stage: 'extract', message: '解压 adb…', percent: 92 });
     await this.extractZip(zipPath, p.root);
 
-    const v = await this.adbVersion();
+    this._adbCache = null;
+    const v = await this.adbVersion(p.adbExe);
     if (!v.ok) throw new Error('adb 解压后无法运行，请检查是否被杀毒软件拦截');
 
     fs.rmSync(zipPath, { force: true });
@@ -1126,25 +1133,15 @@ class Provisioner {
     const p = this.paths();
     fs.mkdirSync(p.adbDir, { recursive: true });
     if (fs.existsSync(p.adbExe)) return true;
-    const src = [
-      path.join(this.appRoot, 'engine', 'platform-tools'),
-      path.join(this.appRoot, 'tools', 'platform-tools'),
-      path.dirname(this.adbVersionPath() || ''),
-    ].find((d) => d && fs.existsSync(path.join(d, 'adb.exe')));
-    if (!src) return false;
+    const adb = this.adbPath({ allowPath: false });
+    if (!adb) return false;
+    const src = path.dirname(adb);
+    if (!fs.existsSync(path.join(src, 'adb.exe'))) return false;
     for (const f of ['adb.exe', 'AdbWinApi.dll', 'AdbWinUsbApi.dll']) {
       const from = path.join(src, f);
       if (fs.existsSync(from)) fs.copyFileSync(from, path.join(p.adbDir, f));
     }
     return fs.existsSync(p.adbExe);
-  }
-
-  adbVersionPath() {
-    try {
-      const s = store.getSettings();
-      if (s.adbPath && fs.existsSync(s.adbPath)) return s.adbPath;
-    } catch (_) { /* ignore */ }
-    return '';
   }
 
   /** 只下载一份通用基础镜像（Android 14 Play x86_64），不再有「普通/兼容」两套 */

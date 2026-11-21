@@ -30,7 +30,7 @@ const domains = [
 ];
 
 function registerIpc(ipcMain, dependencies) {
-  registerHandlers(ipcMain, domains.map((create) => create(dependencies)));
+  registerHandlers(ipcMain, domains.map((create) => create(dependencies)), dependencies.appLog);
 }
 
 module.exports = { registerIpc };

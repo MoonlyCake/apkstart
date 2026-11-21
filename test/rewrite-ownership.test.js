@@ -191,8 +191,13 @@ test('stop refuses an unscoped device and passes the verified identity to lower 
   const runtime = fakeRuntime();
   const owned = { serial: 'emulator-5556', port: 5556, pid };
   let stopCalls = 0;
+  const client = { serial: owned.serial };
+  runtime.client = (serial) => {
+    assert.equal(serial, owned.serial);
+    return client;
+  };
   runtime.emulator.stop = async (input) => {
-    assert.deepEqual(input, { adbPath: 'fake-adb', identity: owned });
+    assert.deepEqual(input, { client, identity: owned });
     stopCalls++;
     return true;
   };

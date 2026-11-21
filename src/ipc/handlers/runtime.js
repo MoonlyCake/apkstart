@@ -1,5 +1,7 @@
 'use strict';
 
+const { ipcFailure } = require('../failure');
+
 function createRuntimeHandlers({ live, send }) {
   return {
     'runtime:status': async () => live.runtime.status(),
@@ -25,7 +27,7 @@ function createRuntimeHandlers({ live, send }) {
         return stopped ? { ok: true, note: '已确认没有在运行的 ApkStart 安卓实例。' }
           : { ok: false, error: '无法确认归属或关闭失败，未终止其他模拟器。' };
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
 
@@ -35,7 +37,7 @@ function createRuntimeHandlers({ live, send }) {
         const ok = live.runtime.emulator.invalidateSnapshot();
         return { ok: !!ok };
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
 
@@ -45,7 +47,7 @@ function createRuntimeHandlers({ live, send }) {
         const r = await live.runtime.restart({ onLog: (m) => send('runtime:log', m) });
         return r?.ok ? { ok: true, ready: true } : { ok: false, error: r?.error || '安卓运行时未能启动。' };
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
 
@@ -59,7 +61,7 @@ function createRuntimeHandlers({ live, send }) {
         if (backend && typeof backend.resources === 'function') return await backend.resources();
         return { backend: backend ? backend.id : '', ok: false, note: '运行时未就绪，暂时读不到资源分配' };
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
 
@@ -72,17 +74,17 @@ function createRuntimeHandlers({ live, send }) {
         });
         return r;
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
 
     // 只做网络体检，不动任何数据（设置页用来显示当前状态）
     'runtime:checkNetwork': async () => {
       try {
-        const network = await live.runtime.emulator.checkNetwork(live.runtime.adbPath());
+        const network = await live.runtime.checkNetwork();
         return { ok: !!network.ok, network };
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
 

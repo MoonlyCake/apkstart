@@ -1,5 +1,7 @@
 'use strict';
 
+const { ipcFailure, reportIpcFailure } = require('../failure');
+
 function createDiagnosticsHandlers({
   app, appLog, autodebugConfig, fs, leftovers, live, MSIX_ACCEL_HINT, path, runAutodebug,
   scheduleAutodebug, shell, store,
@@ -108,7 +110,7 @@ function createDiagnosticsHandlers({
         if (locked) {
           issues.push({ code: 'lock', severity: 'warn', title: '检测到上次残留的锁文件', hint: '可能导致下一次启动被判定为「AVD 已被占用」。', fix: 'lock' });
         }
-      } catch (_) { /* 自检失败不阻断使用 */ }
+      } catch (error) { reportIpcFailure(error); }
       return { issues, accel, free };
     },
 
@@ -133,15 +135,15 @@ function createDiagnosticsHandlers({
     },
 
     /** 只扫描、不删除：先把「能找到什么」原样给界面，由用户决定 */
-    'leftovers:scan': () => {
+    'leftovers:scan': async () => {
       try {
         const installDir = path.dirname(app.getPath('exe'));
         const dataDir = store.DATA_DIR;
         let avdHome = '';
         try { avdHome = live.runtime.provisioner.paths().avdHome; } catch (_) { avdHome = ''; }
-        return { ok: true, ...leftovers.scan({ installDir, dataDir, avdHome }) };
+        return { ok: true, ...(await leftovers.scan({ installDir, dataDir, avdHome })) };
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
 
@@ -152,7 +154,7 @@ function createDiagnosticsHandlers({
         appLog(`leftovers cleaned: ${r.removed.length} removed, ${r.failed.length} failed`);
         return { ok: true, ...r, freedMB: Math.round(r.freedBytes / 1048576) };
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
   };

@@ -587,9 +587,9 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(fs.existsSync(path.join(root, 'src', 'ui', 'splash.css')), '缺少 splash.css');
     assert(fs.existsSync(path.join(root, 'src', 'ui', 'splash.js')), '缺少 splash.js');
     assert(fs.existsSync(path.join(root, 'src', 'splash-preload.js')), '缺少 splash-preload.js');
-    assert(/splashWin/.test(mainJs), 'main.js 要创建 splash 窗口');
-    assert(/splashProgress/.test(mainJs), '要有 splashProgress 推送函数');
-    assert(/splashDone/.test(mainJs), '要有 splashDone 完成信号');
+    assert(/createStartupSplash\(/.test(mainJs), '主进程要装配实际启动画面');
+    assert(mainJs.includes('startupSplash?.progress('), '启动过程仍要推送进度');
+    assert(mainJs.includes('startupSplash?.finish()'), '启动过程仍要发出完成信号');
     const splashIpc = fs.readFileSync(path.join(root, 'src', 'ipc', 'splash.js'), 'utf8');
     assert(/splash:version/.test(splashIpc) && /splash:isFirstRun/.test(splashIpc), '启动画面仍要暴露原有通道');
   });
@@ -1020,7 +1020,8 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     // 应用刚起来 Activity 重建会覆盖方向，需要在那个时机补一次。
     // 窗口放宽到 2200 字符：onAppUp 的 then 回调里还要处理开机动画淡出，
     // 那些注释会把 _healOrientation 往后推，600 字符的窗口一加东西就误报。
-    assert(/onAppUp[\s\S]{0,2200}_healOrientation/.test(mainJs), '应用起来后要立刻校正一次');
+    assert(/onAppUp:[\s\S]{0,220}scheduleOrientationCheck\(pkg, isCurrent\)/.test(mainJs), '应用起来后要立刻校正一次');
+    assert(/function scheduleOrientationCheck[\s\S]{0,250}runtime\._healOrientation/.test(mainJs), '用同一校正入口');
     // 面板方向和设置不一致时不能靠这里修，要交给重启
     assert(/panelLandscape/.test(engJs), '要能区分「该重启」和「该重锁方向」');
   });
@@ -1122,7 +1123,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
       '外部关闭同样使用窗口代际令牌');
   });
 
-  await test('旧版本清理：能发现任意位置的 ApkStart 目录，且绝不碰当前运行版本', () => {
+  await test('旧版本清理：能发现任意位置的 ApkStart 目录，且绝不碰当前运行版本', async () => {
     const os = require('os');
     const leftovers = require('../src/core/leftovers');
     const np = (p) => { try { return path.resolve(p).toLowerCase(); } catch (_) { return String(p).toLowerCase(); } };
@@ -1139,7 +1140,9 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
       const old2 = mk('ApkStart-win64-portable.prev-2026-01-01T00-00-00-000Z'); // 打包备份残留
       const curDir = mk('ApkStart-v0.5.0-win64-portable');
 
-      const r = leftovers.scan({ installDir: curDir, dataDir: root, avdHome: '' });
+      const r = await leftovers.scan({ installDir: curDir, dataDir: path.join(root, 'data'), avdHome: '' }, {
+        env: {}, home: '', tempDir: '', driveRoots: [], platform: 'linux',
+      });
       const found = r.items.filter((i) => i.kind === 'dir').map((i) => np(i.path));
 
       assert(found.includes(np(old1)), '普通旧版本目录没被发现');
@@ -1171,7 +1174,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     const root = path.join(__dirname, '..');
     const mainJs = fs.readFileSync(path.join(root, 'src', 'main.js'), 'utf8');
     const htmlJs = fs.readFileSync(path.join(root, 'src', 'ui', 'index.html'), 'utf8');
-    const uiJs = fs.readFileSync(path.join(root, 'src', 'ui', 'app.js'), 'utf8');
+    const uiJs = fs.readFileSync(path.join(root, 'src', 'ui', 'panels', 'settings-display.js'), 'utf8');
     const emuJs = fs.readFileSync(path.join(root, 'src', 'core', 'emulator.js'), 'utf8');
 
     // autoFullscreenOnLaunch 以前只在默认设置里声明，没有任何代码读它 —— 死开关。
@@ -1221,8 +1224,8 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
 
     // early attach 与失败后的最终补救由 rewrite-queue.test.js 按行为验证。
     assert(/onAppUp:\s*\(\)\s*=>/.test(mainJs), 'main.js 要传 onAppUp');
-    assert(mainJs.includes('attachment.startEarly().then(watchFirstFrame)'), '提前接画面不能阻塞存活判定');
-    assert(mainJs.includes('await attachment.finish()'), '稳定后应等待接管结果，失败时重试');
+    assert(mainJs.includes('presentation.startEarly();'), '提前接画面不能阻塞存活判定');
+    assert(mainJs.includes('await presentation.finishAttachment()'), '稳定后应等待接管结果，失败时重试');
   });
 
   await test('虚拟机联网：AVD 必须开虚拟 Wi-Fi，且能主动重连「不会自动连」的热点', () => {
@@ -2255,26 +2258,20 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     '独立模式下 ready-to-show 默认必须直接 return');
   });
 
-  await test('开机动画：splash 状态必须是模块级，否则永远关不掉', () => {
+  await test('开机动画：启动装配和应用启动使用同一个控制器', () => {
     const root = path.join(__dirname, '..');
     const mainJs = fs.readFileSync(path.join(root, 'src', 'main.js'), 'utf8');
-    // runLaunch / autoDeploy 定义在 whenReady 回调**外面**，回调里 const 的
-    // splashDone 它们根本看不到（typeof 恒为 'undefined'）—— 曾经导致
-    // 480x360 的 alwaysOnTop 开机动画一直钉在屏幕中央。
-    assert(/^let splashWin = null;$/m.test(mainJs), 'splashWin 必须是模块级 let');
-    assert(/^let splashDone = \(\) => \{\};$/m.test(mainJs), 'splashDone 必须是模块级 let');
-    assert(/^let splashProgress = \(\) => \{\};$/m.test(mainJs), 'splashProgress 必须是模块级 let');
-    assert(!/const splashDone = \(\) =>/.test(mainJs), '不能再在 whenReady 里用 const 覆盖');
-    // 保险丝：splash 自己没关掉时主进程强关
-    assert(/setTimeout\(\(\) => \{[\s\S]{0,160}splashWin\.close\(\);/.test(mainJs),
-      'splashDone 之后要有一道强关保险丝');
+    assert(/^let startupSplash = null;$/m.test(mainJs), '生命周期要共用同一个窗口控制器');
+    assert(/startupSplash = createStartupSplash\(/.test(mainJs), '要装配启动控制器');
+    assert(/finishSplash: \(\) => startupSplash\?\.finish\(\)/.test(mainJs), '应用启动要能关闭启动画面');
+    // 最短驻留、超时和渲染器主动关闭由 startup-modules.test.js 驱动真实模块验证。
   });
 
   await test('多窗口：启动应用要先收起管理窗口再开应用窗口', () => {
     const root = path.join(__dirname, '..');
     const mainJs = fs.readFileSync(path.join(root, 'src', 'main.js'), 'utf8');
     const launchIdx = mainJs.indexOf('async function launchOne(');
-    const body = mainJs.slice(launchIdx, mainJs.indexOf('const r = await installer.launch', launchIdx));
+    const body = mainJs.slice(launchIdx, mainJs.indexOf('await installer.launch', launchIdx));
     const hideIdx = body.indexOf('mainWindow.hide()');
     const openIdx = body.indexOf('openAppWindow(pkg');
     assert(hideIdx > 0 && openIdx > 0, '两个调用都要在 launchOne 里');
@@ -2292,7 +2289,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(/orientationMode/.test(mainJs), '要读设置里的方向策略');
     assert(/orientationOverride/.test(mainJs), '单应用方向覆盖要生效');
     // 启动路径要用它，而不是裸的 displaySettings().landscape
-    assert(/const wantLand = wantLandscapeFor\(pkg\)/.test(mainJs), 'beforeStart 要按应用方向判定');
+    assert(/beforeStart: \(rt\) => prepareLaunchForeground/.test(mainJs) && /const landscape = wantLandscapeFor\(pkg\)/.test(mainJs), 'beforeStart 要按应用方向判定');
     assert(/const land = wantLandscapeFor\(pkg\)/.test(mainJs), 'openAppWindow 要按应用方向开窗口');
     // 离线从 APK 清单算方向
     assert(/function detectOrientation\(/.test(apkJs), '要从 APK 清单离线判断应用方向');
@@ -2300,7 +2297,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(/orientation: meta\.orientation/.test(installerJs), '安装时要把方向存进 apps.json');
     assert(/orientationMode: 'auto'/.test(storeJs), '默认策略是跟随应用');
     // 老数据回填：不补就还是黑边
-    assert(/orientation backfill/.test(mainJs), '老版本装的应用要回填方向');
+    assert(/backfillAppOrientations\(store, appLog\)/.test(mainJs), '老版本装的应用要回填方向');
   });
 
   await test('横竖屏：方向不一致触发的重启不能把启动打断', () => {
@@ -2321,7 +2318,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     // 约 40 秒，这期间如果什么都不显示，用户会以为程序崩了。
     assert(/showWhileWaiting: detached && !splashVisible/.test(mainJs),
       '独立模式且没有开机动画时，必须 showWhileWaiting');
-    assert(/splashVisible = !!\(splashWin && !splashWin\.isDestroyed\(\)\)/.test(mainJs),
+    assert(mainJs.includes('splashVisible = startupSplash?.hasWindow()'),
       '要靠 splash 是否在显示来决定由谁负责告诉用户「正在等」');
     assert(/const willRestart = land !== !!displaySettings\(\)\.landscape/.test(mainJs),
       '要能预判「这次会重启」');
@@ -2333,7 +2330,8 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(/target\.showWaiting\(/.test(mainJs), '重启换向前要重新亮出等待窗口');
     assert(/waitingForRestart/.test(appwin), '要有「正在等待重启」标记');
     // 启动阶段的 pre-attach 轮询看到标记必须让路，不能把等待窗口又 hide 掉
-    assert(/if \(target\.waitingForRestart\) \{ schedule\(\); return; \}/.test(mainJs), 'pre-attach 要让路');
+    const presentation = fs.readFileSync(path.join(root, 'src', 'desktop', 'launch-presentation.js'), 'utf8');
+    assert(/if \(target\.waitingForRestart\) \{ next\(\); return; \}/.test(presentation), 'pre-attach 要让路');
   });
 
   await test('标题要在 show 之前设，否则会闪上一个应用的名字', () => {
@@ -2352,7 +2350,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     const emuJs = fs.readFileSync(path.join(root, 'src', 'core', 'emulator.js'), 'utf8');
     // Wi-Fi 关联比 sys.boot_completed 晚 5~20 秒，查一次就报「没有网络」等于每次
     // 冷启动都误报；而以前的补救建议是「重置安卓数据」（会删掉已装应用）。
-    assert(/checkNetwork\('', \{ waitMs: \d+, interval: \d+ \}\)/.test(emuJs),
+    assert(/networkProbe\?\.\(this\.serial, \{ waitMs: \d+, interval: \d+ \}\)/.test(emuJs),
       '开机后的网络体检要给等待窗口，不能查一次就下结论');
     const boot = emuJs.slice(emuJs.indexOf('运行时就绪'));
     const warn = boot.slice(0, 4000);
@@ -2429,7 +2427,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
   await test('硬件加速：商店版引导用户开 WHPX，安装版一键开启并可退 AEHD', () => {
     const root = path.join(__dirname, '..');
     const mainJs = fs.readFileSync(path.join(root, 'src', 'main.js'), 'utf8');
-    const appJs = fs.readFileSync(path.join(root, 'src', 'ui', 'app.js'), 'utf8');
+    const appJs = fs.readFileSync(path.join(root, 'src', 'ui', 'panels', 'diagnostics.js'), 'utf8');
     const preloadJs = fs.readFileSync(path.join(root, 'src', 'preload.js'), 'utf8');
 
     // 1) 真正让模拟器用上 WHPX 的功能是 HypervisorPlatform（虚拟机平台是 WSL2 的），
@@ -2596,12 +2594,12 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
       '迁移条件不能依赖 windowEmbedMigrated2，否则旧标记会漏迁');
     // 原生窗口要尽早接出来，别让用户对着美化等待页干等
     const mainJs = fs.readFileSync(path.join(root, 'src', 'main.js'), 'utf8');
-    assert(/pre-attach detached ok/.test(mainJs), '启动时要先尝试把模拟器原生窗口接出来');
+    assert(/presentation\.startDiscovery\(\)/.test(mainJs), '启动时要先尝试把模拟器原生窗口接出来');
     // 接管失败必须重试，否则壳窗口一直停在屏幕上（用户看到的「美化窗口」）
     const attachBody = mainJs.slice(mainJs.indexOf('async function attachAppWindow'), mainJs.indexOf('async function attachAppWindow') + 2200);
     assert(/for \(let i = 0; i < 4; i \+= 1\)/.test(attachBody), '原生窗口接管要重试');
     assert(/临时退回嵌入模式/.test(attachBody), '四轮都失败要兜底，不能留黑屏');
-    const appJs = fs.readFileSync(path.join(root, 'src', 'ui', 'app.js'), 'utf8');
+    const appJs = fs.readFileSync(path.join(root, 'src', 'ui', 'panels', 'settings-display.js'), 'utf8');
     assert(/windowEmbedChosen:\s*true/.test(appJs), '设置页切换时要写入「已主动选择」标记');
     const indexHtml = fs.readFileSync(path.join(root, 'src', 'ui', 'index.html'), 'utf8');
     assert(/setWindowEmbed/.test(indexHtml), '设置里要有窗口模式切换入口');
@@ -2684,31 +2682,23 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     // 收动画前必须等首帧，否则用户看到白底 + 应用图标，以为卡死
     const idx = mainJs.indexOf('waitForAppFirstFrame');
     assert(idx > 0, 'main 要调用 waitForAppFirstFrame');
-    const after = mainJs.slice(idx, idx + 900);
-    assert(/finishBootAnimation/.test(after), '首帧之后才统一收启动动画');
     // 判定必须用 `dumpsys window`：`dumpsys window windows` 里没有 mCurrentFocus，
     // 会把焦点判断永远判成否，导致每次启动都白等满超时。
     assert(/dumpsys window \| grep -E "Splash Screen\|mCurrentFocus"/.test(adbJs),
       '首帧判定要用 dumpsys window（含 mCurrentFocus）');
     // 红果这类重应用首帧要 15 秒以上，12 秒超时会把动画提前收掉
-    assert(/timeoutMs:\s*20000/.test(mainJs), '首帧等待给足 20 秒');
+    const presentation = fs.readFileSync(path.join(root, 'src', 'desktop', 'launch-presentation.js'), 'utf8');
+    assert(/timeoutMs:\s*20000/.test(presentation), '首帧等待给足 20 秒');
   });
 
-  await test('启动动画：boot 遮罩与 splash 统一收尾，且保持到首帧', () => {
+  await test('启动动画：应用启动接入遮罩控制器', () => {
     const root = path.join(__dirname, '..');
     const mainJs = fs.readFileSync(path.join(root, 'src', 'main.js'), 'utf8');
-    // 幂等的统一收尾函数：splash 窗口 + appWin 的 boot 遮罩一起收
-    assert(/const finishBootAnimation = \(\) =>/.test(mainJs), '要有统一收尾函数');
-    const fn = mainJs.slice(mainJs.indexOf('const finishBootAnimation'),
-      mainJs.indexOf('const finishBootAnimation') + 700);
-    assert(/bootAnimDone/.test(fn), '收尾必须幂等，避免多处触发重复收');
-    assert(/setState\(\{ ready: true/.test(fn), '收尾要通知 boot 遮罩淡出');
-    assert(/splashDone/.test(fn), '收尾要同时关掉早期 splash 窗口');
-    // launch 结束处不能再无条件 setState ready（会在白底 Splash 阶段提前收动画）
-    assert(/if \(!embedded\) finishBootAnimation\(\)/.test(mainJs),
-      '只有窗口接入失败时才直接结束等待；接入成功后交给首帧监测');
-    // 总保险丝：任何路径卡住都会强制收，绝不永久停在动画里
-    assert(/setTimeout\(finishBootAnimation, 24000\)/.test(mainJs), '要有 24 秒总保险丝');
+    assert(/createLaunchPresentation\(/.test(mainJs), '应用启动必须使用统一遮罩控制器');
+    assert(/presentation\.startEarly\(\)/.test(mainJs), '提前接入要走同一控制器');
+    assert(/await presentation\.finishAttachment\(\)/.test(mainJs), '最后接入要走同一控制器');
+    assert(/await presentation\.abort\(\)/.test(mainJs), '错误也必须完成清理');
+    // 首帧、失败重试与超时的行为由 desktop-launch.test.js 验证。
   });
 
   await test('启动动画：图标用完整 PNG + 兜底，极简风视觉元素齐全', () => {

@@ -31,6 +31,9 @@ function assert(cond, msg) {
 const ROOT = path.join(__dirname, '..');
 const html = fs.readFileSync(path.join(ROOT, 'src/ui/index.html'), 'utf8');
 const appJs = fs.readFileSync(path.join(ROOT, 'src/ui/app.js'), 'utf8');
+const panel = (name) => fs.readFileSync(path.join(ROOT, 'src/ui/panels', `${name}.js`), 'utf8');
+const navJs = panel('settings-navigation');
+const diagnosticsJs = panel('diagnostics');
 const css = fs.readFileSync(path.join(ROOT, 'src/ui/style.css'), 'utf8');
 
 /** 取设置面板主体（settingsBody）里的 HTML 片段 */
@@ -101,8 +104,8 @@ test('关键分组落在合理的分类里', () => {
 });
 
 test('前端分类表与导航项一一对应', () => {
-  const m = appJs.match(/const SETTINGS_CATS = \[([\s\S]*?)\];/);
-  assert(m, 'app.js 里应有 SETTINGS_CATS');
+  const m = navJs.match(/const SETTINGS_CATS = \[([\s\S]*?)\];/);
+  assert(m, '分类模块里应有 SETTINGS_CATS');
   const ids = (m[1].match(/id:\s*'([a-z]+)'/g) || []).map((s) => s.replace(/id:\s*'|'/g, ''));
   const navMatch = html.match(/<nav class="set-nav" id="setNav"[\s\S]*?<\/nav>/);
   const navIds = (navMatch[0].match(/data-cat="([a-z]+)"/g) || []).map((s) => s.replace(/data-cat="|"/g, ''));
@@ -114,31 +117,31 @@ test('前端分类表与导航项一一对应', () => {
 
 console.log('\n[设置分类 · 行为]');
 test('实现了切换、过滤与记忆', () => {
-  assert(appJs.includes('function switchSettingsCat'), '应有分类切换函数');
-  assert(appJs.includes('function applySettingsFilter'), '应有可见性过滤函数');
-  assert(appJs.includes('function groupMatches'), '应有搜索匹配函数');
-  assert(appJs.includes('function focusGroup'), '应有定位到分组的函数');
-  assert(appJs.includes('apkstart.settings.cat'), '应记住上次停留的分类');
+  assert(navJs.includes('function switchSettingsCat'), '应有分类切换函数');
+  assert(navJs.includes('function applySettingsFilter'), '应有可见性过滤函数');
+  assert(navJs.includes('function groupMatches'), '应有搜索匹配函数');
+  assert(navJs.includes('function focusGroup'), '应有定位到分组的函数');
+  assert(navJs.includes('apkstart.settings.cat'), '应记住上次停留的分类');
 });
 
 test('搜索是跨分类的（否则搜到了却看不见）', () => {
   // 过滤时按命中决定可见性，而不是只看当前分类
-  const fn = appJs.match(/function applySettingsFilter\(\) \{[\s\S]*?\n\}/);
+  const fn = navJs.match(/function applySettingsFilter\(\) \{[\s\S]*?\n    \}/);
   assert(fn, '应能定位 applySettingsFilter');
   assert(/g\.hidden = q \? !hit : !inCat/.test(fn[0]), '搜索时应按命中显示（跨分类）');
 });
 
 test('跳转入口都改成了 focusGroup（分类切换后仍能定位到分组）', () => {
-  assert(appJs.includes("focusGroup($('runtimeGroup'))"), '部署向导应定位到运行时分组');
-  assert(appJs.includes("focusGroup($('perfGroup'))"), '数据分区问题应定位到性能分组');
+  assert(appJs.includes("navigation.focus($('runtimeGroup'))"), '部署向导应定位到运行时分组');
+  assert(diagnosticsJs.includes("focusGroup($('perfGroup'))"), '数据分区问题应定位到性能分组');
   // 旧的直接 scrollIntoView 定位应已被 focusGroup 取代
   const direct = appJs.match(/box\.scrollIntoView\(\{ block: 'start', behavior: 'smooth' \}\)/g) || [];
   assert(direct.length === 0, `不应再有直接 scrollIntoView 的定位（还有 ${direct.length} 处）`);
 });
 
 test('自动检测面板的修复按钮复用 fixIssue', () => {
-  assert(appJs.includes('data-code="${esc(it.code)}"'), '检测项应带 code 以便修复');
-  assert(appJs.includes('fixIssue(issue)'), '应复用统一的修复入口');
+  assert(diagnosticsJs.includes('data-code="${esc(it.code)}"'), '检测项应带 code 以便修复');
+  assert(diagnosticsJs.includes('fixIssue(issue)'), '应复用统一的修复入口');
 });
 
 test('实验室分组有多开开关，且接到 engine.multiWindow', () => {
@@ -146,9 +149,9 @@ test('实验室分组有多开开关，且接到 engine.multiWindow', () => {
   assert(html.includes('id="setKeepBackground"'), '应有后台保留数设置');
   assert(html.includes('class="lab-notice"'), '实验室要有实验性提示');
   // 开关要读写真实设置项，而不是空壳
-  assert(/setMultiWindow'\)\.checked = !!s\.engine\.multiWindow/.test(appJs), '要回填 multiWindow 状态');
-  assert(/engine:\s*\{\s*multiWindow:\s*e\.target\.checked/.test(appJs), '要把开关存到 engine.multiWindow');
-  assert(/engine:\s*\{\s*keepBackground:/.test(appJs), '要保存后台保留数');
+  assert(/setMultiWindow'\)\.checked = !!s\.engine\.multiWindow/.test(panel('settings')), '要回填 multiWindow 状态');
+  assert(/engine:\s*\{\s*multiWindow:\s*e\.target\.checked/.test(panel('settings-runtime')), '要把开关存到 engine.multiWindow');
+  assert(/engine:\s*\{\s*keepBackground:/.test(panel('settings-runtime')), '要保存后台保留数');
   // 底层确实消费这个设置（不是只有 UI）
   const sessions = fs.readFileSync(path.join(ROOT, 'src/application/app-sessions.js'), 'utf8');
   assert(/if \(engine\.multiWindow\)/.test(sessions), '应用会话要消费保存的多窗口偏好');

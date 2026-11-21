@@ -103,7 +103,7 @@ const adbDevices = (line) => `List of devices attached\n${line}\n`;
     emu.port = 5554; // serial 是 getter：emulator-${port}
     emu._log = [];   // log() 会往里 push
     emu._adbGuestHealthy = async () => false;
-    const ok = await emu._saveViaAdb('adb');
+    const ok = await emu._saveViaAdb({ client: {} });
     assert.equal(ok, false, '不健康时不允许保存');
   });
   await atest('源码级：快照保存路径必须先过健康守卫', () => {

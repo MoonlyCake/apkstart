@@ -15,244 +15,245 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execFileSync } = require('child_process');
+const { execFile, execFileSync } = require('child_process');
+const { promisify } = require('util');
 
 const EXE = 'ApkStart.exe';
+const FILE_STAT_BATCH = 32;
+const WINDOWS_DRIVES = ['C:\\', 'D:\\', 'E:\\', 'F:\\', 'G:\\', 'H:\\'];
+const UNINSTALL_ROOTS = [
+  'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+  'HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+  'HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+];
+const execFileAsync = promisify(execFile);
 
-function dirSize(p) {
-  let n = 0;
-  const walk = (d) => {
-    let list = [];
-    try { list = fs.readdirSync(d, { withFileTypes: true }); } catch (_) { return; }
-    for (const e of list) {
-      const f = path.join(d, e.name);
-      try {
-        if (e.isDirectory()) walk(f);
-        else n += fs.statSync(f).size;
-      } catch (_) { /* 占用/无权限，跳过 */ }
+async function readDir(dir, io) {
+  try { return await io.readdir(dir, { withFileTypes: true }); }
+  catch (_) { return []; } // Drive or folder can be absent/inaccessible.
+}
+
+async function lstat(file, io) {
+  try { return await io.lstat(file); }
+  catch (_) { return null; }
+}
+
+async function dirSize(root, io) {
+  let size = 0;
+  const dirs = [root];
+  while (dirs.length) {
+    const dir = dirs.pop();
+    const files = [];
+    for (const e of await readDir(dir, io)) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) dirs.push(full);
+      else if (e.isFile()) files.push(full);
     }
-  };
-  walk(p);
-  return n;
+    // Don't enqueue one libuv request per file in large runtime/cache trees.
+    for (let offset = 0; offset < files.length; offset += FILE_STAT_BATCH) {
+      const stats = await Promise.all(files.slice(offset, offset + FILE_STAT_BATCH).map((file) => lstat(file, io)));
+      for (const stat of stats) if (stat?.isFile()) size += stat.size;
+    }
+  }
+  return size;
 }
 
 function norm(p) {
   try { return path.resolve(p).toLowerCase(); } catch (_) { return String(p).toLowerCase(); }
 }
 
-/**
- * 在若干「可能放程序的」目录里找旧版本目录。
- *
- * 以前只扫当前 exe 的父目录 + LOCALAPPDATA\Programs + ProgramFiles，结果用户把
- * 便携版解压到别的地方（E:\下载、桌面、某个项目目录）就永远扫不到 —— 这正是
- * 「其他文件夹里的旧版本清不掉」的原因。现在多路发现：
- *   - 常见安装位置；
- *   - 各磁盘根目录下的浅层（很多便携版直接丢在 D:\ApkStart-…）；
- *   - 桌面 / 开始菜单里现存快捷方式指向的真实 exe 所在目录（最准，用户装过就一定有）。
- */
-function candidateRoots(installDir) {
-  const roots = new Set();
-  const add = (p) => { if (p) roots.add(p); };
-  add(path.dirname(installDir));
-  const local = process.env.LOCALAPPDATA;
-  if (local) add(path.join(local, 'Programs'));
-  add(process.env.ProgramFiles);
-  add(process.env['ProgramFiles(x86)']);
-  // 用户主目录下几个高频位置
-  const home = os.homedir();
-  if (home) {
-    add(path.join(home, 'Downloads'));
-    add(path.join(home, 'Desktop'));
-    add(path.join(home, 'Documents'));
-  }
-  // 每个本地磁盘根目录（便携版常直接放盘根）
-  try {
-    for (const drv of ['C:\\', 'D:\\', 'E:\\', 'F:\\', 'G:\\', 'H:\\']) {
-      if (fs.existsSync(drv)) add(drv.replace(/\\+$/, ''));
-    }
-  } catch (_) { /* ignore */ }
+function within(root, full) {
+  const rel = path.relative(root, full);
+  return !rel || !path.isAbsolute(rel) && rel !== '..' && !rel.startsWith('..' + path.sep);
+}
+
+function intersects(first, second) {
+  return within(first, second) || within(second, first);
+}
+
+async function resolved(dir, io) {
+  try { return norm(await io.realpath(dir)); }
+  catch (_) { return null; }
+}
+
+async function pathKeys(dir, io) {
+  return [norm(dir), await resolved(dir, io)].filter(Boolean);
+}
+
+function candidateRoots(installDir, { env, home, driveRoots }) {
+  const roots = new Set([path.dirname(installDir)]);
+  if (env.LOCALAPPDATA) roots.add(path.join(env.LOCALAPPDATA, 'Programs'));
+  if (env.ProgramFiles) roots.add(env.ProgramFiles);
+  if (env['ProgramFiles(x86)']) roots.add(env['ProgramFiles(x86)']);
+  if (home) for (const name of ['Downloads', 'Desktop', 'Documents']) roots.add(path.join(home, name));
+  // Keep the slash: C: is drive-relative, not the root of C:\.
+  for (const drive of driveRoots) roots.add(drive);
   return [...roots];
 }
 
-/**
- * 从快捷方式（.lnk / .desktop）反查 ApkStart.exe 的真实所在目录。
- * 这是最可靠的发现手段：只要用户曾经创建过桌面图标或开始菜单项，目标路径就在里面，
- * 无论它被放在哪个盘、哪个深层文件夹。
- */
-function rootsFromShortcuts() {
+/** 从桌面 / 开始菜单快捷方式反查真实 exe 所在的目录。 */
+async function rootsFromShortcuts({ env, home, io }) {
   const dirs = new Set();
-  const homes = [os.homedir(), process.env.APPDATA, process.env.LOCALAPPDATA]
-    .filter(Boolean);
-  const linkDirs = [];
-  for (const h of homes) {
-    linkDirs.push(path.join(h, 'Desktop'));
-    linkDirs.push(path.join(h, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs'));
-    linkDirs.push(path.join(h, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'ApkStart'));
+  const linkDirs = new Set();
+  for (const h of [home, env.APPDATA, env.LOCALAPPDATA].filter(Boolean)) {
+    linkDirs.add(path.join(h, 'Desktop'));
+    linkDirs.add(path.join(h, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs'));
+    linkDirs.add(path.join(h, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'ApkStart'));
   }
   for (const d of linkDirs) {
-    let list = [];
-    try { list = fs.readdirSync(d, { withFileTypes: true }); } catch (_) { continue; }
-    for (const e of list) {
-      if (!/\.(lnk|desktop)$/i.test(e.name)) continue;
+    for (const e of await readDir(d, io)) {
+      if (!e.isFile() || !/\.(lnk|desktop)$/i.test(e.name)) continue;
       const full = path.join(d, e.name);
       try {
         if (/\.desktop$/i.test(e.name)) {
-          const txt = fs.readFileSync(full, 'utf8');
-          const m = /^Exec=(.+)$/m.exec(txt);
-          if (m) {
-            const exePath = m[1].trim().replace(/^"|"$/g, '').split(/\s+/)[0];
-            if (exePath && /[\\/]ApkStart(\.exe)?$/i.test(exePath)) dirs.add(path.dirname(exePath));
-          }
+          const txt = await io.readFile(full, 'utf8');
+          const m = /^Exec=(?:"([^"]+)"|(\S+))/m.exec(txt);
+          const exePath = m?.[1] ?? m?.[2];
+          if (exePath && /[\\/]ApkStart(\.exe)?$/i.test(exePath)) dirs.add(path.dirname(exePath));
         } else {
-          // .lnk 是二进制，但目标路径以可读形式内嵌，直接扫字节里的 ApkStart*.exe
-          const buf = fs.readFileSync(full);
-          const s = buf.toString('latin1');
+          const buf = await io.readFile(full);
           const re = /[A-Za-z]:\\[^\x00\x01-\x1f]*?ApkStart(?:-[^\x00\x01-\x1f]*)?[\\/]?ApkStart\.exe|[A-Za-z]:\\[^\x00\x01-\x1f]*?ApkStart\.exe/gi;
-          let mm;
-          while ((mm = re.exec(s))) {
-            dirs.add(path.dirname(mm[0].replace(/\x00.*$/, '')));
-          }
+          for (const hit of buf.toString('latin1').matchAll(re)) dirs.add(path.dirname(hit[0]));
         }
-      } catch (_) { /* 读不动就跳过 */ }
+      } catch (_) { /* shortcut disappeared or can't be read */ }
     }
   }
-  return [...dirs];
+  return dirs;
 }
 
-/** 旧版本程序目录：形如 ApkStart*，且里面有 ApkStart.exe，且不是当前安装目录 */
-function scanDirs(installDir) {
+async function scanDirs(installDir, protectedKeys, options) {
+  const { io } = options;
   const out = [];
   const seen = new Set();
-  const cur = norm(installDir);
-  const consider = (full) => {
+  const consider = async (full) => {
     const key = norm(full);
     if (seen.has(key)) return;
     seen.add(key);
-    if (key === cur) return;
-    // 必须是「真的是 ApkStart」的目录，避免误删同名文件夹
-    if (!fs.existsSync(path.join(full, EXE))) return;
+    if (protectedKeys.some((p) => intersects(p, key))) return;
+    // A shortcut can reach a junction even when readdir normally skips it.
+    if (!(await lstat(full, io))?.isDirectory()) return;
+    const real = await resolved(full, io);
+    if (!real || protectedKeys.some((p) => intersects(p, real))) return;
+    if (real !== key) {
+      if (seen.has(real)) return;
+      seen.add(real);
+    }
+    if (!(await lstat(path.join(full, EXE), io))?.isFile()) return;
     out.push({
       kind: 'dir',
       path: full,
-      size: dirSize(full),
+      size: await dirSize(full, io),
       note: '旧版本程序目录（含 ' + EXE + '）',
     });
   };
-  for (const root of candidateRoots(installDir)) {
-    let list = [];
-    try { list = fs.readdirSync(root, { withFileTypes: true }); } catch (_) { continue; }
-    for (const e of list) {
-      if (!e.isDirectory()) continue;
-      if (!/^ApkStart/i.test(e.name)) continue;
-      consider(path.join(root, e.name));
+  const scanRoot = async (root) => {
+    for (const e of await readDir(root, io)) {
+      if (e.isDirectory() && /^ApkStart/i.test(e.name)) await consider(path.join(root, e.name));
     }
-  }
-  // 快捷方式反查到的目录：本身可能就是旧版本目录，或其父/子目录是
-  for (const d of rootsFromShortcuts()) {
-    if (/^ApkStart/i.test(path.basename(d))) consider(d);
-    // 也看看它的同级（dist 下往往并排好几个版本目录）
-    const parent = path.dirname(d);
-    let sib = [];
-    try { sib = fs.readdirSync(parent, { withFileTypes: true }); } catch (_) { continue; }
-    for (const e of sib) {
-      if (e.isDirectory() && /^ApkStart/i.test(e.name)) consider(path.join(parent, e.name));
-    }
+  };
+  for (const root of candidateRoots(installDir, options)) await scanRoot(root);
+  for (const d of await rootsFromShortcuts(options)) {
+    if (/^ApkStart/i.test(path.basename(d))) await consider(d);
+    await scanRoot(path.dirname(d));
   }
   return out;
 }
 
-/** 注册表里指向已不存在目录的卸载项 */
-function scanRegistry() {
-  const out = [];
-  const roots = [
-    'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
-    'HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
-    'HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
-  ];
-  for (const root of roots) {
-    let text = '';
+async function explicitlyMissing(file, io) {
+  try { await io.lstat(file); return false; }
+  catch (error) { return error.code === 'ENOENT' || error.code === 'ENOTDIR'; }
+}
+
+async function scanRegistry(protectedKeys, { io, platform, runCommand }) {
+  if (platform !== 'win32') return [];
+  const results = await Promise.all(UNINSTALL_ROOTS.map(async (root) => {
     try {
-      text = execFileSync('reg', ['query', root, '/s', '/f', 'ApkStart', '/t', 'REG_SZ'],
+      const { stdout } = await runCommand('reg', ['query', root, '/s', '/f', 'ApkStart', '/t', 'REG_SZ'],
         { encoding: 'utf8', windowsHide: true, timeout: 15000, maxBuffer: 4 * 1024 * 1024 });
-    } catch (_) { continue; }
-    // reg query 输出是分块的「键 → 值」，这里按块切
-    const blocks = String(text).split(/\r?\n\r?\n/);
-    for (const b of blocks) {
-      const key = (/^(HKEY_[^\r\n]+)$/m.exec(b) || [])[1];
-      if (!key) continue;
-      if (!/\\ApkStart/i.test(key)) continue;
-      const loc = (/InstallLocation\s+REG_\w+\s+(.+)/i.exec(b) || [])[1];
-      const disp = (/DisplayName\s+REG_\w+\s+(.+)/i.exec(b) || [])[1];
-      const unins = (/UninstallString\s+REG_\w+\s+(.+)/i.exec(b) || [])[1];
-      const install = (loc || '').trim().replace(/^"|"$/g, '');
-      const uninsPath = (unins || '').trim().replace(/^"|"$/g, '');
-      const installMissing = install ? !fs.existsSync(install) : false;
-      // 只处理「明明已经没装、却还挂在应用列表里」的死条目
-      const deadUninstaller = uninsPath && !fs.existsSync(uninsPath.split('"')[0]);
-      if (!installMissing && !deadUninstaller) continue;
-      out.push({
-        kind: 'registry',
-        path: key,
-        size: 0,
-        note: `失效的卸载项${disp ? `：${String(disp).trim()}` : ''}`,
-      });
-    }
+      return String(stdout).split(/\r?\n\r?\n/);
+    } catch (_) { return []; }
+  }));
+  const out = [];
+  for (const b of results.flat()) {
+    const key = (/^(HKEY_[^\r\n]+)$/m.exec(b) || [])[1];
+    if (!key || !/\\ApkStart/i.test(key)) continue;
+    const loc = (/InstallLocation\s+REG_\w+\s+(.+)/i.exec(b) || [])[1];
+    const disp = (/DisplayName\s+REG_\w+\s+(.+)/i.exec(b) || [])[1];
+    const unins = (/UninstallString\s+REG_\w+\s+(.+)/i.exec(b) || [])[1];
+    const install = (loc || '').trim().replace(/^"|"$/g, '');
+    const command = /^"([^"]+)"|^(.+?\.exe)(?:\s|$)/i.exec((unins || '').trim());
+    const target = install || command?.[1] || command?.[2];
+    // A missing uninstaller alone is not evidence when InstallLocation still exists.
+    if (!target || !path.isAbsolute(target) || protectedKeys.some((p) => intersects(p, norm(target)))) continue;
+    if (!await explicitlyMissing(target, io)) continue;
+    out.push({
+      kind: 'registry',
+      path: key,
+      size: 0,
+      note: `失效的卸载项${disp ? `：${String(disp).trim()}` : ''}`,
+    });
   }
   return out;
 }
 
-/** 更新缓存 / 临时包 */
-function scanTemp(dataDir) {
+/** 更新缓存 / 临时包。 */
+async function scanTemp(dataDir, protectedKeys, installAndAvd, { io, tempDir }) {
   const out = [];
-  const dirs = [path.join(dataDir, 'update'), os.tmpdir()];
+  const dirs = new Set([path.join(dataDir, 'update'), tempDir].filter(Boolean));
   for (const d of dirs) {
-    let list = [];
-    try { list = fs.readdirSync(d, { withFileTypes: true }); } catch (_) { continue; }
-    for (const e of list) {
-      const name = e.name;
-      const isOurs = /^ApkStart.*\.(zip|exe|part\d*|tmp)$/i.test(name)
-        || /^ApkStart-.*\.part\d+$/i.test(name);
+    const realDir = await resolved(d, io);
+    if (!realDir) continue;
+    for (const e of await readDir(d, io)) {
+      if (!e.isFile() && !e.isDirectory()) continue;
+      const isOurs = /^ApkStart.*\.(zip|exe|part\d*|tmp)$/i.test(e.name);
       if (!isOurs) continue;
-      const full = path.join(d, name);
-      let size = 0;
-      try { size = e.isDirectory() ? dirSize(full) : fs.statSync(full).size; } catch (_) { /* ignore */ }
+      const full = path.join(d, e.name);
+      const keys = [norm(full), norm(path.join(realDir, e.name))];
+      if (keys.some((key) => protectedKeys.some((p) => within(key, p))
+        || installAndAvd.some((p) => within(p, key)))) continue;
+      const size = e.isDirectory() ? await dirSize(full, io) : (await lstat(full, io))?.size ?? 0;
       out.push({ kind: 'temp', path: full, size, note: '更新下载的临时文件' });
     }
   }
   return out;
 }
 
-/** 旧/废弃的快速启动快照：default_boot 是早期版本留下的（一份 ram.img 约 3GB），
- *  *.stale-* 是「删不掉就改名」的残留。当前快照名是 apkstart，绝不碰。 */
-function scanSnapshots(avdHome) {
+/** 旧/废弃的快速启动快照；Windows 路径不区分大小写。 */
+async function scanSnapshots(avdHome, io) {
   const out = [];
   if (!avdHome) return out;
   const snapDir = path.join(avdHome, 'apkstart.avd', 'snapshots');
-  let list = [];
-  try { list = fs.readdirSync(snapDir, { withFileTypes: true }); } catch (_) { return out; }
-  for (const e of list) {
-    if (!e.isDirectory()) continue;
-    if (e.name === 'apkstart') continue;   // 当前在用的快照
+  for (const e of await readDir(snapDir, io)) {
+    if (!e.isDirectory() || e.name.toLowerCase() === 'apkstart') continue;
     const full = path.join(snapDir, e.name);
     out.push({
       kind: 'dir',
       path: full,
-      size: dirSize(full),
-      note: e.name.startsWith('default_boot') ? '旧版遗留的快速启动快照' : '废弃的快照残留',
+      size: await dirSize(full, io),
+      note: /^default_boot/i.test(e.name) ? '旧版遗留的快速启动快照' : '废弃的快照残留',
     });
   }
   return out;
 }
 
-function scan({ installDir, dataDir, avdHome }) {
-  const items = [];
-  const push = (list) => { for (const x of list) items.push(x); };
-  push(scanDirs(installDir));
-  push(scanRegistry());
-  push(scanTemp(dataDir));
-  push(scanSnapshots(avdHome));
-  const total = items.reduce((n, x) => n + (x.size || 0), 0);
-  return { items, totalBytes: total };
+async function scan({ installDir, dataDir, avdHome }, {
+  io = fs.promises, env = process.env, home = os.homedir(), tempDir = os.tmpdir(),
+  platform = process.platform, driveRoots = platform === 'win32' ? WINDOWS_DRIVES : [],
+  runCommand = execFileAsync,
+} = {}) {
+  const options = { io, env, home, tempDir, platform, driveRoots, runCommand };
+  // Aliases through junctions must protect the same live installation and storage.
+  const [install, data, avd] = await Promise.all([installDir, dataDir, avdHome]
+    .map((dir) => dir ? pathKeys(dir, io) : []));
+  const protectedKeys = [...install, ...data, ...avd];
+  const groups = await Promise.all([
+    scanDirs(installDir, protectedKeys, options),
+    scanRegistry(protectedKeys, options),
+    scanTemp(dataDir, protectedKeys, [...install, ...avd], options),
+    scanSnapshots(avdHome, io),
+  ]);
+  const items = groups.flat();
+  return { items, totalBytes: items.reduce((sum, item) => sum + item.size, 0) };
 }
 
 function rm(p) {

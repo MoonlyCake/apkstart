@@ -147,12 +147,13 @@ test('标题栏 / 关于页都有手册入口', () => {
 test('安装失败与修复失败都会自动打开对应教程', () => {
   const js = fs.readFileSync(path.join(ROOT, 'src', 'ui', 'app.js'), 'utf8');
   assert(/openManualForError\(raw, 'install-failed'\)/.test(js), '安装失败未自动开教程');
-  assert(/function failFix\([\s\S]*openManualForIssue\(issue, 'fix-failed'\)/.test(js), '修复失败未自动开教程');
-  assert(/case 'audioService'/.test(js) && /case 'audio':/.test(js), '声音修复动作未接入');
+  const diagnostics = fs.readFileSync(path.join(ROOT, 'src', 'ui', 'panels', 'diagnostics.js'), 'utf8');
+  assert(/function failFix\([\s\S]*openManualForIssue\(issue, 'fix-failed'\)/.test(diagnostics), '修复失败未自动开教程');
+  assert(/case 'audioService'/.test(diagnostics) && /case 'audio':/.test(diagnostics), '声音修复动作未接入');
 });
 
 test('诊断条目带教程按钮', () => {
-  const js = fs.readFileSync(path.join(ROOT, 'src', 'ui', 'app.js'), 'utf8');
+  const js = fs.readFileSync(path.join(ROOT, 'src', 'ui', 'panels', 'diagnostics.js'), 'utf8');
   assert(/class="dbg-help"/.test(js), '自动检测条目缺少教程按钮');
   assert(/class="ec-help"/.test(js), '自检条目缺少教程按钮');
 });

@@ -250,9 +250,9 @@ test('每条问题都有分类、严重度、标题', () => {
 });
 
 test('分类表在前后端保持一致（渲染层 DEBUG_CATS）', () => {
-  const appJs = fs.readFileSync(path.join(ROOT, 'src/ui/app.js'), 'utf8');
+  const appJs = fs.readFileSync(path.join(ROOT, 'src/ui/panels/diagnostics.js'), 'utf8');
   const m = appJs.match(/const DEBUG_CATS = \[([\s\S]*?)\];/);
-  assert(m, 'app.js 里应该有 DEBUG_CATS');
+  assert(m, '诊断模块里应该有 DEBUG_CATS');
   const ids = (m[1].match(/id:\s*'([a-z]+)'/g) || []).map((s) => s.replace(/id:\s*'|'/g, ''));
   assert(ids.length === ad.CATEGORIES.length, `分类数应一致：前端 ${ids.length} / 后端 ${ad.CATEGORIES.length}`);
   for (const c of ad.CATEGORIES) {

@@ -1,5 +1,7 @@
 'use strict';
 
+const { ipcFailure } = require('../failure');
+
 function createProvisionHandlers({ autoDeploy, dialog, live, send, store }) {
   return {
     // 用户手动点「一键部署」时强制重试，绕过失败冷却
@@ -12,7 +14,7 @@ function createProvisionHandlers({ autoDeploy, dialog, live, send, store }) {
         );
         return { ok: true, ...r };
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
 
@@ -23,7 +25,7 @@ function createProvisionHandlers({ autoDeploy, dialog, live, send, store }) {
         );
         return { ok: true, ...r };
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
 
@@ -34,7 +36,7 @@ function createProvisionHandlers({ autoDeploy, dialog, live, send, store }) {
         );
         return { ok: true, ...r };
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
 
@@ -45,7 +47,7 @@ function createProvisionHandlers({ autoDeploy, dialog, live, send, store }) {
         );
         return { ok: true, ...r };
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
 
@@ -54,7 +56,7 @@ function createProvisionHandlers({ autoDeploy, dialog, live, send, store }) {
         const r = await live.runtime.provisioner.installAdb((p) => send('provision:progress', { ...p, component: 'adb' }));
         return { ok: true, ...r };
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
 
@@ -63,7 +65,7 @@ function createProvisionHandlers({ autoDeploy, dialog, live, send, store }) {
         const r = await live.runtime.provisioner.installQemu((p) => send('provision:progress', { ...p, component: 'qemu' }));
         return { ok: true, ...r };
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
 
@@ -72,7 +74,7 @@ function createProvisionHandlers({ autoDeploy, dialog, live, send, store }) {
         const r = await live.runtime.provisioner.downloadIso((p) => send('provision:progress', { ...p, component: 'iso' }));
         return { ok: true, ...r };
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
 
@@ -82,7 +84,7 @@ function createProvisionHandlers({ autoDeploy, dialog, live, send, store }) {
           (p) => send('provision:progress', { ...p, component: 'disk' }));
         return { ok: true, ...r };
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
 
@@ -96,7 +98,7 @@ function createProvisionHandlers({ autoDeploy, dialog, live, send, store }) {
       try {
         return { ok: true, ...live.runtime.provisioner.importIso(r.filePaths[0]) };
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
 
@@ -112,7 +114,7 @@ function createProvisionHandlers({ autoDeploy, dialog, live, send, store }) {
         store.saveSettings({ runtime: { installed: true } });
         return { ok: true, ...info };
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
 
@@ -125,7 +127,7 @@ function createProvisionHandlers({ autoDeploy, dialog, live, send, store }) {
         await live.runtime.startInstaller({ onLog: (m) => send('runtime:log', m) });
         return { ok: true };
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
 
@@ -134,7 +136,7 @@ function createProvisionHandlers({ autoDeploy, dialog, live, send, store }) {
         await live.runtime.markInstalled();
         return { ok: true };
       } catch (e) {
-        return { ok: false, error: e.message };
+        return ipcFailure(e);
       }
     },
 

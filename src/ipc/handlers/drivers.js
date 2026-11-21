@@ -1,6 +1,6 @@
 'use strict';
 
-const { sanitizeResourcePatch } = require('../resource-settings');
+const { reportIpcFailure } = require('../failure');
 
 function createDriversHandlers({ APP_ROOT, appLog, dialog, fs, live, path, send, shell, store }) {
   // 一个驱动就是一份 JSON：声明「匹配哪些机器」+「命中后改哪些启动参数」。
@@ -83,8 +83,7 @@ function createDriversHandlers({ APP_ROOT, appLog, dialog, fs, live, path, send,
       const hw = await preflight.collect({ accel });
       const edition = store.STORE_BUILD ? 'store' : 'installer';
       const report = preflight.evaluate({ hw, settings: store.getSettings(), edition });
-      const patch = sanitizeResourcePatch(report.patch);
-      const next = store.saveSettings(patch);
+      const next = store.saveSettings(report.patch);
 
       // 把这台机器的参数固化成驱动：以后每次开机都按它来，不用重复体检。
       // 校验一遍再落盘 —— 体检生成的内容同样不能绕过白名单。
@@ -100,10 +99,11 @@ function createDriversHandlers({ APP_ROOT, appLog, dialog, fs, live, path, send,
         const prev = (next.drivers && next.drivers.state) || {};
         store.saveSettings({ drivers: { state: { ...prev, [v.driver.id]: true } } });
       } catch (e) {
+        reportIpcFailure(e);
         driverError = e.message;
       }
 
-      appLog(`体检自动配置：${JSON.stringify(patch.engine)} driver=${driverFile || '(未写入)'}`);
+      appLog(`体检自动配置：驱动${driverFile ? '已写入' : '未写入'}`);
       return {
         ok: true,
         settings: store.getSettings(),
