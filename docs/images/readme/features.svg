@@ -1,0 +1,108 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="306" viewBox="0 0 1200 306" role="img" aria-labelledby="title desc">
+  <title id="title">ApkStart 桌面体验</title>
+  <desc id="desc">功能图示：Android 应用的桌面窗口、默认关闭的主机麦克风输入，以及用于定位运行时问题的日志和环境检查。</desc>
+  <defs>
+    <linearGradient id="surface" x1="0" y1="0" x2="1" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#14243A"/>
+      <stop offset=".5" stop-color="#131E34"/>
+      <stop offset="1" stop-color="#221E37"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#1B2B46"/>
+      <stop offset="1" stop-color="#131F35"/>
+    </linearGradient>
+    <linearGradient id="cornflower">
+      <stop stop-color="#77AEF4"/>
+      <stop offset="1" stop-color="#C4A6F6"/>
+    </linearGradient>
+    <linearGradient id="sea">
+      <stop stop-color="#57E1CF"/>
+      <stop offset="1" stop-color="#A2EBD8"/>
+    </linearGradient>
+    <linearGradient id="dusk">
+      <stop stop-color="#C4A6F6"/>
+      <stop offset="1" stop-color="#F8A58C"/>
+    </linearGradient>
+    <clipPath id="shell">
+      <rect x="1" y="1" width="1198" height="304" rx="26"/>
+    </clipPath>
+  </defs>
+
+  <rect x="1" y="1" width="1198" height="304" rx="26" fill="url(#surface)" stroke="#354861"/>
+  <g clip-path="url(#shell)" fill="none" stroke="#C4A6F6" stroke-opacity=".1">
+    <path d="M858-24c70 42 150 54 224 52 59-1 124-17 159-43"/>
+    <path d="M903-23c63 31 118 41 187 39 55-2 112-17 147-45"/>
+    <path d="M-64 250c163 8 194 25 260 77m-229-57c123 12 152 28 201 64"/>
+  </g>
+
+  <g font-family="Segoe UI, system-ui, sans-serif">
+    <path d="M40 35l5-5 5 5-5 5z" fill="#C4A6F6"/>
+    <text x="62" y="41" fill="#DCE7FC" font-size="15" font-weight="700" letter-spacing="2.1">THE WINDOWS TOOLKIT</text>
+    <text x="1161" y="40" text-anchor="end" fill="#AABBD5" font-size="13" font-weight="600" letter-spacing="1.7">APKSTART / FEATURES</text>
+
+    <g transform="translate(34 62)">
+      <rect width="360" height="214" rx="18" fill="url(#panel)" stroke="#3E516B"/>
+      <path d="M18 1h67" stroke="url(#cornflower)" stroke-width="2" stroke-linecap="round"/>
+      <text x="22" y="31" fill="#A6BEFF" font-size="13" font-weight="700" letter-spacing="1.6">01 / WINDOW</text>
+      <g transform="translate(24 46)">
+        <path d="M5 88h297M31 5v83m240-82v82" fill="none" stroke="#7BACE8" stroke-opacity=".18"/>
+        <rect x="103" y="11" width="186" height="84" rx="10" fill="#202E4E" stroke="#776BB2"/>
+        <path d="M104 31h184M237 21h36M239 43h30m-30 10h23m-23 10h28" fill="none" stroke="#C4A6F6" stroke-opacity=".39" stroke-linecap="round"/>
+        <rect x="22" y="2" width="203" height="84" rx="10" fill="#152641" stroke="url(#cornflower)" stroke-width="1.8"/>
+        <path d="M23 22h201m-168 0v63" fill="none" stroke="#6186C1" stroke-opacity=".61"/>
+        <g fill="#A6BEFF">
+          <circle cx="34" cy="12" r="2"/>
+          <circle cx="42" cy="12" r="2" fill-opacity=".63"/>
+          <circle cx="50" cy="12" r="2" fill-opacity=".36"/>
+        </g>
+        <rect x="34" y="34" width="11" height="11" rx="3" fill="#8DA9FF"/>
+        <rect x="34" y="53" width="11" height="11" rx="3" fill="#49628A"/>
+        <rect x="70" y="34" width="57" height="36" rx="6" fill="#29426C"/>
+        <path d="M80 61l12-11 10 7 11-17m-33 24h37" fill="none" stroke="#8DA9FF" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M143 40h66m-66 10h40m-40 10h56m-56 10h30" fill="none" stroke="#677FA8" stroke-width="2" stroke-linecap="round"/>
+        <path d="M295 6v10m-5-5h10" stroke="#C4A6F6" stroke-opacity=".66" stroke-width="1.4" stroke-linecap="round"/>
+      </g>
+      <text x="22" y="169" fill="#F1F5FF" font-size="24" font-weight="700">Desktop windows</text>
+      <text x="22" y="193" fill="#B5C5DE" font-size="16">Open Android apps from Windows.</text>
+    </g>
+
+    <g transform="translate(420 62)">
+      <rect width="360" height="214" rx="18" fill="url(#panel)" stroke="#3E516B"/>
+      <path d="M18 1h67" stroke="url(#sea)" stroke-width="2" stroke-linecap="round"/>
+      <text x="22" y="31" fill="#78EBD5" font-size="13" font-weight="700" letter-spacing="1.6">02 / AUDIO</text>
+      <g transform="translate(30 45)">
+        <path d="M7 47h285M15 26v42m16-53v63m95-62v63m12-49v34m137-39v44m15-31v18" fill="none" stroke="#57E1CF" stroke-opacity=".22" stroke-width="1.4" stroke-linecap="round"/>
+        <circle cx="79" cy="46" r="44" fill="#172C41" stroke="#3A666E"/>
+        <rect x="69" y="17" width="20" height="37" rx="10" fill="#234752" stroke="#78EBD5" stroke-width="2"/>
+        <path d="M59 44v2a20 20 0 0 0 40 0v-2m-20 22v12m-11 0h22m-17-50h12m-12 7h12" fill="none" stroke="#78EBD5" stroke-width="2" stroke-linecap="round"/>
+        <path d="M112 46h50" stroke="#57E1CF" stroke-opacity=".46" stroke-dasharray="2 5" stroke-width="1.6" stroke-linecap="round"/>
+        <rect x="165" y="28" width="97" height="37" rx="18.5" fill="#173341" stroke="#4D8B8E"/>
+        <circle cx="184" cy="46.5" r="12" fill="#57E1CF"/>
+        <text x="214" y="51" fill="#CFEEE9" font-size="13" font-weight="700" letter-spacing="1.1">OFF</text>
+      </g>
+      <text x="22" y="169" fill="#F1F5FF" font-size="24" font-weight="700">Microphone control</text>
+      <text x="22" y="193" fill="#B5C5DE" font-size="16">Host capture is off by default.</text>
+    </g>
+
+    <g transform="translate(806 62)">
+      <rect width="360" height="214" rx="18" fill="url(#panel)" stroke="#3E516B"/>
+      <path d="M18 1h67" stroke="url(#dusk)" stroke-width="2" stroke-linecap="round"/>
+      <text x="22" y="31" fill="#DFC2F5" font-size="13" font-weight="700" letter-spacing="1.6">03 / DIAGNOSTICS</text>
+      <g transform="translate(26 45)">
+        <path d="M10 90h288M18 8v82m273-76v76" fill="none" stroke="#C4A6F6" stroke-opacity=".22"/>
+        <rect x="46" y="11" width="213" height="85" rx="10" fill="#292844" stroke="#6F5878"/>
+        <rect x="30" y="1" width="215" height="85" rx="10" fill="#202840" stroke="url(#dusk)" stroke-width="1.8"/>
+        <path d="M31 21h213" fill="none" stroke="#796987" stroke-opacity=".8"/>
+        <path d="m44 8 4 4-4 4m9 0h9" fill="none" stroke="#F8A58C" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M45 34h8m-8 16h8m-8 16h8" fill="none" stroke="#A694C2" stroke-width="2" stroke-linecap="round"/>
+        <path d="M64 34h48m-48 16h68m-68 16h37" fill="none" stroke="#D2B7F2" stroke-width="2.1" stroke-linecap="round"/>
+        <path d="M125 34h59m-40 16h44m-75 16h65" fill="none" stroke="#82799A" stroke-width="2" stroke-linecap="round"/>
+        <circle cx="251" cy="61" r="26" fill="#282943" stroke="#D4B9F0" stroke-width="1.6"/>
+        <path d="m239 61 8 8 15-16" fill="none" stroke="#F4B9A4" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M285 9v10m-5-5h10" stroke="#F8A58C" stroke-opacity=".67" stroke-width="1.4" stroke-linecap="round"/>
+      </g>
+      <text x="22" y="169" fill="#F1F5FF" font-size="24" font-weight="700">Runtime diagnostics</text>
+      <text x="22" y="193" fill="#B5C5DE" font-size="16">Environment checks and event logs.</text>
+    </g>
+  </g>
+</svg>

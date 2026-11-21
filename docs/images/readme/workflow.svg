@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="250" viewBox="0 0 1200 250" role="img" aria-labelledby="title desc">
+  <title id="title">ApkStart 从安装包到桌面窗口</title>
+  <desc id="desc">三步工作流：选择 APK 安装包，交由 ApkStart 托管 Android 运行时，然后从 Windows 启动应用。</desc>
+  <defs>
+    <linearGradient id="surface" x1="0" y1="0" x2="1" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#172744"/>
+      <stop offset=".56" stop-color="#0F1B30"/>
+      <stop offset="1" stop-color="#151D35"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#1B2B46"/>
+      <stop offset="1" stop-color="#131F35"/>
+    </linearGradient>
+    <linearGradient id="track">
+      <stop stop-color="#57E1CF"/>
+      <stop offset=".52" stop-color="#8DA9FF"/>
+      <stop offset="1" stop-color="#C4A6F6"/>
+    </linearGradient>
+    <clipPath id="shell">
+      <rect x="1" y="1" width="1198" height="248" rx="26"/>
+    </clipPath>
+  </defs>
+
+  <rect x="1" y="1" width="1198" height="248" rx="26" fill="url(#surface)" stroke="#354861"/>
+  <g clip-path="url(#shell)" fill="none">
+    <g stroke="#8DA9FF" stroke-opacity=".11">
+      <path d="M810-23c84 47 167 65 264 64 64 0 113-9 163-34"/>
+      <path d="M861-28c68 43 143 60 227 58 56-1 106-12 150-36"/>
+      <path d="M916-24c56 32 119 41 180 39 56-2 100-15 141-41"/>
+      <path d="M0 229c104-25 180-23 277 22m-296-10c86-22 173-21 251 14"/>
+    </g>
+    <path d="M39 230H1161" stroke="url(#track)" stroke-opacity=".32"/>
+    <path d="M40 230h86m950 0h85" stroke="url(#track)" stroke-opacity=".74" stroke-width="2" stroke-linecap="round"/>
+  </g>
+
+  <g font-family="Segoe UI, system-ui, sans-serif">
+    <path d="M40 35l5-5 5 5-5 5z" fill="#57E1CF"/>
+    <text x="62" y="41" fill="#DCE7FC" font-size="15" font-weight="700" letter-spacing="2.1">FROM FILE TO WINDOW</text>
+    <text x="1161" y="40" text-anchor="end" fill="#AABBD5" font-size="13" font-weight="600" letter-spacing="1.7">APKSTART / FLOW</text>
+
+    <g transform="translate(34 62)">
+      <rect width="344" height="149" rx="17" fill="url(#card)" stroke="#3E516B"/>
+      <path d="M17 1h53" stroke="#57E1CF" stroke-width="2" stroke-linecap="round"/>
+      <text x="20" y="34" fill="#57E1CF" font-size="14" font-weight="700" letter-spacing="1.7">01 / CHOOSE</text>
+      <rect x="19" y="55" width="62" height="62" rx="15" fill="#162C3E" stroke="#386A72"/>
+      <g transform="translate(32 67)" fill="none" stroke="#57E1CF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M18 1 35 10v19L18 38 1 29V10zM1 10l17 9 17-9M18 19v19"/>
+        <path d="m10 5 17 9v8M8 25l4 2" stroke-opacity=".78"/>
+      </g>
+      <text x="99" y="79" fill="#F1F5FF" font-size="24" font-weight="700">Choose a package</text>
+      <text x="99" y="105" fill="#B5C5DE" font-size="16">APK, APKS or XAPK</text>
+    </g>
+
+    <g transform="translate(428 62)">
+      <rect width="344" height="149" rx="17" fill="url(#card)" stroke="#3E516B"/>
+      <path d="M17 1h53" stroke="#8DA9FF" stroke-width="2" stroke-linecap="round"/>
+      <text x="20" y="34" fill="#9EB6FF" font-size="14" font-weight="700" letter-spacing="1.7">02 / MANAGE</text>
+      <rect x="19" y="55" width="62" height="62" rx="15" fill="#202C49" stroke="#4F608B"/>
+      <g transform="translate(31 67)" fill="none" stroke="#9EB6FF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m19 3 17 9-17 9-17-9zM2 20l17 9 17-9M2 28l17 9 17-9"/>
+        <path d="M19 11h.01" stroke-width="4"/>
+      </g>
+      <text x="99" y="79" fill="#F1F5FF" font-size="24" font-weight="700">Start the runtime</text>
+      <text x="99" y="105" fill="#B5C5DE" font-size="16">Android, managed by ApkStart</text>
+    </g>
+
+    <g transform="translate(822 62)">
+      <rect width="344" height="149" rx="17" fill="url(#card)" stroke="#3E516B"/>
+      <path d="M17 1h53" stroke="#C4A6F6" stroke-width="2" stroke-linecap="round"/>
+      <text x="20" y="34" fill="#D2BCFF" font-size="14" font-weight="700" letter-spacing="1.7">03 / OPEN</text>
+      <rect x="19" y="55" width="62" height="62" rx="15" fill="#282740" stroke="#665984"/>
+      <g transform="translate(30 70)" fill="none" stroke="#D2BCFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="1" y="2" width="38" height="30" rx="4"/>
+        <path d="M1 10h38M20 32v5m-7 0h14m-15-19 5 5 10-10"/>
+        <path d="M7 6h.01m4 0h.01" stroke-width="2.5"/>
+      </g>
+      <text x="99" y="79" fill="#F1F5FF" font-size="24" font-weight="700">Open on Windows</text>
+      <text x="99" y="105" fill="#B5C5DE" font-size="16">Launch from a shortcut</text>
+    </g>
+  </g>
+
+  <g fill="none" stroke="url(#track)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M390 136h23m-7-7 7 7-7 7"/>
+    <path d="M784 136h23m-7-7 7 7-7 7"/>
+  </g>
+</svg>
