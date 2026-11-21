@@ -15,8 +15,10 @@ const { download, downloadAny, downloadAnyParallel, downloadMulti, head, discard
 const { ZipArchive, ZipFile, resolveZipEntry } = require('./zip');
 const { Sources } = require('./sources');
 const { cmpVer } = require('./version');
+const { createAehdPackage } = require('./aehd-package');
 
 const IS_WIN = process.platform === 'win32';
+const aehdPackage = createAehdPackage();
 
 const SOURCES = {
   adb: [
@@ -32,7 +34,6 @@ const SOURCES = {
     'https://dl.google.com/android/repository/sys-img/android/sys-img2-3.xml',
     'https://dl.google.com/android/repository/sys-img/google_apis/sys-img2-3.xml',
   ],
-  aehdFallback: 'https://dl.google.com/android/repository/aehd-windows_v2.2.zip',
   // 兜底：索引不可用时直接用的已知版本
   emulatorFallback: 'https://dl.google.com/android/repository/emulator-windows_x64-16847572.zip',
   sysimgFallback: 'https://dl.google.com/android/repository/sys-img/google_apis_playstore/x86_64-34_r14.zip',
@@ -108,6 +109,18 @@ function run(cmd, args, { timeout = 60000, cwd, windowsHide = true } = {}) {
       resolve({ ok: !err, code: err ? (err.code ?? 1) : 0, stdout: String(stdout || ''), stderr: String(stderr || ''), error: err });
     });
   });
+}
+
+async function runVerifiedAehdInstaller(bat) {
+  const quote = (value) => `'${value.replace(/'/g, "''")}'`;
+  const script = `try { $p = Start-Process -FilePath ${quote(bat)} -WorkingDirectory ${quote(path.dirname(bat))} -Verb RunAs -Wait -PassThru; exit $p.ExitCode } catch { exit 2 }`;
+  const ps = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  // UAC/安装进程结束前不能清掉正在使用的暂存文件。
+  const result = await run(ps, ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: 0 });
+  if (!result.ok) {
+    if (result.code === 2) throw new Error('已取消管理员授权（需要点「是」才能安装驱动）');
+    throw new Error(`驱动安装失败（退出码 ${result.code}）`);
+  }
 }
 
 function fileSize(p) {
@@ -952,7 +965,7 @@ class Provisioner {
    * 「用户还没下镜像」，去网上拉一套 1.5GB 的 —— 这正是「明明装完带了镜像，
    * 结果还在下载」的根因。返回值里的 compressed 标记表示「还需要展开一次」。
    */
-  systemImageInfo() {
+  systemImageInfo({ imageId } = {}) {
     const p = this.paths();
     const roots = [p.sysImgRoot, path.join(this.root, 'system-images'), path.join(this.appRoot, 'engine', 'system-images')];
     // 先在默认位置（API34 Play）找，再退到「随便哪套镜像」。
@@ -979,6 +992,7 @@ class Provisioner {
     let missing = null;
     let packed = null;   // 只找到压缩包：还算「有」，但要展开
     for (const dir of candidates) {
+      if (imageId && doctor.imageIdentity(dir) !== imageId) continue;
       const kernel = path.join(dir, 'kernel-ranchu');
       const m = /system-images[\\/]android-(\d+)[\\/]([^\\/]+)[\\/]([^\\/]+)$/.exec(dir);
       const api = m ? Number(m[1]) : DEFAULT_SYSIMG.api;
@@ -1036,7 +1050,7 @@ class Provisioner {
     }
 
     const aehdSys = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'aehd.sys');
-    const hasAehdFile = fs.existsSync(aehdSys) || fs.existsSync(path.join(p.aehdDir, 'aehd.sys'));
+    const hasAehdFile = fs.existsSync(aehdSys);
     const hv = await this.hypervisor();
 
     const r = await run(exe, ['-accel-check'], { timeout: 30000 });
@@ -1045,7 +1059,7 @@ class Provisioner {
 
     let result;
     if (usable) {
-      const kind = hasAehdFile && /aehd/i.test(text) ? 'aehd' : 'whpx';
+      const kind = /aehd/i.test(text) ? 'aehd' : 'whpx';
       result = { ok: true, kind, note: kind === 'whpx' ? 'WHPX 硬件加速已启用' : 'AEHD 硬件加速已启用' };
     } else if (/can't find the emulator-check|corrupted tools installation/i.test(text) && hasAehdFile) {
       // 部分精简运行时包会漏掉 emulator-check.exe，导致 -accel-check 无法给出结论。
@@ -1237,18 +1251,18 @@ class Provisioner {
   async installAehd(onProgress = () => {}) {
     const p = this.ensureDirs();
     await this.guardDisk('aehd', p.aehdDir);
-    const zip = path.join(p.tmp, 'aehd.zip');
-    onProgress({ stage: 'download', message: '下载 AEHD 驱动…', percent: 10 });
-    await downloadAnyParallel(this._downloadUrls(SOURCES.aehdFallback), zip, { connections: 2 });
-    fs.mkdirSync(p.aehdDir, { recursive: true });
-    await this.extractZip(zip, p.aehdDir);
-    fs.rmSync(zip, { force: true });
-    const has = fs.existsSync(path.join(p.aehdDir, 'aehd.Sys')) || fs.existsSync(path.join(p.aehdDir, 'aehd.sys'));
-    if (!has) throw new Error('AEHD 驱动包解压异常');
-    this._cache.accel = null;
-    this._cache.accelAt = 0;
-    onProgress({ stage: 'done', message: 'AEHD 驱动已就绪，需管理员权限安装', percent: 100 });
-    return { ok: true, dir: p.aehdDir, installer: path.join(p.aehdDir, 'silent_install.bat') };
+    const prepared = await aehdPackage.prepare(p, onProgress);
+    onProgress({ stage: 'done', message: 'AEHD 驱动包已校验，安装仍需管理员权限', percent: 100 });
+    return prepared;
+  }
+
+  /** 两条 UI 入口共用同一个校验、暂存、提权边界。 */
+  async enableAehd(onProgress = () => {}) {
+    if (!IS_WIN || store.STORE_BUILD) throw new Error('当前版本不能自动安装 AEHD，请启用 Windows 虚拟机监控程序平台');
+    const p = this.ensureDirs();
+    await this.guardDisk('aehd', p.tmp);
+    await aehdPackage.withInstaller(p, onProgress, runVerifiedAehdInstaller);
+    this.invalidateEnvCache();
   }
 
   // ---------------- QEMU ----------------

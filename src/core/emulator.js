@@ -124,13 +124,47 @@ class EmulatorEngine {
     return { emulatorExe, sysImgDir: img.dir, sysImgOk: img.ok, root: emulatorExe ? path.dirname(path.dirname(emulatorExe)) : p.root };
   }
 
-  /** 选镜像：有通用镜像（API 34 Play）就用它，不再让用户切「兼容模式」 */
+  _configuredImage(avdDir = path.join(this.provisioner.paths().avdHome, `${AVD_NAME}.avd`)) {
+    try {
+      const config = fs.readFileSync(path.join(avdDir, 'config.ini'), 'utf8');
+      const tag = /^tag\.id=(.+)$/m.exec(config)?.[1].trim();
+      const image = /^image\.sysdir\.1=(.+)$/m.exec(config)?.[1].trim();
+      return { tag, id: doctor.imageIdentity(image) };
+    } catch (error) {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    }
+  }
+
+  _hasUserData(avdDir = path.join(this.provisioner.paths().avdHome, `${AVD_NAME}.avd`)) {
+    try { return fs.readdirSync(avdDir).some(userdata.isImageName); }
+    catch (error) {
+      if (error.code === 'ENOENT') return false;
+      throw error;
+    }
+  }
+
+  canUseCompatImage() {
+    if (!this._hasUserData()) return true;
+    const current = this._configuredImage();
+    const play = this.provisioner.playImageInfo();
+    return !!current?.id && current.id === doctor.imageIdentity(play.dir);
+  }
+
+  /** 下载了另一份镜像不代表同意迁移数据，已有 AVD 先继续用原来的镜像。 */
   imageChoice() {
     const play = this.provisioner.playImageInfo();
-    const base = this.provisioner.systemImageInfo();
-    if (play.ok) {
-      return { compat: true, api: play.api, tag: play.tag, dir: play.dir, abi: 'x86_64' };
+    const current = this._configuredImage();
+    const playId = doctor.imageIdentity(play.dir);
+    const compatible = { compat: true, api: play.api, tag: play.tag, dir: play.dir, abi: 'x86_64' };
+    if (current?.id && current.id !== playId && this._hasUserData()) {
+      const pinned = this.provisioner.systemImageInfo({ imageId: current.id });
+      if (pinned.ok && doctor.imageIdentity(pinned.dir) === current.id) {
+        return { compat: false, api: pinned.api, tag: pinned.tag, dir: pinned.dir, abi: pinned.abi || this.provisioner.paths().sysAbi };
+      }
     }
+    if (play.ok) return compatible;
+    const base = this.provisioner.systemImageInfo();
     return { compat: false, api: base.api, tag: base.tag, dir: base.dir, abi: base.abi || this.provisioner.paths().sysAbi };
   }
 
@@ -327,30 +361,25 @@ class EmulatorEngine {
     const api = choice.api;
     const tagDisplay = choice.compat ? 'Google Play (ARM 兼容)' : 'AOSP';
 
-    fs.writeFileSync(
-      path.join(home, `${AVD_NAME}.ini`),
-      `avd.ini.encoding=UTF-8\npath=${avdDir.replace(/\\/g, '/')}\ntarget=android-${api}\n`,
-    );
-
     const cfgPath = path.join(avdDir, 'config.ini');
     const wantImg = choice.dir
       ? `${choice.dir.replace(/\\/g, '/')}/`
       : `system-images/android-${api}/${tag}/${choice.abi}/`;
-    this.wipePending = false;
-    const hadConfig = fs.existsSync(cfgPath);
-    if (hadConfig) {
-      const prev = fs.readFileSync(cfgPath, 'utf8');
-      const prevTag = /tag\.id=(.+)$/m.exec(prev);
-      const prevImg = /image\.sysdir\.1=(.+)$/m.exec(prev);
-      // 比较「镜像身份」而不是绝对路径：同一套镜像换盘/换目录不算换镜像，
-      // 否则用户一改运行时目录就会被清掉所有已装应用（见 doctor.imageIdentity 注释）。
-      const prevId = prevImg ? doctor.imageIdentity(prevImg[1].trim()) : '';
-      const wantId = doctor.imageIdentity(wantImg);
-      if ((prevTag && prevTag[1].trim() !== tag) || (prevId && prevId !== wantId)) {
-        // 旧 userdata 与新镜像不兼容（APEX 引导循环），必须重建
-        this.wipePending = true;
-      }
+    const previous = this._configuredImage(avdDir);
+    const hadConfig = previous !== null;
+    const changed = (previous?.tag && previous.tag !== tag)
+      || (previous?.id && previous.id !== doctor.imageIdentity(wantImg));
+    if ((changed || !previous?.id) && this._hasUserData(avdDir)) {
+      // Keep both the data and its original config intact until the user explicitly resets.
+      throw Object.assign(new Error('无法用新安卓镜像打开现有数据。请恢复原镜像；确需换镜像时，先备份再从设置里明确重置安卓数据。'), {
+        code: 'AVD_IMAGE_CHANGE_REQUIRES_RESET',
+      });
     }
+    this.wipePending = !!changed;
+    fs.writeFileSync(
+      path.join(home, `${AVD_NAME}.ini`),
+      `avd.ini.encoding=UTF-8\npath=${avdDir.replace(/\\/g, '/')}\ntarget=android-${api}\n`,
+    );
 
     // 配置指纹变化 → 旧 quickboot 快照必然加载失败或产生黑屏，主动作废。
     // 注意：这里只作废**快照**，绝不能顺手 -wipe-data —— 用户数据里是已装的应用和存档。
@@ -639,8 +668,6 @@ class EmulatorEngine {
     const wantSnapshot = this.settings?.engine?.keepSnapshot !== false;
     if (wipe) {
       // 重置数据时不能加载旧快照（数据都对不上了），但**必须允许保存新快照**：
-      // 修复网络就是靠「重置后第一次开机有网 → 立刻存快照 → 下次恢复」这条链路，
-      // 老写法这里推的是 -no-snapshot，会把保存一起关掉，快照永远存不下来。
       args.push('-no-snapshot-load');
     } else if (!wantSnapshot) {
       args.push('-no-snapshot');
@@ -889,12 +916,6 @@ class EmulatorEngine {
    * 继续没网。网络自愈时先冷启动一次能绕开这份坏快照。
    */
   forceColdBootOnNextStart() { this._coldBoot = true; }
-
-  /**
-   * 让「下一次启动」带上 -wipe-data（仅「修复网络」在多种尝试都失败后使用）。
-   * 「删掉 userdata 镜像文件」与 emulator 的 `-wipe-data` 并不等价，必须走后者。
-   */
-  forceWipeOnNextStart() { this._forceWipe = true; }
 
   /**
    * 体检虚拟机内是否真的能联网。
@@ -1214,9 +1235,7 @@ class EmulatorEngine {
       // eslint-disable-next-line no-await-in-loop
       const avd = this.ensureAvd({
         ...plan,
-        // _forceWipe 也要参与「删旧快照」：重置数据后旧快照必然加载失败
-        // （实测报 Failed to load snapshot 后退回冷启动），必须先清掉再重建。
-        wipe: plan.wipe || !!this.wipePending || !!this._forceWipe,
+        wipe: plan.wipe,
       });
       // 埋点：上层（main）用它在拉起模拟器**之前**打开黑窗压制。
       // 控制台窗口在 spawn 之后几十毫秒就冒出来，事后再补一次扫描必然闪一下，
@@ -1226,10 +1245,8 @@ class EmulatorEngine {
         try { await this.onBeforeSpawn(); } catch (_) { /* ignore */ }
       }
       this._assertAvdWritable();
-      const forceWipe = !!this._forceWipe;
-      this._forceWipe = false;
       // _coldBoot 只对这次 spawn 生效，避免之后每次开机都退化成长时间冷启动
-      this.spawnOnce({ ...plan, wipe: plan.wipe || avd.wipePending || forceWipe }, { headless, onLog, logFile });
+      this.spawnOnce({ ...plan, wipe: plan.wipe || avd.wipePending }, { headless, onLog, logFile });
       this._coldBoot = false;
 
       // 参数错误 / DLL 缺失会立刻退出

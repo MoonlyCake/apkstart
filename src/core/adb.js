@@ -58,7 +58,7 @@ function friendlyInstallError(raw) {
   const table = {
     INSTALL_FAILED_NO_MATCHING_ABIS:
       '安装失败：这个应用只提供 ARM 原生库（多数国产应用如此），'
-      + '当前系统镜像没有 ARM 转译层。ApkStart 会自动切换到内置新版翻译层的兼容镜像并重试。',
+      + '当前安卓镜像缺少所需转译。只有不会清除现有数据时，ApkStart 才会尝试切换到兼容镜像。',
     INSTALL_FAILED_OLDER_SDK:
       '安装失败：应用要求的 Android 版本高于当前运行时（需更高系统镜像）。',
     INSTALL_PARSE_FAILED_NO_CERTIFICATES:
@@ -471,7 +471,7 @@ class AdbClient {
    *  - 默认去掉 -g（自动授予全部权限在部分镜像上会让 PermissionController 崩掉）；
    *  - 带 --bypass-low-target-sdk-block，解决 Android 14 拒绝安装老 targetSdk 应用；
    *  - adb 版本不认该参数 / 中文路径 / 传输错误时自动换写法重试；
-   *  - NO_MATCHING_ABIS 抛带 code 的错误，交给上层自动切换兼容镜像。
+   *  - NO_MATCHING_ABIS 抛带 code 的错误，由上层判断能否安全重试。
    */
   async install(apkPath, { grantPermissions = false } = {}) {
     if (!fs.existsSync(apkPath)) throw new Error(`APK 不存在: ${apkPath}`);
@@ -723,12 +723,18 @@ class AdbClient {
     try { await this.shell(`am force-stop ${pkg}`); } catch (_) { /* ignore */ }
   }
 
-  async runningPackages() {
+  async runningPackages({ strict = false } = {}) {
     try {
-      const out = await this.shell('dumpsys activity activities | grep -E "mResumedActivity|ResumedActivity"');
-      const pkgs = [...out.matchAll(/([a-zA-Z][\w.]+\/[.\w$]+)/g)].map((m) => m[1].split('/')[0]);
+      const out = await this.shell(strict ? 'dumpsys activity activities'
+        : 'dumpsys activity activities | grep -E "mResumedActivity|ResumedActivity"');
+      if (strict && !/^\s*ACTIVITY MANAGER ACTIVITIES\b/m.test(out)) {
+        throw new Error('无法确认 Android 活动状态');
+      }
+      const rows = strict ? out.split(/\r?\n/).filter((line) => /(?:m?ResumedActivity)\b/.test(line)).join('\n') : out;
+      const pkgs = [...rows.matchAll(/([a-zA-Z][\w.]+\/[.\w$]+)/g)].map((m) => m[1].split('/')[0]);
       return [...new Set(pkgs)];
-    } catch (_) {
+    } catch (error) {
+      if (strict) throw error;
       return [];
     }
   }

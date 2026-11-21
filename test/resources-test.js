@@ -11,6 +11,7 @@
 const assert = require('assert/strict');
 const fs = require('fs');
 const path = require('path');
+const { captureHandlers } = require('./helpers/ipc-registry');
 const {
   hostProfile, memoryLimits, clampMemoryMB, clampCores, memVerdict,
   diskRequiredMB, diskVerdict, diskLimits, clampDataGB, storageVerdict,
@@ -19,13 +20,18 @@ const {
 let passed = 0;
 let failed = 0;
 function test(name, fn) {
-  try { fn(); passed++; console.log(`  ✓ ${name}`); }
-  catch (e) { failed++; console.error(`  ✗ ${name}\n    ${e.message}`); }
+  const pass = () => { passed++; console.log(`  ✓ ${name}`); };
+  const fail = (e) => { failed++; console.error(`  ✗ ${name}\n    ${e.message}`); };
+  try {
+    const result = fn();
+    if (result instanceof Promise) return result.then(pass, fail);
+    pass();
+  } catch (e) { fail(e); }
 }
 
 const GB = 1024 * 1024 * 1024;
 
-(() => {
+(async () => {
   console.log('\n[资源分配 · 宿主能力]');
 
   test('hostProfile 接受注入值（测试环境不碰真机）', () => {
@@ -181,12 +187,51 @@ const GB = 1024 * 1024 * 1024;
     assert(/resources\(\) \{/.test(builtinSrc), 'builtin 缺少 resources()');
   });
 
-  const mainSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
-  test('主进程收敛越界值并暴露资源总览', () => {
-    assert(/sanitizeResourcePatch/.test(mainSrc), '保存设置时未收敛资源值');
-    assert(/engine:resources/.test(mainSrc), '缺少 engine:resources IPC');
-    assert(/runtime:resetAndResize/.test(mainSrc), '缺少重置+按新容量重建的通道');
-    assert(!/mumuMemoryGB|mumuCores/.test(mainSrc), '主进程仍残留第三方底座的内存收敛逻辑');
+  test('设置 IPC 在保存前限制内存、CPU 和数据分区', () => {
+    let saved;
+    const handlers = captureHandlers({ store: { saveSettings(patch) { saved = patch; return patch; } } });
+    const host = hostProfile();
+    const draft = { engine: { memoryMB: 1024 * 1024, cores: 8192, dataPartitionGB: 1024 } };
+    const result = handlers.get('settings:set')({}, draft);
+    assert.strictEqual(result, saved);
+    assert.deepEqual(saved.engine, {
+      memoryMB: clampMemoryMB(draft.engine.memoryMB, host.totalMB).mb,
+      autoMemory: false,
+      cores: clampCores(draft.engine.cores, host.cores).cores,
+      dataPartitionGB: 256,
+    });
+    assert.equal(draft.engine.memoryMB, 1024 * 1024, '不能就地修改调用者的设置');
+  });
+
+  await test('资源总览与重置目标容量交给运行时处理', async () => {
+    const actions = [];
+    const overview = { ok: true, backend: 'builtin', memory: { maxMB: 8192 } };
+    let reset = { ok: false, error: '仍有模拟器占用数据目录' };
+    const runtime = {
+      backend: { id: 'builtin', resources: async () => overview },
+      provisioner: { paths: () => ({ root: __dirname }) },
+      resetAndroidData: async (options) => { actions.push(options); return reset; },
+    };
+    const handlers = captureHandlers({
+      live: { runtime },
+      appOperations: { run: (key, fn) => { actions.push(key); return fn(); } },
+      appLog: () => {},
+    });
+    assert.strictEqual(await handlers.get('engine:resources')({}), overview);
+    const resize = handlers.get('runtime:resetAndResize');
+    assert.equal((await resize({}, 0)).ok, false);
+    assert.deepEqual(actions, [], '不合法的容量不能重置数据');
+
+    const refused = await resize({}, 8);
+    assert.equal(refused.ok, false);
+    assert.equal(refused.error, reset.error);
+    assert.deepEqual(actions.splice(0), [`reset:resize:${refused.wantGB}`, { dataPartitionGB: refused.wantGB }]);
+
+    reset = { ok: true, reclaimed: 32 };
+    const applied = await resize({}, 8);
+    assert.equal(applied.ok, true);
+    assert.equal(applied.reclaimed, 32);
+    assert.deepEqual(actions, [`reset:resize:${applied.wantGB}`, { dataPartitionGB: applied.wantGB }]);
   });
 
   const emulatorSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'emulator.js'), 'utf8');

@@ -250,6 +250,11 @@ function fsBytes(file) {
   }
 }
 
-module.exports = {
+function isImageName(name) {
+  return /^userdata(-qemu)?(-[0-9]+)?\.img(\.qcow2)?$/.test(name)
+    || /^userdata\.img(\.qcow2)?\.\d+$/.test(name);
+}
+
+module.exports = { isImageName,
   buildEmptyExt4, hasExt4Superblock, setEncryptFlag, clearEncryptFlag, fsBytes, BLOCK,
 };

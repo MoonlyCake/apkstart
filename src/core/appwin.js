@@ -40,9 +40,11 @@ class AppWindow {
     this.pointerConfig = pointerConfig;
     this.win = null;
     this.pkg = null;
+    this.session = null;
     this.state = { label: '', tip: '', ready: false, landscape: false };
     this._fitTimer = null;
-    this._closedCb = null;
+    this._windowLifecycle = null;
+    this._pendingPark = Promise.resolve();
   }
 
   get isOpen() { return !!(this.win && !this.win.isDestroyed()); }
@@ -117,19 +119,19 @@ class AppWindow {
   /**
    * 打开（或复用）应用窗口。
    * @param {object} o { pkg, label, iconPath, portrait, fullscreen, detached,
-   *                     showWhileWaiting, onClosed }
+   *                     showWhileWaiting, session, onClosed }
    *        detached=true 时走「独立窗口模式」：壳窗口只加载不显示，画面在模拟器原生窗口里。
    *        showWhileWaiting=true 时，**在等待期间**先把壳窗口显示出来（带提示文案），
    *        等模拟器窗口接上后由 openDetached() 收起。切换应用到另一个方向的 App
    *        需要重启运行时（约 40 秒），这段时间以前屏幕上什么都没有，用户以为崩了。
    */
   open(o) {
-    const { pkg, label, iconPath, portrait, fullscreen, detached } = o;
+    const { pkg, label, iconPath, portrait, fullscreen, detached, session = null } = o;
     this.detachedMode = !!detached;
     this.waitingForRestart = false;
     this._showWhileWaiting = !!o.showWhileWaiting;
-    this._closedCb = o.onClosed || null;
-    if (this.isOpen && this.pkg === pkg) {
+    if (this.isOpen && this.pkg === pkg && this.session === session) {
+      this._windowLifecycle.onClosed = o.onClosed || null;
       // 独立窗口模式下壳窗口永远不该露脸（它没有内容，只是一块黑）。
       // 这时候用户再点一次同一个应用，想要的是「把正在看的窗口拿到前面」，
       // 交给窗口代理去抬模拟器原生窗口。
@@ -143,6 +145,7 @@ class AppWindow {
     this.close({ keepApp: true });
 
     this.pkg = pkg;
+    this.session = session;
     // 记住原始图标文件路径：独立窗口模式下要把它设给模拟器原生窗口（Win32
     // LoadImage 只认文件路径，不认 HTML 用的 data URL）。
     this.iconFilePath = iconPath || '';
@@ -184,20 +187,25 @@ class AppWindow {
       },
     });
 
-    this.win.loadFile(path.join(__dirname, '..', 'ui', 'shell.html'));
+    const win = this.win;
+    const lifecycle = { onClosed: o.onClosed || null };
+    this._windowLifecycle = lifecycle;
+    const current = () => this.win === win;
+    win.loadFile(path.join(__dirname, '..', 'ui', 'shell.html'));
     // 页面标题会把窗口标题改成 shell.html 的 <title>，任务栏就认不出是哪个应用了，
     // 这里挡住，让 OS 标题一直等于应用名（任务栏悬浮提示、Alt+Tab 都靠它）。
-    this.win.webContents.on('page-title-updated', (e) => {
+    win.webContents.on('page-title-updated', (e) => {
       e.preventDefault();
-      try { this.win.setTitle(label || 'ApkStart'); } catch (_) { /* 窗口可能已销毁 */ }
+      if (current()) win.setTitle(label || 'ApkStart');
     });
-    this.win.once('ready-to-show', () => {
+    win.once('ready-to-show', () => {
       // 独立窗口模式下，安卓画面在模拟器自己的原生窗口里，我们这层壳没有内容可显示，
       // 留着只会多一个黑色空窗口。所以只加载、不显示（外壳仍存在，供状态/关闭逻辑用）。
       // 例外：showWhileWaiting（切换应用时没有开机动画兜底）—— 这时宁可先显示这块
       // 「正在打开 xxx…」的壳，也不要让用户对着空桌面等 40 秒。
+      if (!current()) return;
       if (this.detachedMode && !this._showWhileWaiting) return;
-      this.win.show();
+      win.show();
       this._push();
     });
 
@@ -205,37 +213,36 @@ class AppWindow {
     // 单次 40ms 防抖的 fit 常常抓到中间态，结果嵌入画面只占左上角一条，
     // 右边一大片空白 —— 就是用户截图里「最大化后没填满」。
     // 改成连续多轮贴合收敛，每轮都按最新的 getContentBounds 重算。
-    const refit = () => this.scheduleFit(6);
-    this.win.on('resize', refit);
-    this.win.on('move', refit);
-    this.win.on('maximize', refit);
-    this.win.on('unmaximize', refit);
-    this.win.on('restore', () => {
+    const refit = () => { if (current()) this.scheduleFit(6); };
+    win.on('resize', refit);
+    win.on('move', refit);
+    win.on('maximize', refit);
+    win.on('unmaximize', refit);
+    win.on('restore', () => {
+      if (!current()) return;
       this.agent.show().catch(() => {});
       this.scheduleFit(6);
     });
-    this.win.on('minimize', () => { this.agent.hide().catch(() => {}); });
-    this.win.on('close', () => { this._closing = true; });
-    this.win.on('closed', () => {
-      if (this._selfClose) return;   // close() 自己在 park 完成后收尾
+    win.on('minimize', () => { if (current()) this.agent.hide().catch(() => {}); });
+    win.on('closed', () => {
+      // close() clears the reference before destroy(); an old window cannot close its successor.
+      if (!current()) return;
+      this._syncHook(false);
       this.win = null;
-      const pkg = this.pkg;
       this.pkg = null;
-      this._closing = false;
-      // 不走 close() 的关闭路径（Alt+F4、任务栏关闭、系统关机）也必须停掉安卓应用、
-      // 把模拟器窗口摘下来。否则窗口消失了但应用还在后台跑，用户再点开会因为
-      // 「已在运行」直接切过去，看起来就是「关不掉」。
+      this.session = null;
+      this._windowLifecycle = null;
+      this.waitingForRestart = false;
+      this.lastEmbedOk = false;
+      this._parkThen(() => lifecycle.onClosed?.(pkg, session));
       if (pkg && this._onCloseApp) {
-        try { this._onCloseApp(pkg); } catch (_) { /* ignore */ }
+        try { this._onCloseApp(pkg, session); } catch (_) { /* 通知失败不打断窗口收尾 */ }
       }
-      Promise.resolve(this.agent && this.agent.park()).catch(() => {}).then(() => {
-        if (this._closedCb) this._closedCb(pkg);
-      });
     });
     // 只在「应用窗口真正处于前台」且至少一项鼠标映射开启时装全局钩子；
     // 失焦/关闭立即卸载，绝不让 ApkStart 在后台拖慢整个系统的鼠标。
-    this.win.on('focus', () => this._syncHook(true));
-    this.win.on('blur', () => this._syncHook(false));
+    win.on('focus', () => { if (current()) this._syncHook(true); });
+    win.on('blur', () => { if (current()) this._syncHook(false); });
 
     // 注意：maximize() 会把 show:false 的窗口直接显示出来。
     // 独立窗口模式下画面在模拟器原生窗口里，这里一 maximize 就会在屏幕正中
@@ -517,27 +524,33 @@ class AppWindow {
    */
   async rotate(onRestart, explicitNext) {
     if (!this.isOpen) return this.state.landscape;
+    const win = this.win;
+    const previous = this.state.landscape;
     const next = explicitNext === undefined || explicitNext === null
-      ? !this.state.landscape : !!explicitNext;
+      ? !previous : !!explicitNext;
     this.setState({ tip: next ? '正在切换到横屏（重启安卓运行时，约 30-60 秒）…' : '正在切回竖屏（重启安卓运行时，约 30-60 秒）…', ready: false });
     if (typeof onRestart === 'function') {
       const ok = await onRestart(next).catch(() => false);
-      if (ok) {
-        this.state.landscape = next;
-        this._push();
-        // 面板尺寸变了，窗口宽高比跟着换；贴合几轮收敛
-        for (let i = 0; i < 5; i += 1) {
-          // eslint-disable-next-line no-await-in-loop
-          await sleep(400);
-          // eslint-disable-next-line no-await-in-loop
-          await this.fitNow();
-        }
+      if (this.win !== win) return previous;
+      if (!ok) {
+        // A failed physical restart must not pretend that a logical rotation changed the panel.
         this.setState({ ready: true, tip: '' });
-        return next;
+        return previous;
       }
+      this.state.landscape = next;
+      this._push();
+      // 面板尺寸变了，窗口宽高比跟着换；贴合几轮收敛。
+      for (let i = 0; i < 5; i += 1) {
+        await sleep(400);
+        if (this.win !== win) return previous;
+        await this.fitNow();
+      }
+      if (this.win === win) this.setState({ ready: true, tip: '' });
+      return next;
     }
-    // 没有注入重启实现（或失败）时退回 density 方案，至少能切排版
+    // 只有未提供物理重启的路径才执行逻辑排版切换。
     if (this.setOrientation) await this.setOrientation(next).catch(() => {});
+    if (this.win !== win) return previous;
     this.state.landscape = next;
     this.setState({ ready: true, tip: '' });
     return next;
@@ -628,22 +641,32 @@ class AppWindow {
    * 用户桌面上就会凭空多出一个 "Android Emulator - apkstart5554" 的黑窗。
    */
   close({ keepApp = false } = {}) {
-    if (!this.isOpen) return;
+    if (!this.isOpen) return this._pendingPark;
     const win = this.win;
     const pkg = this.pkg;
+    const session = this.session;
+    const lifecycle = this._windowLifecycle;
     this._syncHook(false);
     this.lastEmbedOk = false;
-    if (!keepApp && pkg && this._onCloseApp) this._onCloseApp(pkg);
-    this._selfClose = true;
     this.win = null;
     this.pkg = null;
-    const done = () => {
+    this.session = null;
+    this._windowLifecycle = null;
+    this.waitingForRestart = false;
+    const pending = this._parkThen(() => {
       try { win.destroy(); } catch (_) { /* ignore */ }
-      this._selfClose = false;
-      this._closing = false;
-      if (this._closedCb) this._closedCb(pkg);
-    };
-    Promise.resolve(this.agent && this.agent.park()).catch(() => {}).then(done, done);
+      lifecycle?.onClosed?.(pkg, session);
+    });
+    if (!keepApp && pkg && this._onCloseApp) this._onCloseApp(pkg, session);
+    return pending;
+  }
+
+  waitForPark() { return this._pendingPark; }
+
+  _parkThen(done) {
+    const pending = this._pendingPark.then(() => this.agent?.park()).catch(() => {}).then(done);
+    this._pendingPark = pending;
+    return pending;
   }
 
   onCloseApp(cb) { this._onCloseApp = cb; }

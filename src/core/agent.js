@@ -29,74 +29,93 @@ class WinAgent extends EventEmitter {
     this.ready = null;
     this.buf = '';
     this.pending = [];
-    this.dead = false;
+    this._attempt = null;
     this.hooked = false;
     this.hookConf = null;
   }
 
   get available() { return process.platform === 'win32' && fs.existsSync(SCRIPT); }
 
+  _spawnProcess() {
+    return spawn('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', SCRIPT, '-Port', '0',
+    ], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  }
+
+  _connect(port) { return net.connect({ host: '127.0.0.1', port }); }
+
   /** 启动代理并等到 TCP 连上（幂等） */
   ensure() {
     if (this.ready) return this.ready;
-    this.ready = new Promise((resolve, reject) => {
-      if (!this.available) { reject(new Error('窗口代理不可用')); return; }
-      let out = '';
-      let settled = false;
-      const proc = spawn('powershell.exe', [
-        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', SCRIPT, '-Port', '0',
-      ], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    if (!this.available) return Promise.reject(new Error('窗口代理不可用'));
 
-      this.proc = proc;
-      const fail = (e) => {
-        if (settled) return;
-        settled = true;
-        this.ready = null;
-        reject(e instanceof Error ? e : new Error(String(e)));
-      };
-
-      const onData = (chunk) => {
-        out += chunk.toString('utf8');
-        const m = /PORT=(\d+)/.exec(out);
-        if (!m || settled) return;
-        settled = true;
-        this.port = Number(m[1]);
-        this._connect().then(resolve).catch(fail);
-      };
-      proc.stdout.on('data', onData);
-      proc.stderr.on('data', (d) => { out += d.toString('utf8'); });
-      proc.on('error', fail);
-      proc.on('exit', () => {
-        const wasReady = !!this.sock;
-        this.proc = null;
-        this.sock = null;
-        this.ready = null;
-        this.hooked = false;
-        this.hookConf = null;
-        this._failAll('窗口代理已退出');
-        if (wasReady) this.emit('exit');
-        fail(new Error('窗口代理启动失败'));
-      });
-      setTimeout(() => { if (!settled) fail(new Error('窗口代理启动超时')); }, 15000);
+    const attempt = { connected: false };
+    const ready = new Promise((resolve, reject) => {
+      attempt.resolve = resolve;
+      attempt.reject = reject;
     });
-    return this.ready;
+    this._attempt = attempt;
+    this.ready = ready;
+    // PORT 只是监听地址。只有收到 connect 才就绪，启动超时也覆盖 TCP 握手。
+    attempt.timer = setTimeout(() => this._endAttempt(attempt, new Error('窗口代理启动超时')), 15000);
+    try {
+      const proc = attempt.proc = this.proc = this._spawnProcess();
+      let output = '';
+      proc.stdout.on('data', (chunk) => {
+        if (this._attempt !== attempt || attempt.sock) return;
+        output += String(chunk);
+        const port = /(?:^|\r?\n)PORT=(\d+)\r?\n/.exec(output);
+        if (!port) return;
+        this.port = Number(port[1]);
+        try { this._watchSocket(attempt, this._connect(this.port)); }
+        catch (error) { this._endAttempt(attempt, error); }
+      });
+      proc.stderr.resume();
+      proc.on('error', (error) => this._endAttempt(attempt, error));
+      proc.once('exit', () => {
+        const message = attempt.connected ? '窗口代理已退出' : '窗口代理启动失败';
+        this._endAttempt(attempt, new Error(message), { kill: false });
+      });
+    } catch (error) {
+      this._endAttempt(attempt, error);
+    }
+    return ready;
   }
 
-  _connect() {
-    return new Promise((resolve, reject) => {
-      const sock = net.connect({ host: '127.0.0.1', port: this.port }, () => resolve(this));
-      sock.setEncoding('utf8');
-      sock.setNoDelay(true);
-      sock.on('data', (d) => this._onData(d));
-      sock.on('error', (e) => { reject(e); });
-      sock.on('close', () => {
-        this.sock = null;
-        this.ready = null;
-        this._failAll('窗口代理连接断开');
-      });
-      this.sock = sock;
-      this.buf = '';
+  _watchSocket(attempt, sock) {
+    attempt.sock = this.sock = sock;
+    sock.setEncoding('utf8');
+    sock.setNoDelay(true);
+    sock.once('connect', () => {
+      if (this._attempt !== attempt) return;
+      clearTimeout(attempt.timer);
+      attempt.connected = true;
+      attempt.resolve(this);
     });
+    sock.on('data', (chunk) => {
+      if (this._attempt === attempt && attempt.connected) this._onData(chunk);
+    });
+    sock.on('error', (error) => this._endAttempt(attempt, error));
+    sock.once('close', () => this._endAttempt(attempt, new Error('窗口代理连接断开')));
+  }
+
+  _endAttempt(attempt, error, { kill = true, notify = true } = {}) {
+    // 旧子进程和 socket 的 close/exit 可能晚到，不能清掉新连接。
+    if (this._attempt !== attempt) return;
+    this._attempt = null;
+    this.ready = this.sock = this.proc = null;
+    this.port = 0;
+    this.buf = '';
+    this.hooked = false;
+    this.hookConf = null;
+    clearTimeout(attempt.timer);
+    attempt.reject(error);
+    this._failAll(error.message);
+    attempt.sock?.destroy();
+    if (kill) {
+      try { attempt.proc?.kill(); } catch (_) { /* 子进程可能已经退出 */ }
+    }
+    if (notify && attempt.connected) this.emit('exit');
   }
 
   _onData(chunk) {
@@ -126,8 +145,9 @@ class WinAgent extends EventEmitter {
 
   /** 发送一条命令并等待回包 */
   async call(obj, timeout = CALL_TIMEOUT) {
-    await this.ensure();
-    if (!this.sock) throw new Error('窗口代理未连接');
+    const ready = this.ensure();
+    await ready;
+    if (this.ready !== ready || !this.sock) throw new Error('窗口代理未连接');
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`窗口代理超时: ${obj.cmd}`)), timeout);
       this.pending.push({ resolve, reject, timer });
@@ -323,17 +343,8 @@ class WinAgent extends EventEmitter {
     if (this.hooked && this.sock) {
       try { this.sock.write('{"cmd":"hook","on":0}\n'); } catch (_) { /* ignore */ }
     }
-    this.hooked = false;
-    this.hookConf = null;
-    try { this.sock?.end(); } catch (_) { /* ignore */ }
-    try { this.sock?.destroy(); } catch (_) { /* ignore */ }
-    // 故意不 kill 代理进程：断开连接后它会自己进入「守卫」状态（见 agent.ps1 的
-    // _lingerUntil）。模拟器可能还在开机，几十秒后才把窗口显示出来；那时如果
-    // 代理已经死了，桌面上就会留一个 Android Emulator 黑窗。模拟器进程消失后
-    // 代理会自行退出，最多守 3 分钟。
-    this.sock = null;
-    this.proc = null;
-    this.ready = null;
+    // 主动断开后让代理程序进入它自己的守卫状态，避免模拟器迟来的黑窗闪出来。
+    if (this._attempt) this._endAttempt(this._attempt, new Error('窗口代理已关闭'), { kill: false, notify: false });
   }
 }
 

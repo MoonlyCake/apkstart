@@ -150,8 +150,8 @@ test('实验室分组有多开开关，且接到 engine.multiWindow', () => {
   assert(/engine:\s*\{\s*multiWindow:\s*e\.target\.checked/.test(appJs), '要把开关存到 engine.multiWindow');
   assert(/engine:\s*\{\s*keepBackground:/.test(appJs), '要保存后台保留数');
   // 底层确实消费这个设置（不是只有 UI）
-  const engineJs = fs.readFileSync(path.join(ROOT, 'src/core/engine.js'), 'utf8');
-  assert(/s\.engine && s\.engine\.multiWindow/.test(engineJs), 'engine 要读取 multiWindow 决定不 force-stop 旧应用');
+  const sessions = fs.readFileSync(path.join(ROOT, 'src/application/app-sessions.js'), 'utf8');
+  assert(/if \(engine\.multiWindow\)/.test(sessions), '应用会话要消费保存的多窗口偏好');
   const storeJs = fs.readFileSync(path.join(ROOT, 'src/core/store.js'), 'utf8');
   assert(/multiWindow:\s*false/.test(storeJs), 'store 要有 multiWindow 默认值且默认关闭');
 });

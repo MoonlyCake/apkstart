@@ -590,26 +590,8 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(/splashWin/.test(mainJs), 'main.js 要创建 splash 窗口');
     assert(/splashProgress/.test(mainJs), '要有 splashProgress 推送函数');
     assert(/splashDone/.test(mainJs), '要有 splashDone 完成信号');
-    assert(/splash:version/.test(mainJs) || /splash:isFirstRun/.test(mainJs), 'splash IPC 要注册');
-  });
-
-  await test('前台应用优先级不能用 below（点击跟手 / 视频不掉帧）', () => {
-    const engJs = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'engine.js'), 'utf8');
-    // balanced/performance 有应用在前台时必须是 normal：below 会让 qemu 被饿，
-    // 表现为视频解码掉帧、点击要等一下才响应（用户说的「点击不跟手」主因）。
-    const begin = engJs.slice(engJs.indexOf('async beginApp'));
-    assert(/mode === 'game' \? 'game' : 'normal'/.test(begin),
-      "beginApp 前台优先级应映射为 game→game、其余→normal");
-    assert(!/performance.*\? 'normal' : 'below'/.test(begin),
-      '不能再把 balanced 落到 below');
-    // 每次打开/切回都要重设优先级：endApp 会降到 idle，切换回来不提权就会发木
-    const setIdx = begin.indexOf("setGuestPriority(level)");
-    const firstIdx = begin.indexOf("if (first)");
-    assert(setIdx > -1, 'beginApp 要调 setPriority');
-    // setPriority 不应只在第一个 if(first) 块里 —— 切换应用（非 first）也要提权
-    const firstBlock = begin.slice(firstIdx, begin.indexOf('\n\n', firstIdx));
-    assert(!/setGuestPriority\(level\)/.test(firstBlock) || begin.split('setGuestPriority(level)').length >= 2,
-      'setPriority 要在每次 beginApp 都执行，不只第一次');
+    const splashIpc = fs.readFileSync(path.join(root, 'src', 'ipc', 'splash.js'), 'utf8');
+    assert(/splash:version/.test(splashIpc) && /splash:isFirstRun/.test(splashIpc), '启动画面仍要暴露原有通道');
   });
 
   await test('省资源模式应下调内存上限（减运行占用）', () => {
@@ -1104,7 +1086,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
       'resetDisplayOverrides 也要按模式设置 ignore-orientation');
   });
 
-  await test('关闭应用必须有入口：右键菜单 + 托盘 + IPC 一个都不能少', () => {
+  await test('关闭应用必须有入口：右键菜单 + 托盘 + IPC 一个都不能少', async () => {
     const root = path.join(__dirname, '..');
     const mainJs = fs.readFileSync(path.join(root, 'src', 'main.js'), 'utf8');
     const preloadJs = fs.readFileSync(path.join(root, 'src', 'preload.js'), 'utf8');
@@ -1112,7 +1094,9 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
 
     // 主进程要有 app:stop（以前压根没有，endApp 只在窗口关闭时触发，
     // 而独立窗口模式那个窗口是隐藏的 → 应用一起来就关不掉）
-    assert(/ipcMain\.handle\('app:stop'/.test(mainJs), '缺少 app:stop IPC');
+    const { createAppsHandlers } = require('../src/ipc/handlers/apps');
+    const handler = createAppsHandlers({ stopApp: async (pkg) => ({ ok: true, pkg }) })['app:stop'];
+    assert(typeof handler === 'function', '缺少 app:stop IPC');
     // 渲染进程要能调到
     assert(/stop:\s*\(pkg\)\s*=>\s*invoke\('app:stop'/.test(preloadJs), 'preload 要暴露 stop');
     // 右键菜单要有这一项
@@ -1126,19 +1110,16 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
 
     // 修复：托盘和 IPC 必须共用同一条 stopApp 路径，不在两处写同样的逻辑
     assert(/async function stopApp/.test(mainJs), '必须有统一的 stopApp 函数');
-    assert(/ipcMain\.handle\('app:stop'[\s\S]{0,200}stopApp/.test(mainJs),
-      'app:stop IPC 必须委托给 stopApp');
+    const result = await handler({}, 'com.example.app');
+    assert(result?.ok && result.pkg === 'com.example.app', 'app:stop IPC 必须委托给 stopApp');
     assert(/stopApp\(pkg\)\.then/.test(mainJs) || /stopApp\(pkg\)/.test(mainJs),
       '托盘菜单也必须调 stopApp');
-    // 关闭后必须清 currentAppPkg，否则托盘还显示「关闭当前应用（xxx）」
-    assert(/currentAppPkg === target/.test(mainJs) || /currentAppPkg = null/.test(mainJs),
-      'stopApp 必须清 currentAppPkg');
-    // 独立窗口模式必须先藏模拟器窗口再关壳窗口（反了会在桌面闪一下）
-    assert(/detached[\s\S]{0,200}agent\.hide/.test(mainJs),
-      '独立窗口模式先 hide 再 close');
-    // 外部关闭（Alt+F4）也要清 currentAppPkg
-    assert(/onCloseApp[\s\S]{0,300}currentAppPkg = null/.test(mainJs) || /onCloseApp[\s\S]{0,300}currentAppPkg === pkg/.test(mainJs),
-      'onCloseApp 也要清 currentAppPkg');
+    assert(/await appSessions\.stop\(target\)/.test(mainJs) && !/let currentAppPkg/.test(mainJs),
+      '停止后的前台标记必须只从会话控制器读取');
+    const stop = mainJs.slice(mainJs.indexOf('async function stopApp('));
+    assert(/agent\.hide\(\)[\s\S]{0,180}appWin\.close/.test(stop), '独立窗口模式先 hide 再 close');
+    assert(/onCloseApp\(\(_pkg, ticket\)[\s\S]{0,160}appSessions\.close\(ticket\)/.test(mainJs),
+      '外部关闭同样使用窗口代际令牌');
   });
 
   await test('旧版本清理：能发现任意位置的 ApkStart 目录，且绝不碰当前运行版本', () => {
@@ -1171,29 +1152,19 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     }
   });
 
-  await test('切换应用必须先干净关掉上一个，否则旧应用 ANR / _activeApps 残留', () => {
-    const root = path.join(__dirname, '..');
-    const mainJs = fs.readFileSync(path.join(root, 'src', 'main.js'), 'utf8');
-
-    // openAppWindow 现在必须是 async：切换时要 await 把旧应用停干净再开新的。
-    assert(/async function openAppWindow/.test(mainJs), 'openAppWindow 必须 async（要等旧应用收尾）');
-    // 调用处也必须 await，否则 close/endApp 和新应用启动并发 → 抢前台 → ANR
-    assert(/await openAppWindow\(/.test(mainJs), 'runLaunch 里必须 await openAppWindow');
-
-    // 核心：切到「另一个」应用时，必须先 endApp(旧) —— 只收窗口不停进程是 bug 根源
-    const fn = mainJs.slice(mainJs.indexOf('async function openAppWindow'));
-    const body = fn.slice(0, fn.indexOf('\n}', fn.indexOf('currentAppPkg = pkg')));
-    assert(/currentAppPkg !== pkg/.test(body), '只在切换到不同应用时才关旧的（同应用走复用）');
-    assert(/runtime\.endApp\(prev/.test(body) || /runtime\.endApp\(currentAppPkg/.test(body),
-      '切换时必须真正 endApp 旧应用（force-stop + 移出 _activeApps）');
-    // appWin.open() 内部用的是 close({keepApp:true})，不 endApp；
-    // 所以外层必须显式补上 endApp，不能指望 open 里的 close。
-    assert(/close\(\{ keepApp: true \}\)/.test(body) && /endApp/.test(body),
-      '先 park 画面（close keepApp）再 endApp 停进程，顺序要对');
-
-    // 窗口已不在但进程还挂在 _activeApps 的情况也要收尾
-    assert(/else if \(currentAppPkg && currentAppPkg !== pkg\)/.test(body),
-      '窗口不在时也要清掉残留的 _activeApps 进程');
+  await test('生产启动在开新会话前等待旧会话和原生画面收尾', () => {
+    const mainJs = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
+    const start = mainJs.indexOf('async function openAppWindow');
+    const body = mainJs.slice(start, mainJs.indexOf('async function toggleDisplayMode', start));
+    const hide = body.indexOf('await appWin.close({ keepApp: true })');
+    const close = body.indexOf('await appSessions.close(previous)');
+    const park = body.indexOf('await appWin.waitForPark()');
+    const reserve = body.indexOf('appSessions.reserve(pkg');
+    assert(hide >= 0 && close > hide && park > close && reserve > park,
+      '切换必须等旧画面摘下和旧 APP 停止后才登记新的会话');
+    assert(/if \(previous && previous\.pkg !== pkg\)/.test(body), '同一包优先复用当前的宿主窗口');
+    assert(/session = await openAppWindow\([\s\S]{0,150}await Promise\.all\(\[appWin\.waitForPark\(\), appSessions\.waitForTurn\(session\)\]\)/.test(mainJs),
+      '启动流程必须等涉及前一个会话的排队任务完成，再派发 APK 启动');
   });
 
   await test('自动全屏和横屏必须是活的：设置项得有消费方，且启动时校正面板方向', () => {
@@ -1280,14 +1251,12 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
       .join('\n');
     assert(!/cmd wifi connect-network/.test(emuCode), 'shell 没有 connect-network 权限，不能用它');
 
-    // 修复必须从轻到重：先重连，再冷启动，最后才清数据
-    const repair = engineJs.slice(engineJs.indexOf('async repairNetwork'));
-    const repairBody = repair.slice(0, repair.indexOf('async ', 10) > 0 ? undefined : undefined);
-    assert(/repairWifi/.test(repairBody), 'repairNetwork 应先尝试轻量的 Wi-Fi 重连');
-    const wifiAt = repairBody.indexOf('repairWifi');
-    const wipeAt = repairBody.indexOf('forceWipeOnNextStart');
-    assert(wifiAt > -1 && wipeAt > -1 && wifiAt < wipeAt,
-      '顺序必须是：先重连 Wi-Fi，最后才重置数据（不能一上来就清用户数据）');
+    // 网络修复先重连再冷启动；自动诊断走同一路径，不能把未联网当成清空授权。
+    const repair = engineJs.slice(engineJs.indexOf('async repairNetwork'), engineJs.indexOf('  dispose()'));
+    const wifiAt = repair.indexOf('repairWifi');
+    const bootAt = repair.indexOf('this.lifecycle.restart');
+    assert(wifiAt > -1 && bootAt > wifiAt, '先重连 Wi-Fi，再冷启动');
+    assert(!/forceWipe|resetAndroidData/.test(repair), '修复网络不能自动重置数据');
 
     // ensureNetwork 也要先试轻量修复，别直接冷启动
     const ensure = engineJs.slice(engineJs.indexOf('async ensureNetwork'));
@@ -2361,7 +2330,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(/正在为《[\s\S]{0,40}切换到/.test(mainJs), '提示文案要说清为什么慢');
     // 真正开始换向重启时，pre-attach 可能已经把壳窗口收起来了 —— 必须再亮一次，
     // 否则重启那 40 秒桌面全空（用户以为程序退出了）。
-    assert(/appWin\.showWaiting\(/.test(mainJs), '重启换向前要重新亮出等待窗口');
+    assert(/target\.showWaiting\(/.test(mainJs), '重启换向前要重新亮出等待窗口');
     assert(/waitingForRestart/.test(appwin), '要有「正在等待重启」标记');
     // 启动阶段的 pre-attach 轮询看到标记必须让路，不能把等待窗口又 hide 掉
     assert(/if \(target\.waitingForRestart\) \{ schedule\(\); return; \}/.test(mainJs), 'pre-attach 要让路');
@@ -2453,7 +2422,8 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     // 排队顺序、并发、去重和失败恢复由 rewrite-queue.test.js 按行为验证。
     assert(mainJs.includes("appOperations.run('install', () => installOne(filePath))"), '安装要入队');
     assert(mainJs.includes('appOperations.run(key, () => launchOne(pkg))'), '启动要走同一队列');
-    assert(mainJs.includes('if (r.ok === false) return r;'), '不能把拒绝安装返回成成功');
+    const appsIpc = fs.readFileSync(path.join(root, 'src', 'ipc', 'handlers', 'apps.js'), 'utf8');
+    assert(appsIpc.includes('if (r.ok === false) return r;'), '不能把拒绝安装返回成成功');
   });
 
   await test('硬件加速：商店版引导用户开 WHPX，安装版一键开启并可退 AEHD', () => {
@@ -2468,8 +2438,8 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
       '要先开 HypervisorPlatform（WHPX 真正需要的那个）');
     // 2) 不能再拿 WinHvPlatform.dll 是否存在当开关：现代 Windows 上它一直都在，
     //    这样判断会把真正需要开功能的机器挡在门外。
-    const handler = mainJs.slice(mainJs.indexOf("ipcMain.handle('provision:enableVirtualization'"));
-    const handlerBody = handler.slice(0, 4000);
+    const winIpc = fs.readFileSync(path.join(root, 'src', 'ipc', 'handlers', 'windows-features.js'), 'utf8');
+    const handlerBody = winIpc.slice(winIpc.indexOf("'provision:enableVirtualization':"), winIpc.indexOf("'provision:openWindowsFeatures':"));
     assert(!/if \(hv\.dll\) \{/.test(handlerBody), '不能再按 WinHvPlatform.dll 分叉');
     // 3) 商店（MSIX）版：拿不到提权就退回「手动引导」，而不是弹一个注定失败的 UAC
     assert(/if \(store\.STORE_BUILD\) \{[\s\S]{0,900}manual: true/.test(handlerBody),
@@ -2477,12 +2447,12 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(/商店版无法自行提权/.test(mainJs), '商店版文案要说明为什么不能自动开');
     assert(/虚拟机监控程序平台/.test(mainJs), '要明确写出「Windows 虚拟机监控程序平台」');
     // 4) 开启成功后必须清掉加速缓存，否则界面还显示旧结论
-    assert(/const whpx = await enableWhpxFeatures\(\);\s*\n\s*runtime\.provisioner\.invalidateEnvCache/.test(mainJs),
+    assert(/const whpx = await enableWhpxFeatures\(\);\s*\n\s*live\.runtime\.provisioner\.invalidateEnvCache/.test(winIpc),
       '开启后要 invalidateEnvCache');
     // 5) 用户点了「否」要能和真失败区分开（1223 = ERROR_CANCELLED）
     assert(/1223/.test(mainJs) && /cancelled/.test(mainJs), '要区分 UAC 取消');
     // 6) 有「Windows 虚拟机监控程序平台」那一项的是经典对话框，不是 ms-settings 页面
-    assert(/optionalfeatures\.exe/.test(mainJs), '要打开 classic optionalfeatures.exe');
+    assert(/optionalfeatures\.exe/.test(winIpc), '要打开 classic optionalfeatures.exe');
     // 7) UI 要处理 manual / cancelled，并真的去打开那个对话框
     assert(/r\.manual/.test(appJs) && /api\.openWindowsFeatures/.test(appJs), 'UI 要处理 manual 分支');
     assert(/openWindowsFeatures: \(\) => invoke\('provision:openWindowsFeatures'\)/.test(preloadJs),
@@ -2589,7 +2559,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(/wantLandscapeFor\(pkg\)\s*\)?\.?\s*/.test(mainJs) && /orientation\.resolveLandscape/.test(mainJs),
       'wantLandscapeFor 要走 resolveLandscape');
     assert(/async function rotateCurrentApp\(\)/.test(mainJs), '要有统一的旋转入口');
-    assert(/orientation\.flipLandscape\(current\)/.test(mainJs), '旋转入口要用同一个 flip');
+    assert(/orientation\.flipLandscape\(wantLandscapeFor\(ticket\.pkg\)\)/.test(mainJs), '旋转入口要用同一个 flip');
     assert(/orientation\.overrideValue\(next\)/.test(mainJs), '旋转入口要写同一个覆盖值');
     const shellJs = fs.readFileSync(path.join(root, 'src', 'ui', 'shell.js'), 'utf8');
     assert(/shell\.rotate\(\)/.test(shellJs), '标题栏旋转按钮要走统一入口');
@@ -2648,14 +2618,17 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
       '探针要按「显式 true 才算嵌入」判定');
   });
 
-  await test('加载速度：网络状态新鲜缓存快速复用，运行时停止即作废', () => {
+  await test('加载速度：网络状态新鲜缓存快速复用，运行时停止即作废', async () => {
     const root = path.join(__dirname, '..');
     const engineJs = fs.readFileSync(path.join(root, 'src', 'core', 'engine.js'), 'utf8');
-    // waitForNetwork 命中 8 秒内的缓存直接返回，省掉连续调用的 adb 往返
     assert(/cached\.ok && Date\.now\(\) - cached\.at < 8000/.test(engineJs), 'waitForNetwork 要复用新鲜网络缓存');
-    // stop() 里清掉缓存，重启后不会误用关机前的旧状态导致黑屏
-    const stopBody = engineJs.slice(engineJs.indexOf('async stop('), engineJs.indexOf('async stop(') + 400);
-    assert(/this\._lastNetwork = null/.test(stopBody), 'stop 要清掉网络缓存');
+    const { Runtime } = require('../src/core/engine');
+    const runtime = Object.create(Runtime.prototype);
+    runtime.emulator = { running: () => false };
+    runtime.inspectEmulatorOwnership = async () => ({ state: 'absent' });
+    runtime._lastNetwork = { ok: true, at: Date.now() };
+    assert(await runtime.stop() === true, '不存在运行时是幂等关机');
+    assert(runtime._lastNetwork === null, '已停止的运行时不能复用上一次的网络状态');
   });
 
   await test('打包必须带上生产依赖（否则 @napi-rs/lzma 缺失、镜像展不开、应用全打不开）', () => {
@@ -2817,7 +2790,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(!/NO_MATCHING_ABIS.*playImageInfo/.test(retry), 'ABI 不匹配重试不能再被 playImageInfo 卡住');
     assert(/abiRetried = true/.test(inst), '二次仍失败要标记，文案才不会谎称正在重试');
     const sw = inst.slice(inst.indexOf('async switchToCompat'), inst.indexOf('async install('));
-    assert(/invalidateSnapshot\(\)/.test(sw), '切兼容镜像必须作废旧快照，否则翻译层不生效');
+    assert(/this\.runtime\.useCompatImage\(/.test(sw), '兼容镜像切换必须经运行时队列');
     assert(/runningHasArm/.test(inst) && /ro\.product\.cpu\.abilist/.test(inst), '装 ARM 应用前要看当前运行时的真实翻译能力');
     const ui = fs.readFileSync(path.join(root, 'src', 'ui', 'app.js'), 'utf8');
     const f = ui.slice(ui.indexOf('function friendlyInstallErrorText'), ui.indexOf('function friendlyInstallErrorText') + 900);

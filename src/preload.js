@@ -162,7 +162,7 @@ contextBridge.exposeInMainWorld('apkstart', {
   on: (channel, cb) => {
     const allowed = [
       'install:start', 'install:progress', 'install:done', 'install:error',
-      'app:launched', 'runtime:log', 'toast', 'ui:navigate', 'provision:progress',
+      'app:launched', 'apps:changed', 'runtime:log', 'toast', 'ui:navigate', 'provision:progress',
       'update:progress', 'update:state', 'autodebug:state',
     ];
     if (!allowed.includes(channel)) return () => {};

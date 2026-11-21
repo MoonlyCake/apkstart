@@ -419,3 +419,76 @@ test('an ABI rejection from the target launch command yields a neutral recovery 
   assert.deepEqual(events, [['start rejected']]);
   assert.deepEqual(updatedRecords, []);
 });
+
+test('a launch whose window closes during boot does not send application commands', async (t) => {
+  const { installer, packageName, events, updatedRecords } = installerFixture(t);
+  let current = true;
+  const ensure = installer.runtime.ensure;
+  installer.runtime.ensure = async () => {
+    const result = await ensure();
+    current = false;
+    return result;
+  };
+  await assert.rejects(installer.launch(packageName, { isCurrent: () => current }), /应用窗口已关闭/);
+  assert.deepEqual(events, []);
+  assert.deepEqual(updatedRecords, []);
+});
+
+test('a failed panel replacement cannot start an app via the old ADB client', async (t) => {
+  const { installer, packageName, events, updatedRecords } = installerFixture(t);
+  await assert.rejects(installer.launch(packageName, {
+    beforeStart: async () => ({ ok: false, error: 'panel stop failed' }),
+  }), /panel stop failed/);
+  assert.deepEqual(events, []);
+  assert.deepEqual(updatedRecords, []);
+});
+
+test('a launch closed during the package lookup never requests Android start', async (t) => {
+  const { installer, packageName, client, events, updatedRecords } = installerFixture(t);
+  let current = true;
+  client.isInstalled = async () => { current = false; return true; };
+  await assert.rejects(installer.launch(packageName, { isCurrent: () => current }), /应用窗口已关闭/);
+  assert.deepEqual(events, []);
+  assert.deepEqual(updatedRecords, []);
+});
+
+test('external runtime replacement invalidates ADB even while the window ticket survives', async (t) => {
+  const { installer, packageName, client, events, updatedRecords } = installerFixture(t);
+  const runtime = installer.runtime;
+  runtime.guestGeneration = 1;
+  runtime.ensure = async () => ({ ok: true, engine: 'emulator', generation: 1, client });
+  runtime.waitForNetwork = async () => {
+    runtime.guestGeneration = 2;
+    return { ok: true };
+  };
+  await assert.rejects(installer.launch(packageName), /安卓运行时已切换/);
+  assert.deepEqual(events, []);
+  assert.deepEqual(updatedRecords, []);
+});
+
+test('intentional panel switch supplies a new guest lease before the app starts', async (t) => {
+  const { installer, packageName, client, events } = installerFixture(t);
+  const runtime = installer.runtime;
+  runtime.guestGeneration = 1;
+  runtime.ensure = async () => ({ ok: true, engine: 'base', generation: 1,
+    client: { resetDisplayOverrides: assert.fail, startApp: assert.fail } });
+  const result = await installer.launch(packageName, {
+    beforeStart: async () => {
+      runtime.guestGeneration = 2;
+      return { ok: true, engine: 'base', generation: 2, client };
+    },
+  });
+  assert.equal(result.generation, 2);
+  assert.deepEqual(events.map((e) => e[0]), ['start', 'orientation', 'touch']);
+});
+
+test('guest expiry during an in-flight PID read breaks observation even if the read completes', async () => {
+  let current = true;
+  let reads = 0;
+  await assert.rejects(runLaunchPolicy({
+    start: async () => {},
+    probe: async () => { reads += 1; current = false; return ['42']; },
+    assertCurrent: () => { if (!current) throw new Error('stale guest'); },
+  }, timing()), /stale guest/);
+  assert.equal(reads, 1);
+});

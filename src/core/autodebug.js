@@ -311,7 +311,7 @@ function evaluate(obs) {
       category: 'network',
       severity: 'warn',
       title: '安卓里没有网络',
-      hint: '安卓侧解析或联网失败，视频/资讯类应用会一直转圈。可以用「修复网络」重置安卓数据解决（应用清单会保留）。',
+      hint: '安卓侧解析或联网失败，视频/资讯类应用会一直转圈。可以用「修复网络」重连 Wi-Fi、必要时冷启动；不会清除安卓数据。',
       detail: network.reason || '',
       fix: 'repairNetwork',
     });

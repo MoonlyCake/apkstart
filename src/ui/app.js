@@ -2032,9 +2032,7 @@ function bindSettings() {
     }
   });
 
-  // 修复网络：安卓里联网页面一直黑屏（红果点「同意并继续」后整屏黑）时用。
-  // 根因是虚拟机 /data 里的 Wi-Fi 配置坏了，wlan0 没起来、没有默认路由。
-  // Play Store 镜像不允许 root，只能整体重置 /data；应用清单保留，点开时会自动重装。
+  // 网络修复可能重启安卓，但不是重置数据的入口。
   $('btnRepairNetwork').addEventListener('click', async () => {
     const btn = $('btnRepairNetwork');
     btn.disabled = true;
@@ -2043,11 +2041,8 @@ function bindSettings() {
         type: 'warning',
         title: '修复虚拟机网络？',
         message: '应用里需要联网的页面一直黑屏/转圈，通常是安卓虚拟机没有网络。',
-        detail: '修复会按「代价从小到大」依次尝试：\n\n'
-          + '1. 冷启动虚拟机（不加载快照）后等待联网 —— 不影响任何数据\n'
-          + '2. 仍不行才重置安卓数据 —— 应用清单保留、点开会自动重装，\n'
-          + '   但应用内的登录态、追剧记录等会丢失\n\n'
-          + '只影响当前 AVD，系统镜像和本机 APK 缓存都不动。整个过程约 1–5 分钟。是否继续？',
+        detail: '先尝试重连 Wi-Fi；如果无效，会冷启动安卓一次，正在运行的应用可能关闭。'
+          + '不会清除安卓应用、登录状态或其他数据。是否继续？',
         buttons: ['取消', '开始修复'],
         defaultId: 0,
         cancelId: 0,
@@ -2057,14 +2052,14 @@ function bindSettings() {
       if (!r || !r.ok) {
         toast({
           title: '网络仍未恢复',
-          body: (r && r.error) || '重置后虚拟机还是没网，请检查本机网络/防火墙是否拦住了模拟器。',
+          body: (r && r.error) || '请检查 Windows 的网络、防火墙或代理。安卓数据未清除。',
           type: 'error',
         });
         return;
       }
       toast({
         title: '网络已恢复',
-        body: `${(r.network && r.network.ip) || '已联网'}${r.wiped ? '（为修复网络重置过安卓数据，点开应用会自动重装）' : '（未动你的数据）'}`,
+        body: `${r.network?.ip || '已联网'}（未清除安卓数据）`,
         type: 'ok',
       });
     } catch (e) {
@@ -2851,13 +2846,13 @@ async function fixIssue(issue) {
       break;
     }
     case 'repairNetwork': {
-      const t = toast({ title: '正在重置安卓网络…', body: '应用清单会保留', type: 'info', sticky: true, spinner: true });
+      const t = toast({ title: '正在修复安卓网络…', body: '可能重启安卓，不会清除数据', type: 'info', sticky: true, spinner: true });
       const r = await api.runtimeRepairNetwork().catch(() => ({ ok: false }));
       if (r && r.ok !== false) {
-        t.update({ title: '安卓网络已重置', body: '下次打开应用重新联网', type: 'ok' });
+        t.update({ title: '安卓网络已恢复', body: '安卓数据未清除', type: 'ok' });
         setTimeout(t.dismiss, 3000);
       } else {
-        t.update({ title: '重置失败', body: (r && r.error) || '请重试', type: 'error' });
+        t.update({ title: '修复失败', body: (r && r.error) || '请重试', type: 'error' });
       }
       break;
     }

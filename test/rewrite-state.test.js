@@ -230,18 +230,16 @@ function resetFixture(t) {
   fs.writeFileSync(userdata, 'guest fixture');
   const config = path.join(avdDir, 'config.ini');
   fs.writeFileSync(config, 'config fixture');
-  const runtime = {
-    vmRunning: false,
+  const runtime = Object.assign(Object.create(f.Runtime.prototype), {
     provisioner: { paths: () => ({ avdHome }) },
     client: () => ({ isOnline: async () => false }),
     emulatorPorts: async () => [],
     emulator: { cancelSnapshotSave() {} },
-    _activeApps: new Set(),
-    _tombstoned: new Set(),
-  };
+  });
+  Object.defineProperty(runtime, 'vmRunning', { value: false, writable: true });
   return {
     ...f, userdata, avdDir, config, runtime,
-    reset: () => f.Runtime.prototype.resetAndroidData.call(runtime),
+    reset: () => runtime.resetAndroidData(),
   };
 }
 

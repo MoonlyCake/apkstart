@@ -1,0 +1,11 @@
+{"format": "apkstart/synthetic-lifecycle-v1",
+  "description": "Hand-authored expectations: wrong AVD name on the matching listener. No live trace.",
+  "steps": [
+    {"operation": "avd.owner", "args": [], "result": {"state": "live", "pid": 43101, "generation": "synthetic-generation-a"}},
+    {"operation": "loopback.listeners", "args": [], "result": [[5554, [43102]], [5556, [43101]], [5557, [43101]]]},
+    {"operation": "adb.exec", "args": ["emulator-5556", ["emu", "avd", "name"], {"timeout": 3000}], "result": {"stdout": "Android_Studio_Fixture\r\nOK"}},
+    {"operation": "avd.owner", "args": [], "result": {"state": "live", "pid": 43101, "generation": "synthetic-generation-a"}},
+    {"operation": "loopback.listeners", "args": [], "result": [[5554, [43102]], [5556, [43101]], [5557, [43101]]]},
+    {"operation": "adb.exec", "args": ["emulator-5556", ["emu", "avd", "name"], {"timeout": 3000}], "result": {"stdout": "Android_Studio_Fixture\r\nOK"}}
+  ]
+}

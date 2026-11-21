@@ -175,7 +175,7 @@ class BuiltinBackend extends Backend {
     return { ok: true, requiredMB: need };
   }
 
-  async resizeData(mb) { return this.rt ? this.rt.emulator.resizeDataPartition(mb) : { ok: false }; }
+  async resizeData(mb) { return this.rt ? this.rt.resizeDataPartition(mb) : { ok: false }; }
 
   async resetData() { return this.rt ? this.rt.resetAndroidData() : { ok: false }; }
 

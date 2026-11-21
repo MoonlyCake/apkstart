@@ -22,6 +22,7 @@ async function runLaunchPolicy({
   probe,
   onStarted = () => {},
   onAppUp,
+  assertCurrent = () => {},
   onMark = () => {},
   onLog = () => {},
 }, {
@@ -32,6 +33,7 @@ async function runLaunchPolicy({
   const { observeMs, stableMs, pollMs, probeMs, maxAttempts } = { ...policyDefaults, ...options };
   let announced = false;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    assertCurrent();
     let seen = false;
     try {
       // startApp may have seen a real PID before display adjustment begins.
@@ -52,6 +54,7 @@ async function runLaunchPolicy({
     let lastProbeError = null;
     let exited = false;
     while (now() < deadline) {
+      assertCurrent();
       let pids = null;
       try {
         pids = await probe({ timeout: Math.min(probeMs, Math.max(1, Math.floor(deadline - now()))) });
@@ -59,6 +62,7 @@ async function runLaunchPolicy({
       } catch (error) {
         lastProbeError = error;
       }
+      assertCurrent();
       const time = now();
       if (time > deadline) break;
       if (pids === null) {

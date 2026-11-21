@@ -114,7 +114,7 @@ function compatRequired(cause) {
   ), { code: 'APP_COMPAT_REQUIRED' });
 }
 
-async function restoreMissingCachedApp(runtime, client, pkg, app, onLog) {
+async function restoreMissingCachedApp(runtime, client, pkg, app, onLog, assertReady) {
   if (!app?.apkPath || !fs.existsSync(app.apkPath)) return;
   let installed;
   try {
@@ -123,6 +123,7 @@ async function restoreMissingCachedApp(runtime, client, pkg, app, onLog) {
     onLog('无法确认安装状态，未自动重装：' + error.message);
     return;
   }
+  assertReady();
   if (installed !== false) return;
   onLog('应用文件缺失（快照与数据不一致），正在用本地备份自动重装…');
   try {
@@ -130,13 +131,17 @@ async function restoreMissingCachedApp(runtime, client, pkg, app, onLog) {
       await client.install(app.apkPath, { grantPermissions: false });
     } else {
       const bundle = await parseBundle(app.apkPath);
-      try { await client.installMultiple(bundle.files); } finally { bundle.cleanup(); }
+      try {
+        assertReady();
+        await client.installMultiple(bundle.files);
+      } finally { bundle.cleanup(); }
     }
   } catch (error) {
     if (error?.code === 'NO_MATCHING_ABIS') throw compatRequired(error);
     onLog('自动安装失败：' + error.message);
     return;
   }
+  assertReady();
   try { runtime.emulator?.invalidateSnapshot(); } catch (_) { /* app was already restored */ }
 }
 
@@ -189,6 +194,8 @@ class Installer {
 
   /** 兼容镜像按「首次遇到 ARM 应用」按需下载，作为共享只读基础层只下一次 */
   async ensureCompatImage(onProgress) {
+    const blocked = this.runtime.compatImageChangeError?.();
+    if (blocked) throw Object.assign(new Error(blocked), { code: 'APP_COMPAT_REQUIRED' });
     const prov = this.runtime.provisioner;
     if (prov.playImageInfo().ok) return true;
     onProgress({ stage: 'runtime', message: '首次安装 ARM 应用：正在下载兼容镜像（约 1.5GB，只需一次）…' });
@@ -200,25 +207,12 @@ class Installer {
   /** 切换镜像必须重启运行时；重启后把已装应用从本地 APK 备份重新灌回去 */
   async switchToCompat(onProgress) {
     const apps = store.getApps();
-    store.saveSettings({ runtime: { compatImage: true } });
     onProgress({ stage: 'runtime', message: '正在切换到兼容镜像并重启运行时…' });
-    try { await this.runtime.stop(); } catch (_) { /* ignore */ }
-    // 等旧设备从 adb 列表里消失，避免被 ensure() 当成可复用实例
-    for (let i = 0; i < 12; i += 1) {
-      // eslint-disable-next-line no-await-in-loop
-      const ds = await this.runtime.client().devices().catch(() => []);
-      if (!ds.some((d) => /^emulator-\d+$/.test(d.serial))) break;
-      // eslint-disable-next-line no-await-in-loop
-      await sleep(1000);
-    }
-    // 关键：必须作废旧快照。快照里存着「无翻译层」时的内存与磁盘状态，
-    // 不清掉，ensure() 会直接从快照恢复 —— 镜像换了翻译层却根本没生效，
-    // 于是重装还是 NO_MATCHING_ABIS，用户看到「切换了还是不行」。
-    try { this.runtime.emulator?.invalidateSnapshot(); } catch (_) { /* ignore */ }
-    const rt = await this.runtime.ensure({ onLog: (m) => onProgress({ stage: 'runtime', message: m }) });
+    const rt = await this.runtime.useCompatImage({ onLog: (m) => onProgress({ stage: 'runtime', message: m }) });
     if (!rt.ok) {
       const err = new Error(rt.error || '切换兼容镜像后运行时不可用');
-      err.needsSetup = rt.needsSetup || 'provision';
+      if (rt.code) err.code = rt.code;
+      if (rt.needsSetup) err.needsSetup = rt.needsSetup;
       throw err;
     }
     for (const app of apps) {
@@ -298,13 +292,9 @@ class Installer {
       if (bundle) await client.installMultiple(bundle.files);
       else await client.install(filePath);
     } catch (e) {
-      // 到了这一步报 ABI 不匹配，就是「当前这台运行时没有 ARM 翻译层」的铁证 —— 不需要
-      // 再去猜 playImageInfo()。以前用 `!playImageInfo().ok` 当开关，镜像文件明明在磁盘上
-      // 却复用了无翻译的旧模拟器时，重试被跳过、直接抛错，可界面还照旧显示
-      // 「正在自动切换兼容镜像后重试」，于是出现「红色安装失败 + 文案说正在重试」的怪事。
-      // 现在无条件切一次：错误本身就是重试理由。
+      // ABI 错误可触发一次兼容重试；镜像保护仍可拒绝会覆盖现有数据的切换。
       if (e.code === 'NO_MATCHING_ABIS') {
-        onProgress({ stage: 'runtime', message: '这个应用只有 ARM 库，正在切换到兼容镜像后重装…' });
+        onProgress({ stage: 'runtime', message: '这个应用需要 ARM 转译，正在检查能否安全切换镜像…' });
         await this.ensureCompatImage(onProgress);
         const rt2 = await this.switchToCompat(onProgress);
         onProgress({ stage: 'install', message: '已切换兼容镜像，正在重新安装…' });
@@ -535,7 +525,14 @@ class Installer {
     return true;
   }
 
-  async launch(pkg, { onLog = () => {}, beforeStart = null, onMark = () => {}, onAppUp = null } = {}) {
+  async launch(pkg, {
+    onLog = () => {}, beforeStart = null, onMark = () => {}, onAppUp = null, isCurrent = () => true,
+  } = {}) {
+    // Window closure invalidates the launch even if boot/prepare was already waiting on the guest.
+    const assertCurrent = () => {
+      if (!isCurrent()) throw new Error('应用窗口已关闭');
+    };
+    assertCurrent();
     if (!validPackageName(pkg) || pkg !== pkg.trim()) throw new Error('无效的安卓应用包名');
     const app = store.getApp(pkg);
     // 用 let：beforeStart 可能因为「面板方向和应用方向不一致」而重启运行时并
@@ -544,18 +541,29 @@ class Installer {
     // 表现为「切横屏/竖屏后点应用直接失败」。
     let rt = await this.runtime.ensure({ onLog });
     onMark('ensure done');
+    assertCurrent();
     if (!rt.ok) {
       const err = new Error(rt.error || '运行时不可用');
       err.needsSetup = rt.needsSetup;
       throw err;
     }
+    // A window ticket may survive an intentional panel change. An ADB lease cannot.
+    const assertReady = () => {
+      assertCurrent();
+      if (rt.generation !== undefined && rt.generation !== this.runtime.guestGeneration) {
+        throw new Error('安卓运行时已切换，请重新打开应用');
+      }
+    };
+    assertReady();
     // 分辨率要在拉起应用之前改，避免 wm size 触发配置变更把刚启动的 Activity 重建
     if (beforeStart) {
       const replaced = await beforeStart(rt).catch((e) => { onLog(`显示适配跳过：${e.message}`); return null; });
       // beforeStart 可以返回一个新的 rt（重启运行时后旧 client 已失效），
       // 后续全部用新的。不返回就继续用原来的。
+      if (replaced?.ok === false) throw new Error(replaced.error || '无法切换安卓面板');
       if (replaced && replaced.client) rt = replaced;
     }
+    assertReady();
     // 清掉旧版本可能残留在 /data 里的 wm size / density 覆盖与自动旋转设置。
     // 这些覆盖是持久化的，不清理的话每次启动画面都会被转 90° 躺倒、留黑边、
     // 鼠标点击也无法对应（用户反馈的「旋转黑边 / 未填满 / 点不动同意」）。
@@ -571,6 +579,7 @@ class Installer {
     // 启动路径上绝不能做这种破坏性动作，等不到就先启动，大不了页面暂时加载慢。
     if (rt.engine === 'emulator' || rt.engine === 'builtin') {
       let net = await this.runtime.waitForNetwork({ onLog, timeoutMs: 20000 }).catch(() => null);
+      assertReady();
       if (net && net.ok) {
         onLog(`虚拟机网络就绪（${net.ip || ''}）`);
       } else {
@@ -587,6 +596,7 @@ class Installer {
           const fixed = await this.runtime.repairWifi().catch(() => false);
           if (fixed) {
             net = await this.runtime.waitForNetwork({ onLog, timeoutMs: 15000 }).catch(() => null);
+            assertReady();
             if (net && net.ok) {
               onLog(`虚拟机网络已恢复（${net.ip || ''}）`);
               // 关键：把「网络已连上」这个状态立刻存进快照。
@@ -604,18 +614,27 @@ class Installer {
         }
       }
     }
+    assertReady();
     const settings = store.getSettings();
-    await restoreMissingCachedApp(this.runtime, rt.client, pkg, app, onLog);
+    await restoreMissingCachedApp(this.runtime, rt.client, pkg, app, onLog, assertReady);
+    assertReady();
     try {
       await this.launchPolicy({
-        start: () => rt.client.startApp(pkg, app?.activity, {
-          freeform: settings.freeform,
-          bounds: app?.bounds || null,
-          observeProcess: false,
-        }),
+        start: () => {
+          assertReady();
+          return rt.client.startApp(pkg, app?.activity, {
+            freeform: settings.freeform,
+            bounds: app?.bounds || null,
+            observeProcess: false,
+          });
+        },
         probe: (opts) => probeAppPids(rt.client, pkg, opts),
+        assertCurrent: assertReady,
         // Starting an Activity can reset user-rotation; re-apply after each start.
-        onStarted: () => rt.client.setOrientation(!!settings.display?.landscape, { sendBackKey: false }).catch(() => {}),
+        onStarted: () => {
+          assertReady();
+          return rt.client.setOrientation(!!settings.display?.landscape, { sendBackKey: false }).catch(() => {});
+        },
         onLog,
         onMark,
         onAppUp,
@@ -626,6 +645,7 @@ class Installer {
       if (error?.code === 'NO_MATCHING_ABIS') throw compatRequired(error);
       throw error;
     }
+    assertReady();
     this.runtime.touch();
     if (app) {
       store.upsertApp({
@@ -634,7 +654,7 @@ class Installer {
         lastLaunchAt: Date.now(),
       });
     }
-    return { ok: true, engine: rt.engine };
+    return { ok: true, engine: rt.engine, ...(rt.generation === undefined ? {} : { generation: rt.generation }) };
   }
 }
 

@@ -8,6 +8,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const { captureHandlers } = require('./helpers/ipc-registry');
 
 let passed = 0;
 let failed = 0;
@@ -122,7 +123,14 @@ console.log('\n[内置手册 · 接线检查]');
 test('主进程注册了 manual:open，preload 暴露了 openManual', () => {
   const main = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
   const preload = fs.readFileSync(path.join(ROOT, 'src', 'preload.js'), 'utf8');
-  assert(/ipcMain\.handle\('manual:open'/.test(main), '主进程未注册 manual:open');
+  const calls = [];
+  const opened = { ok: true, anchor: 'fixture' };
+  const handlers = captureHandlers({ openManual: (payload) => { calls.push(payload); return opened; } });
+  const handler = handlers.get('manual:open');
+  assert(typeof handler === 'function', '主进程未注册 manual:open');
+  const payload = { topic: 'audio', reason: 'test' };
+  assert(handler({}, payload) === opened && calls[0] === payload, '手册入口必须转发原始参数和返回值');
+  assert(handler({}) === opened && Object.keys(calls[1]).length === 0, '无参数时仍应打开手册');
   assert(/openManual:\s*\(payload\)/.test(preload), 'preload 未暴露 openManual');
   assert(/new BrowserWindow\([\s\S]*manual\.html/.test(main), '主进程未创建手册窗口');
 });

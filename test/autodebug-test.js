@@ -10,6 +10,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { captureHandlers } = require('./helpers/ipc-registry');
 
 let passed = 0;
 let failed = 0;
@@ -260,11 +261,31 @@ test('分类表在前后端保持一致（渲染层 DEBUG_CATS）', () => {
 });
 
 console.log('\n[自动检测 · 主进程接线]');
-test('主进程注册了检测相关的 IPC', () => {
-  const mainJs = fs.readFileSync(path.join(ROOT, 'src/main.js'), 'utf8');
+test('真实 IPC 转发手动检测、返回最新状态，并在保存配置后重新排程', () => {
+  const calls = [];
+  const report = { issues: ['test'], at: 2 };
+  let state = { issues: [], at: 1 };
+  const handlers = captureHandlers({
+    live: { get autodebugState() { return state; } },
+    runAutodebug: (opts) => { calls.push(['run', opts]); return report; },
+    autodebugConfig: () => ({ auto: true, intervalMin: 10, notify: true }),
+    store: { saveSettings: (patch) => calls.push(['save', patch]) },
+    scheduleAutodebug: () => calls.push(['schedule']),
+  });
   for (const ch of ['autodebug:run', 'autodebug:state', 'autodebug:config', 'app:clearOrphans', 'app:clearSnapshot', 'runtime:restart']) {
-    assert(mainJs.includes(`'${ch}'`), `主进程应注册 ${ch}`);
+    assert(handlers.has(ch), `应注册 ${ch}`);
   }
+  assert(handlers.get('autodebug:run')({}) === report, '应原样返回检测结果');
+  assert(handlers.get('autodebug:state')({}) === state, '应返回注册后的当前状态');
+  state = report;
+  assert(handlers.get('autodebug:state')({}) === report, '不能缓存窗口注册时的旧检测结果');
+  const next = handlers.get('autodebug:config')({}, { auto: false, intervalMin: '15' });
+  assert(next.auto === false && next.intervalMin === 15 && next.notify === true, '配置语义必须保持不变');
+  assert(calls.length === 3 && calls[0][0] === 'run' && calls[0][1].force === true
+    && calls[1][0] === 'save' && calls[1][1].debug === next && calls[2][0] === 'schedule',
+  '手动检测要强制运行；保存配置后要重新排程');
+
+  const mainJs = fs.readFileSync(path.join(ROOT, 'src/main.js'), 'utf8');
   assert(mainJs.includes('scheduleAutodebug()'), '主进程应排上定时检测');
 });
 

@@ -116,7 +116,7 @@ test('ensure does not enumerate/reuse foreign ADB devices and does not boot over
   const runtime = fakeRuntime();
   let bootCalls = 0;
   runtime.provisioner = { materializeImages: async () => {}, checkEnv: async () => ({ emulator: { ok: true }, sysimg: { ok: true } }) };
-  runtime.boot = async () => { bootCalls++; return { ok: true, client: {} }; };
+  runtime._boot = async () => { bootCalls++; return { ok: true, client: {} }; };
   runtime.inspectEmulatorOwnership = async () => ({ state: 'unknown' });
   assert.equal((await runtime.ensure()).ok, false);
   assert.equal(bootCalls, 0);
@@ -148,6 +148,21 @@ test('owned guest reuse requires package-ready guest and fresh proof before prep
   assert.equal(runtime.emuSerial, client.serial);
   assert.equal(runtime.emulator.port, 5556);
   assert.equal(prepared, 1);
+});
+
+test('ownership lost during guest preparation does not publish a client', async () => {
+  const runtime = fakeRuntime();
+  let stillOwned = true;
+  const client = { serial: 'emulator-5556' };
+  runtime.inspectEmulatorOwnership = async () => ({ state: 'owned', emulator: {
+    port: 5556, serial: client.serial, revalidate: async () => stillOwned,
+  } });
+  runtime.client = () => client;
+  runtime.reuseProbe = async () => true;
+  runtime.prepare = async () => { stillOwned = false; };
+  const result = await runtime.ensure();
+  assert.equal(result.ok, false);
+  assert.equal(result.client, undefined);
 });
 
 test('late ADB recovery only connects to the independently verified paired port', async () => {
@@ -274,7 +289,7 @@ test('cache preview does not stop a VM and a failed close preserves the active A
   runtime.emulator = { running: () => running };
   runtime.provisioner = { paths: () => ({ root }) };
   runtime.avdOwner = () => running ? { state: 'live', pid } : { state: 'stale', pid };
-  runtime.stop = async () => { stops += 1; return false; };
+  runtime._stopInner = async () => { stops += 1; return false; };
 
   const preview = await runtime.cleanup({ includeSnapshots: true });
   assert.equal(preview.ok, true);
@@ -288,7 +303,7 @@ test('cache preview does not stop a VM and a failed close preserves the active A
   assert.ok(fs.existsSync(snapshot));
   assert.ok(fs.existsSync(lock));
 
-  runtime.stop = async () => { running = false; return true; };
+  runtime._stopInner = async () => { running = false; return true; };
   const applied = await runtime.cleanup({ apply: true, includeSnapshots: true });
   assert.equal(applied.ok, true);
   assert.equal(applied.stoppedVm, true);
