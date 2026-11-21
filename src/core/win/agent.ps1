@@ -1346,6 +1346,9 @@ public class ApkAgent
                 int n = sock.Receive(buf);
                 if (n <= 0)
                 {
+                    // A disconnected client cannot receive injected events; do not
+                    // keep a desktop-wide hook while the window guard lingers.
+                    HookOff();
                     RestoreAdbConsent();
                     try { sock.Close(); } catch { }
                     sock = null;
@@ -1656,6 +1659,7 @@ public class ApkAgent
             }
             catch (SocketException)
             {
+                HookOff();
                 RestoreAdbConsent();
                 try { sock.Close(); } catch { }
                 sock = null;

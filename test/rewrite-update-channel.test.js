@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
@@ -10,6 +11,7 @@ const { test } = require('node:test');
 const { Updater } = require('../src/core/updater');
 const { createUpdatesHandlers } = require('../src/ipc/handlers/updates');
 const { writeUpdatePayload } = require('./helpers/update-fixture');
+const { buildStoredZip } = require('./lib/make-apk');
 
 const releases = 'https://github.com/MoonlyCake/apkstart/releases';
 const latest = 'https://api.github.com/repos/MoonlyCake/apkstart/releases/latest';
@@ -89,6 +91,37 @@ test('remote checks fail visibly on HTTP errors without consulting upstream', as
   assert.deepEqual(calls, [latest]);
 });
 
+test('overlapping automatic and manual release checks share one request and recover after failure', async (t) => {
+  let requests = 0;
+  let release;
+  const u = fixture(t, () => {
+    requests++;
+    return new Promise((resolve) => { release = resolve; });
+  });
+  const automatic = u.check();
+  const manual = u.check({ force: true });
+  assert.equal(requests, 1, 'automatic and manual checks must not race the release cache');
+  release(new Response(null, { status: 503 }));
+  const failures = await Promise.allSettled([automatic, manual]);
+  for (const failure of failures) {
+    assert.equal(failure.status, 'rejected');
+    assert.match(failure.reason.message, /HTTP 503/);
+  }
+
+  const retry = u.check();
+  assert.equal(requests, 2, 'a failed request must not pin the shared promise');
+  release(Response.json({ tag_name: tag }));
+  assert.equal((await retry).version, '1.0.1');
+  assert.equal((await u.check()).version, '1.0.1');
+  assert.equal(requests, 2, 'a successful result must still be cached');
+  const refresh = u.check({ force: true });
+  const passive = u.check();
+  assert.equal(requests, 3, 'force bypasses the settled cache, not an in-flight request');
+  release(Response.json({ tag_name: 'v1.0.2' }));
+  assert.equal((await refresh).version, '1.0.2');
+  assert.equal((await passive).version, '1.0.2');
+});
+
 test('prepare rejects foreign release assets before any download or cache write', async (t) => {
   const u = fixture(t);
   const name = 'ApkStart-v1.0.1-win64-portable.zip';
@@ -147,6 +180,32 @@ test('resume ignores a ready marker when the cached entrypoint is missing', asyn
   assert.deepEqual(u.findResumableJob(), job);
   fs.unlinkSync(path.join(job.payload, 'resources/app/src/main.js'));
   assert.equal(u.findResumableJob(), null);
+});
+
+test('preparing a same-size corrupted portable payload repairs it instead of reporting ready', async (t) => {
+  const u = fixture(t);
+  const job = await markedUpdate(u);
+  const names = ['ApkStart.exe', 'resources.pak', 'icudtl.dat', 'resources/app/package.json', 'resources/app/src/main.js'];
+  const zip = buildStoredZip(names.map((name) => ({ name, data: fs.readFileSync(path.join(job.payload, name)) })));
+  const file = path.join(job.payload, 'resources.pak');
+  fs.writeFileSync(file, 'Resources.pak');
+  let requests = 0;
+  const server = http.createServer((_req, res) => {
+    requests++;
+    res.setHeader('Content-Length', zip.length);
+    res.end(zip);
+  });
+  await new Promise((resolve, reject) => server.listen(0, '127.0.0.1', resolve).once('error', reject));
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}/fixture.zip`;
+  const info = { version: job.version, asset: { name: 'ApkStart-portable.zip', size: zip.length } };
+  assert.deepEqual(await u._prepareFull(info, path.dirname(job.payload), url), job);
+  assert.ok(requests > 0, 'corrupt staged bytes must not bypass download');
+  assert.equal(fs.readFileSync(file, 'utf8'), 'resources.pak');
+
+  const completed = requests;
+  await u._prepareFull(info, path.dirname(job.payload), url);
+  assert.equal(requests, completed, 'an intact payload must still avoid redownload');
 });
 
 test('cached tampering of the same size fails preflight and will not trigger auto-replay', async (t) => {

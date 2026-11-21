@@ -164,6 +164,45 @@ test('owned guest reuse requires package-ready guest and fresh proof before prep
   assert.equal(prepared, 1);
 });
 
+test('a new owned AVD lock on the same serial recreates input and reruns boot preparation', async () => {
+  const runtime = fakeRuntime();
+  runtime.settings.engine.chineseIme = false;
+  runtime.client = Runtime.prototype.client;
+  runtime.prepare = Runtime.prototype.prepare;
+  runtime.startWatchdog = () => {};
+  let current = 'initial';
+  let prepared = 0;
+  let disposed = 0;
+  runtime.inspectEmulatorOwnership = async () => {
+    const generation = current;
+    return { state: 'owned', emulator: {
+      pid, generation, port: 5554, serial: 'emulator-5554', revalidate: async () => generation === current,
+    } };
+  };
+  runtime.adbClient = (serial, adbPath) => ({
+    serial, adbPath,
+    shell: async () => '1\npackage:/system/framework/framework-res.apk',
+    ensureFreeform: async () => { prepared++; return true; },
+    disposeInput: () => { disposed++; },
+  });
+  const first = await runtime.ensure();
+  assert.equal(first.ok, true);
+  assert.equal(await first.revalidate(), true);
+  assert.equal((await runtime.ensure()).client, first.client);
+  assert.equal(prepared, 1);
+  runtime._chineseReady = true;
+  current = 'replacement';
+  const second = await runtime.ensure();
+  assert.equal(second.ok, true);
+  assert.notEqual(second.client, first.client);
+  assert.notEqual(second.generation, first.generation);
+  assert.equal(await first.revalidate(), false);
+  assert.equal(await second.revalidate(), true);
+  assert.equal(disposed, 1);
+  assert.equal(prepared, 2);
+  assert.equal(runtime._chineseReady, false);
+});
+
 test('an owned native transport in authorization is reported without connecting a TCP alias', async () => {
   const runtime = fakeRuntime();
   const native = 'emulator-5556';

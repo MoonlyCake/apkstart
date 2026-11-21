@@ -33,6 +33,9 @@ class WinAgent extends EventEmitter {
     this._attempt = null;
     this.hooked = false;
     this.hookConf = null;
+    this._pendingHook = null;
+    this._hookUncertain = false;
+    this._hookGeneration = 0;
   }
 
   get available() { return process.platform === 'win32' && fs.existsSync(SCRIPT); }
@@ -109,6 +112,9 @@ class WinAgent extends EventEmitter {
     this.buf = '';
     this.hooked = false;
     this.hookConf = null;
+    this._pendingHook = null;
+    this._hookUncertain = false;
+    this._hookGeneration++;
     clearTimeout(attempt.timer);
     attempt.reject(error);
     this._failAll(error.message);
@@ -336,28 +342,36 @@ class WinAgent extends EventEmitter {
       wheel: !!(opts && opts.wheel),
       side: !!(opts && opts.side),
     };
-    // 默认关闭状态下不为了「关」而拉起 PowerShell 进程（冷启动零开销）
-    if (!want && !this.hooked) return { ok: true, hooked: false };
-    const sameConf = this.hookConf
-      && this.hookConf.right === conf.right
-      && this.hookConf.wheel === conf.wheel
-      && this.hookConf.side === conf.side;
-    if (want === this.hooked && sameConf) return { ok: true, hooked: this.hooked };
+    const sameConf = (other) => other && other.right === conf.right
+      && other.wheel === conf.wheel && other.side === conf.side;
+    const pending = this._pendingHook;
+    if (pending?.want === want && (!want || sameConf(pending.conf))) return pending.promise;
+    // Focus may change before HookOn replies. Send blur behind that command, even
+    // when the last acknowledged state is still off or an enable timed out.
+    if (!pending && !this._hookUncertain && want === this.hooked
+      && (!want || sameConf(this.hookConf))) return { ok: true, hooked: this.hooked };
     const req = { cmd: 'hook', on: want ? 1 : 0, right: conf.right ? 1 : 0, wheel: conf.wheel ? 1 : 0, side: conf.side ? 1 : 0 };
-    if (!want) {
-      this.hooked = false;
-      this.hookConf = null;
-      return this.call(req, 3000).catch(() => ({ ok: false, hooked: false }));
-    }
-    const r = await this.call(req, 3000).catch(() => null);
-    this.hooked = !!(r && r.hooked !== false);
-    this.hookConf = this.hooked ? conf : null;
-    return { ok: this.hooked, hooked: this.hooked };
+    const change = { want, conf };
+    const generation = this._hookGeneration;
+    this._pendingHook = change;
+    change.promise = this.call(req, 3000).catch(() => null).then((r) => {
+      if (generation !== this._hookGeneration) return { ok: false, hooked: this.hooked };
+      if (this._pendingHook === change) this._pendingHook = null;
+      if (r?.ok !== true || typeof r.hooked !== 'boolean') {
+        this._hookUncertain = true;
+        return { ok: false, hooked: this.hooked };
+      }
+      this._hookUncertain = false;
+      this.hooked = r.hooked;
+      this.hookConf = r.hooked && want ? conf : null;
+      return { ok: r.hooked === want, hooked: r.hooked };
+    });
+    return change.promise;
   }
 
   dispose() {
     // 先卸载全局钩子再结束进程：即使代理被强杀，也不给系统留残留钩子
-    if (this.hooked && this.sock) {
+    if ((this.hooked || this._pendingHook || this._hookUncertain) && this.sock) {
       try { this.sock.write('{"cmd":"hook","on":0}\n'); } catch (_) { /* ignore */ }
     }
     // 主动断开后让代理程序进入它自己的守卫状态，避免模拟器迟来的黑窗闪出来。

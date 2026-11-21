@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="680" viewBox="0 0 1200 680" role="img" aria-labelledby="t d">
-  <title id="t">Apk Start --Q 1.0.8：让 Android 应用在 Windows 桌面上有个位置</title>
+  <title id="t">Apk Start --Q 1.0.9：让 Android 应用在 Windows 桌面上有个位置</title>
   <desc id="d">纯黑底海报：整幅宽度的白色扩展黑体字标，下方左侧是中文主张与规格，中间是三步流程，右侧是一块冷蓝色版与桌面图标示意。</desc>
   <defs>
     <linearGradient id="sky" x1="0" y1="1" x2="1" y2="0">
@@ -26,7 +26,7 @@
   <!-- 抬头 -->
   <g font-family="Cascadia Mono, Consolas, monospace" font-size="10.5" letter-spacing="2.4" fill="#6B737C">
     <text x="40" y="44">ANDROID RUNNER FOR WINDOWS</text>
-    <text x="1160" y="44" text-anchor="end">V1.0.8 / MIT</text>
+    <text x="1160" y="44" text-anchor="end">V1.0.9 / MIT</text>
   </g>
   <path d="M40 58h1120" stroke="#FFFFFF" stroke-opacity=".16" stroke-width="1"/>
 

@@ -156,6 +156,29 @@ test('the bounded repair joins only the visible open stock hotspot and verifies 
   assert.equal(isStockWifiVisible(STOCK.replace('[ESS]', '[WPA2-PSK-CCMP][ESS]')), false);
 });
 
+test('the Android 14 stock address can be repaired without guessing an ambiguous radio', async () => {
+  const bssid = '02:15:b2:00:00:01';
+  const android14 = STOCK.replace('02:15:b2:00:01:00', bssid);
+  const connect = STOCK_WIFI_CONNECT.replace('02:15:b2:00:01:00', bssid);
+  let connected = false;
+  const repair = shellFixture({
+    [WIFI_STATUS]: () => connected ? WIFI : DOWN,
+    [SNAPSHOT_COMMAND]: () => connected ? dump(100, agent()) : dump('none'),
+    'cmd wifi list-scan-results': android14.replace(bssid, bssid.toUpperCase()),
+    [connect]: () => { connected = true; return 'Connection initiated'; },
+  });
+  assert.equal(await repairStockWifi(repair.client), true);
+  assert.deepEqual(repair.trace.map(([cmd]) => cmd).filter((cmd) => cmd.startsWith('cmd wifi connect-network')), [connect]);
+
+  let now = 0;
+  const ambiguous = shellFixture({
+    [WIFI_STATUS]: DOWN, [SNAPSHOT_COMMAND]: dump('none'),
+    'cmd wifi list-scan-results': `${STOCK}\n${android14}`, 'cmd wifi start-scan': '',
+  });
+  assert.equal(await repairStockWifi(ambiguous.client, { now: () => now, pause: async (ms) => { now += ms; } }), false);
+  assert.equal(ambiguous.trace.some(([cmd]) => cmd.startsWith('cmd wifi connect-network')), false);
+});
+
 test('Wi-Fi repair stops on changed ownership and does not enable intentionally disabled Wi-Fi', async () => {
   let owned = true;
   const stale = shellFixture({

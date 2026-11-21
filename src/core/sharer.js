@@ -237,11 +237,13 @@ class Sharer {
 }
 
 async function transfer({ client, guard, root, rel, local, target, l, r, push }) {
+  const assertLocalUnchanged = () => {
+    if (!same(localFile(local), l)) throw new Error('文件在同步时被修改，未覆盖');
+  };
   const unchanged = async () => {
     await guard();
-    if (!same(localFile(local), l) || !same(await remoteFile(client, target), r)) {
-      throw new Error('文件在同步时被修改，未覆盖');
-    }
+    if (!same(await remoteFile(client, target), r)) throw new Error('文件在同步时被修改，未覆盖');
+    assertLocalUnchanged();
   };
   await unchanged();
   if (push) {
@@ -255,6 +257,7 @@ async function transfer({ client, guard, root, rel, local, target, l, r, push })
       if ((await remoteFile(client, staged))?.size !== l.size) throw new Error('上传结果校验失败');
       await unchanged();
       await guard();
+      assertLocalUnchanged();
       await client.shell('mv ' + (r ? '-Tf' : '-Tn') + ' ' + quote(staged) + ' ' + quote(target));
       if (await remoteFile(client, staged)) throw new Error('安卓目标已存在，未覆盖');
       const uploaded = await remoteFile(client, target);
@@ -274,6 +277,8 @@ async function transfer({ client, guard, root, rel, local, target, l, r, push })
     if (localFile(staged)?.size !== r.size) throw new Error('下载结果校验失败');
     await unchanged();
     await guard();
+    // 安卓 stat／归属确认会让出事件循环；别用此前的本地快照覆盖刚保存的文件。
+    assertLocalUnchanged();
     if (l) fs.renameSync(staged, local);
     else await fs.promises.copyFile(staged, local, fs.constants.COPYFILE_EXCL);
     return { local: localFile(local), remote: r };

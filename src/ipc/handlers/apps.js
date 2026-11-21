@@ -1,11 +1,14 @@
 'use strict';
 
+const { pathToFileURL } = require('node:url');
 const { validPackageName } = require('../../core/pkgname');
 
 function createAppsHandlers({
   appLog, appOperations, dialog, fs, live, parseApk, runInstall, runLaunch, send, shell, stopApp, store,
   wantLandscapeFor,
 }) {
+  const trackedApp = (pkg) => validPackageName(pkg) && store.getApp(pkg);
+  const notTracked = () => ({ ok: false, error: '应用不存在或已卸载' });
   return {
     'apps:list': async () => {
       const apps = store.getApps();
@@ -21,9 +24,10 @@ function createAppsHandlers({
       return apps
         .map((a) => ({
           ...a,
+          label: typeof a.label === 'string' && a.label.trim() ? a.label : a.package,
           running: running.includes(a.package),
           iconUrl: a.iconPath && fs.existsSync(a.iconPath)
-            ? `file:///${a.iconPath.replace(/\\/g, '/').replace(/ /g, '%20')}`
+            ? pathToFileURL(a.iconPath).href
             : null,
           shortcutExists: a.shortcutPath ? fs.existsSync(a.shortcutPath) : false,
         }))
@@ -65,16 +69,21 @@ function createAppsHandlers({
     },
 
     'app:shortcut': async (_e, pkg) => {
-      const appRecord = store.getApp(pkg);
-      if (!appRecord) throw new Error('应用不存在');
-      const p = live.installer.createShortcut(appRecord);
-      store.upsertApp({ package: pkg, shortcutPath: p });
-      return { ok: true, path: p };
+      if (!validPackageName(pkg)) return { ok: false, error: '无效的安卓包名' };
+      // Re-read after removal/install in the shared queue rather than creating an orphan link.
+      return appOperations.run(`shortcut:${pkg}`, () => {
+        const appRecord = trackedApp(pkg);
+        if (!appRecord) return notTracked();
+        const p = live.installer.createShortcut(appRecord);
+        store.upsertApp({ package: pkg, shortcutPath: p });
+        return { ok: true, path: p };
+      });
     },
 
     'app:clearData': async (_e, pkg) => {
       if (!validPackageName(pkg)) return { ok: false, error: '无效的安卓包名' };
       return appOperations.run(`clear-data:${pkg}`, async () => {
+        if (!trackedApp(pkg)) return notTracked();
         const rt = await live.runtime.ensure();
         if (!rt.ok) return { ok: false, error: rt.error };
         await rt.client.clearData(pkg);
@@ -82,8 +91,10 @@ function createAppsHandlers({
       });
     },
 
-    'app:pin': async (_e, { pkg, pinned }) => {
-      store.upsertApp({ package: pkg, pinned: !!pinned });
+    'app:pin': async (_e, payload) => {
+      const pkg = payload?.pkg;
+      if (!trackedApp(pkg)) return notTracked();
+      store.upsertApp({ package: pkg, pinned: !!payload.pinned });
       return { ok: true };
     },
 
@@ -93,9 +104,13 @@ function createAppsHandlers({
      * 下次打开该应用时 wantLandscapeFor 会读它并把面板切到对应方向。
      * 传 null 表示清除覆盖，回到 APK 清单解析出的天然方向。
      */
-    'app:setOrientation': async (_e, { pkg, orientation: value }) => {
-      if (!pkg) return { ok: false, error: '缺少包名' };
-      const next = value === 'landscape' || value === 'portrait' ? value : null;
+    'app:setOrientation': async (_e, payload) => {
+      const pkg = payload?.pkg;
+      if (!trackedApp(pkg)) return notTracked();
+      const next = payload.orientation;
+      if (next !== null && next !== 'landscape' && next !== 'portrait') {
+        return { ok: false, error: '无效的屏幕方向' };
+      }
       store.upsertApp({ package: pkg, orientationOverride: next });
       appLog(`orientation override ${pkg} = ${next || '(跟随应用)'}`);
       // 主界面列表要立刻显示新的方向文字

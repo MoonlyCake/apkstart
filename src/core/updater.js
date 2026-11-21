@@ -31,6 +31,14 @@ const APPLIED = '.apkstart-apply-attempted';
 const FAILURE = '.apkstart-apply-failure';
 const SHA256 = /^[a-f0-9]{64}$/i;
 
+async function verifyPayloadBytes(payload, files) {
+  for (const { rel, sha256 } of files) {
+    if (await sha256File(path.join(payload, rel)) !== sha256.toLowerCase()) {
+      throw new Error('更新包校验失败，请重新下载安装包');
+    }
+  }
+}
+
 function safeRelative(rel) {
   return typeof rel === 'string' && rel.split('/').every((part) => part
     && !/[<>:"|?*\\\x00-\x1f]/.test(part) && !/[. ]$/.test(part));
@@ -183,7 +191,7 @@ class Updater {
     const file = path.join(dir, it.asset.name);
     const out = path.join(dir, 'payload');
     const isZip = /\.zip$/i.test(file);
-    if (isZip && this._payloadReady(out, it.version)) {
+    if (isZip && await this._verifiedPayloadReady(out, it.version)) {
       this.onProgress({ stage: 'ready', percent: 100, message: '已有下载好的更新包，直接复用' });
       return { mode: 'zip', payload: out, version: it.version };
     }
@@ -260,7 +268,7 @@ class Updater {
 
     const payload = path.join(dir, 'app-payload');
     // 上次下载解压成功但替换失败：直接复用（和完整包的 .apkstart-ready 同理）
-    if (this._payloadReady(payload, it.version, 'app', manifest.app.files)) {
+    if (await this._verifiedPayloadReady(payload, it.version, 'app', manifest.app.files)) {
       this.onProgress({ stage: 'ready', percent: 100, message: '已有下载好的增量包，直接复用' });
       return { mode: 'app', payload, version: it.version, manifest };
     }
@@ -361,6 +369,20 @@ class Updater {
     catch (_) { return false; }
   }
 
+  async _verifiedPayloadReady(payload, version, mode = 'zip', expected) {
+    let proof;
+    try { proof = this._readPayload(payload, version, mode, expected); }
+    catch (_) { return false; }
+    try {
+      // 缓存的尺寸可以不变，但内容已损坏，不能在下载阶段误报「就绪」。
+      await verifyPayloadBytes(payload, proof.files);
+      return true;
+    } catch (_) {
+      fs.rmSync(this._readyFile(payload), { force: true });
+      return false;
+    }
+  }
+
   /**
    * 启动时调用：找回「上次已下载解压、但替换/重启失败」的更新并续做。
    * 直接走本地载荷，不再重新下载（issue #98 的死循环根治）。
@@ -459,11 +481,7 @@ class Updater {
     this._applyPromise = (async () => {
       // Reject corrupted cached content before asking the running app to exit.
       try {
-        for (const file of files || [{ rel: '', sha256: expected }]) {
-          if (await sha256File(path.join(payload, file.rel)) !== file.sha256.toLowerCase()) {
-            throw new Error('更新包校验失败，请重新下载安装包');
-          }
-        }
+        await verifyPayloadBytes(payload, files || [{ rel: '', sha256: expected }]);
       } catch (err) {
         if (mode === 'app') fs.writeFileSync(spec.forceFull, '');
         else if (mode === 'zip') fs.rmSync(this._readyFile(payload), { force: true });
