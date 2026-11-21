@@ -51,6 +51,11 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: 原生窗口从最小化恢复（隔离夹具）
+        shell: powershell
+        run: |
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+          & .\test\agent-iconic-window.ps1
       - name: Electron 设置、启动画面及快捷方式（静音、独立配置）
         shell: pwsh
         run: |

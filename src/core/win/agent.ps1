@@ -28,6 +28,7 @@ public class ApkAgent
 {
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)] public struct WINDOWPLACEMENT { public uint Length, Flags, ShowCmd; public POINT Min, Max; public RECT Normal; }
     [StructLayout(LayoutKind.Sequential)] public struct MSLLHOOKSTRUCT { public POINT Pt; public int MouseData; public int Flags; public int Time; public IntPtr Extra; }
     [StructLayout(LayoutKind.Sequential)] public struct MSG { public IntPtr Hwnd; public uint Message; public IntPtr WParam; public IntPtr LParam; public uint Time; public int X; public int Y; }
     // Minimal PROCESS_BASIC_INFORMATION: enough to read InheritedFromUniqueProcessId.
@@ -67,6 +68,7 @@ public class ApkAgent
     [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr o);
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] static extern bool GetWindowPlacement(IntPtr h, ref WINDOWPLACEMENT placement);
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern bool IsZoomed(IntPtr h);
@@ -333,7 +335,18 @@ public class ApkAgent
         return 0;
     }
 
-    static bool IsAdbConsentMainWindow(IntPtr h, uint pid)
+    static bool TrySurfaceBounds(IntPtr h, bool client, out RECT r)
+    {
+        if (!IsIconic(h)) return client ? GetClientRect(h, out r) : GetWindowRect(h, out r);
+        // A minimized Qt surface has no client area. Identify it using its restore bounds
+        // without showing it; the existing show command still verifies the restored surface.
+        var placement = new WINDOWPLACEMENT { Length = (uint)Marshal.SizeOf(typeof(WINDOWPLACEMENT)) };
+        bool ok = GetWindowPlacement(h, ref placement);
+        r = placement.Normal;
+        return ok;
+    }
+
+    static bool IsEmulatorMainWindow(IntPtr h, uint pid, bool allowIconic)
     {
         uint owner;
         if (!IsWindow(h) || GetWindowThreadProcessId(h, out owner) == 0 || owner != pid ||
@@ -343,8 +356,11 @@ public class ApkAgent
             (_ourTitle.Length == 0 || !String.Equals(title, _ourTitle, StringComparison.Ordinal))) return false;
         RECT r;
         return ClassOf(h).IndexOf("QWindowIcon", StringComparison.Ordinal) >= 0 &&
-            GetClientRect(h, out r) && r.R - r.L >= 200 && r.B - r.T >= 200;
+            (allowIconic ? TrySurfaceBounds(h, true, out r) : GetClientRect(h, out r)) &&
+            r.R - r.L >= 200 && r.B - r.T >= 200;
     }
+
+    static bool IsAdbConsentMainWindow(IntPtr h, uint pid) { return IsEmulatorMainWindow(h, pid, false); }
 
     static bool SameAdbConsentWindow(AdbConsentLease lease)
     {
@@ -416,7 +432,7 @@ public class ApkAgent
         return lease != null && lease.ShowRequested && lease.Window == h && SameAdbConsentWindow(lease);
     }
 
-    static IntPtr FindEmulator(bool surfaceOnly = false)
+    static IntPtr FindEmulator(bool surfaceOnly = false, bool allowIconic = false)
     {
         IntPtr best = IntPtr.Zero;
         long bestScore = long.MinValue;
@@ -428,14 +444,14 @@ public class ApkAgent
             uint owner;
             GetWindowThreadProcessId(h, out owner);
             if (!IsOurs(owner)) return true;
-            if (surfaceOnly && !IsAdbConsentMainWindow(h, owner)) return true;
+            if (surfaceOnly && !IsEmulatorMainWindow(h, owner, allowIconic)) return true;
             string cls = ClassOf(h);
             if (cls.IndexOf("QWindowIcon", StringComparison.Ordinal) < 0) return true;
             string title = TitleOf(h);
             bool named = LooksLikeEmulator(title);
             if (!named && !IsWindowVisible(h)) return true;
             RECT r;
-            if (!GetWindowRect(h, out r)) return true;
+            if (!(surfaceOnly && allowIconic ? TrySurfaceBounds(h, false, out r) : GetWindowRect(h, out r))) return true;
             long area = (long)(r.R - r.L) * (r.B - r.T);
             if (area < 200 * 200) return true;   // 工具栏 / 提示窗不是画面窗口
             // 可见的大窗口优先，其次才是隐藏的
@@ -887,10 +903,10 @@ public class ApkAgent
     // 与 Detach 相同，但**不显示**窗口：宿主窗口即将销毁时调用。
     // 不先摘下来，Windows 会在宿主销毁时把子窗口重新挂到桌面并设成可见，
     // 于是就凭空多出一个 "Android Emulator - apkstart5554" 的黑窗。
-    static IntPtr CurrentEmulatorWindow()
+    static IntPtr CurrentEmulatorWindow(bool allowIconic = false)
     {
-        if (!IsRealSurface(_emu)) _emu = FindEmulator(true);
-        if (!IsRealSurface(_emu)) _emu = IntPtr.Zero;
+        if (!IsRealSurface(_emu, allowIconic)) _emu = FindEmulator(true, allowIconic);
+        if (!IsRealSurface(_emu, allowIconic)) _emu = IntPtr.Zero;
         return _emu;
     }
 
@@ -901,11 +917,11 @@ public class ApkAgent
             ClassOf(h).IndexOf("QWindowIcon", StringComparison.Ordinal) >= 0 && ScopedEmulatorStart(pid) != 0;
     }
 
-    static bool IsDetachedSurface(IntPtr h)
+    static bool IsDetachedSurface(IntPtr h, bool allowIconic = false)
     {
         uint pid;
         return IsOwnedQtWindow(h) && GetWindowThreadProcessId(h, out pid) != 0 &&
-            IsAdbConsentMainWindow(h, pid) && ((uint)GetWindowLong(h, GWL_STYLE) & WS_CHILD) == 0;
+            IsEmulatorMainWindow(h, pid, allowIconic) && ((uint)GetWindowLong(h, GWL_STYLE) & WS_CHILD) == 0;
     }
 
     static bool IsOurHost(IntPtr h)
@@ -922,9 +938,9 @@ public class ApkAgent
             (parent == _host || (parent == _chromeRender && IsChild(_host, parent)));
     }
 
-    static bool IsRealSurface(IntPtr h)
+    static bool IsRealSurface(IntPtr h, bool allowIconic = false)
     {
-        return HasOurParent(h) || IsDetachedSurface(h);
+        return HasOurParent(h) || IsDetachedSurface(h, allowIconic);
     }
 
     static bool ParkEmulator()
@@ -1465,10 +1481,11 @@ public class ApkAgent
                         // 独立窗口模式下 Detach() 会把 _emu 清空（它按「嵌入结束」处理），
                         // 所以这里要重新找一次，否则 show/layout 全部作用在空句柄上，
                         // 表现就是「切独立窗口后模拟器窗口不见了」。
-                        IntPtr window = CurrentEmulatorWindow();
-                        bool ok = window != IntPtr.Zero && (!_detachedMode || IsDetachedSurface(window));
+                        IntPtr window = CurrentEmulatorWindow(_detachedMode);
+                        bool ok = window != IntPtr.Zero && (!_detachedMode || IsDetachedSurface(window, true));
                         if (ok) ShowWindow(window, IsIconic(window) ? 9 : 5);
-                        ok = ok && IsOwnedQtWindow(window) && IsWindowVisible(window) && !IsIconic(window);
+                        ok = ok && IsOwnedQtWindow(window) && IsWindowVisible(window) && !IsIconic(window) &&
+                            (!_detachedMode || IsDetachedSurface(window));
                         Reply(sock, "{\"ok\":" + (ok ? "true" : "false") + "}");
                     }
                     else if (cmd == "detach")
@@ -1479,7 +1496,7 @@ public class ApkAgent
                         _detachedMode = L(line, "keep") == 1;
                         // 独立模式可能从没 embed 过（_emu 还是 0），先找一次，
                         // 否则 Detach 会直接 return，后续 show/layout 全部作用在空句柄上。
-                        CurrentEmulatorWindow();
+                        CurrentEmulatorWindow(_detachedMode);
                         Detach();
                         Reply(sock, "{\"ok\":true,\"emu\":" + _emu.ToInt64() + "}");
                     }
@@ -1490,7 +1507,7 @@ public class ApkAgent
                         // 把标题改回去，所以 QuietSweep 每轮巡检都会补设一次（见下）。
                         string t = S(line, "text");
                         if (t.Length == 0) t = "ApkStart";
-                        CurrentEmulatorWindow(); // Resolve with the old title before changing it.
+                        CurrentEmulatorWindow(_detachedMode); // Resolve with the old title before changing it.
                         _ourTitle = t;
                         bool ok = _emu != IntPtr.Zero && SetWindowTextW(_emu, t);
                         Reply(sock, "{\"ok\":" + (ok ? "true" : "false") + "}");
@@ -1500,7 +1517,7 @@ public class ApkAgent
                         // 给模拟器原生窗口设图标（独立窗口模式下任务栏/Alt+Tab 显示当前应用图标，
                         // 而不是 Google 模拟器的默认绿机器人）。传 ICO/PNG 绝对路径。
                         string f = S(line, "file");
-                        CurrentEmulatorWindow();
+                        CurrentEmulatorWindow(_detachedMode);
                         bool ok = false;
                         if (f.Length > 0 && System.IO.File.Exists(f))
                         {
@@ -1530,8 +1547,8 @@ public class ApkAgent
                         // 独立窗口模式：模拟器窗口是系统原生窗口，这里只把它摆到
                         // 指定屏幕矩形（不 SetParent）。方向/缩放/输入都交给它自己，
                         // 因此不会出现嵌入模式那套黑边、坐标错位、铺不满的问题。
-                        IntPtr window = CurrentEmulatorWindow();
-                        if (!IsDetachedSurface(window))
+                        IntPtr window = CurrentEmulatorWindow(_detachedMode);
+                        if (!IsDetachedSurface(window, _detachedMode))
                         {
                             Reply(sock, "{\"ok\":false,\"error\":\"no-emu\"}");
                         }
