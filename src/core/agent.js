@@ -12,6 +12,7 @@
  * 见 setHook(on, opts)。
  */
 const { spawn } = require('child_process');
+const { randomBytes } = require('crypto');
 const net = require('net');
 const path = require('path');
 const fs = require('fs');
@@ -235,6 +236,22 @@ class WinAgent extends EventEmitter {
   async rotate(dir = 'left') { return this.call({ cmd: 'rotate', dir }, 8000); }
   async hide() { return this.call({ cmd: 'hide' }, 3000); }
   async show() { return this.call({ cmd: 'show' }, 3000); }
+
+  async reserveAdbConsent(pid) {
+    if (!Number.isInteger(pid) || pid <= 0 || pid > 0x7fffffff) return null;
+    const attempt = this._attempt;
+    if (!attempt?.connected) return null;
+    const token = randomBytes(16).toString('hex');
+    const invoke = (cmd) => this._attempt === attempt && attempt.connected
+      ? this.call({ cmd, pid, token }, 3000).catch(() => null)
+      : Promise.resolve(null);
+    const result = await invoke('adbConsentTarget');
+    if (result?.ok !== true || this._attempt !== attempt) return null;
+    return {
+      show: async () => (await invoke('adbConsentShow'))?.ok === true,
+      close: () => invoke('adbConsentEnd'),
+    };
+  }
   /** 通知代理进入低延迟模式：大幅降低窗口扫描频率，把 CPU 留给安卓渲染 */
   async setPerformanceMode(on) { return this.call({ cmd: 'perf', on: on ? 1 : 0 }, 3000); }
   /** @param {boolean} keep true=切到独立窗口模式（别把模拟器窗口藏掉，并保留句柄） */

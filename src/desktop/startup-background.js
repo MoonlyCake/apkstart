@@ -42,7 +42,7 @@ function createStartupBackground({ log, send, now = Date.now, setTimer = setTime
     // First-run downloads should not compete with Electron's startup.
     later(() => {
       autoDeploy().then((result) => {
-        if (result?.ok) send('toast', { type: 'ok', message: '运行时已自动准备完成' });
+        if (result?.ok) send('toast', { type: 'ok', message: '安卓运行时组件已准备完成' });
       }).catch(() => {});
     }, 20000);
   }

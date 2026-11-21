@@ -17,6 +17,7 @@ const { createAgentSession } = require('./desktop/agent-session');
 const { createStartupServices } = require('./desktop/startup-services');
 const { createStartupSplash } = require('./desktop/startup-splash');
 const { createStartupBackground } = require('./desktop/startup-background');
+const { createRuntimeDeployment } = require('./desktop/runtime-deployment');
 const { backfillAppOrientations, warnAboutFreeSpace, repairMissingShortcuts } = require('./desktop/startup-maintenance');
 const { registerStartupSmoke } = require('./desktop/startup-smoke');
 const { Runtime } = require('./core/engine');
@@ -646,91 +647,17 @@ async function toggleDisplayMode() {
   return next.display.mode;
 }
 
-/** 首次运行把 adb / emulator / 系统镜像一次装完，不再分 1~5 步 */
-let deploying = false;
-async function autoDeploy({ force = false } = {}) {
-  if (deploying || !store.getSettings().autoDeploy) return { ok: false, error: 'skipped' };
-  // 下载失败冷却：以前只要 checkEnv() 还缺组件，每次启动 ApkStart 都会重新
-  // 拉一遍 1.5GB 的运行时包，用户看到的就是「一直重复下载」。
-  // 失败后记一个时间戳，30 分钟内不再自动重试；用户手动点「一键部署」时
-  // force=true 可以立刻重试。成功或人为强制都清掉冷却。
-  const COOLDOWN_MS = 30 * 60 * 1000;
-  const lastFail = Number(store.getSettings().runtime.deployFailedAt || 0);
-  if (!force && lastFail && Date.now() - lastFail < COOLDOWN_MS) {
-    appLog(`autoDeploy 冷却中（上次失败于 ${new Date(lastFail).toISOString()}），跳过自动重试`);
-    return { ok: false, error: 'cooldown', cooldown: true, until: lastFail + COOLDOWN_MS };
-  }
-  deploying = true;
-  const progress = (p) => {
+const autoDeploy = createRuntimeDeployment({
+  settings: () => store.getSettings(),
+  provisioner: () => runtime.provisioner,
+  bundledDir: () => bundledRuntimeDir,
+  recordFailure: (at) => store.saveSettings({ runtime: { deployFailedAt: at } }),
+  progress: (p) => {
     send('provision:progress', { ...p, component: p.component || 'all' });
-    // 同步推送到开机动画窗口
     startupSplash?.progress(p);
-  };
-  let succeeded = false;
-  try {
-    const env = await runtime.provisioner.checkEnv();
-    const needEngine = !env.emulator.ok || !env.sysimg.ok;
-    // 随包自带运行时（完整版安装包 / 微软商店版）：**一律不联网**。
-    // 镜像已经在包里（压缩形态），第一次开机由 engine.ensure() 就地展开；
-    // 这里再下一套 1.5GB 纯属浪费，也正是用户抱怨的「装完还在下镜像」。
-    if (bundledRuntimeDir && env.adb.ok && env.emulator.ok && env.sysimg.ok) {
-      appLog(`autoDeploy 跳过：运行时随包内置（${bundledRuntimeDir}），无需联网`
-        + (env.needsExtract ? '，镜像将在首次启动时本地展开' : ''));
-      // 这是**成功**，不是失败。以前这里直接 return 没置 succeeded，finally 就按
-      // 失败写了 deployFailedAt —— 随包内置运行时的机器每 30 分钟被记一次
-      // 「部署失败」，日志里那句「上次失败于 …」其实来自一次正常的跳过，
-      // 用户看到设置页的「重试部署」也会一头雾水。
-      succeeded = true;
-      return { ok: true, source: 'bundled', needsExtract: !!env.needsExtract };
-    }
-    if (bundledRuntimeDir && !env.emulator.ok) {
-      appLog(`autoDeploy 跳过联网下载：运行时目录随包内置（${bundledRuntimeDir}），交给诊断流程`);
-      // 交回诊断流程同样不是「下载失败」，别进冷却。
-      succeeded = true;
-      return { ok: false, error: 'bundled', bundled: true };
-    }
-    // 轻量版优先用「本项目 GitHub 的运行时整包」：一个文件搞定 emulator + 系统镜像，
-    // 下载源和更新源统一在 GitHub 上（国内比 dl.google.com 稳得多）。
-    // 整包拿不到（没网 / 还没发过该资产 / 被限流）再逐个从官方源装。
-    if (needEngine && store.getSettings().runtime.preferGithubRuntime !== false) {
-      try {
-        progress({ message: '正在从 GitHub 下载运行时…' });
-        await runtime.provisioner.installRuntimePack(progress);
-        const afterPack = await runtime.provisioner.checkEnv();
-        if (afterPack.emulator.ok && afterPack.sysimg.ok) {
-          succeeded = true;
-          return { ok: true, source: 'github' };
-        }
-        progress({ message: '运行时整包不完整，改用官方源补齐…' });
-      } catch (e) {
-        progress({ message: `GitHub 运行时不可用（${e.message}），改用官方源…` });
-      }
-    }
-    if (!env.adb.ok) {
-      progress({ message: '正在准备 adb…' });
-      await runtime.provisioner.installAdb(progress);
-    }
-    if (!env.emulator.ok) {
-      progress({ message: '正在准备 Android 运行时…' });
-      await runtime.provisioner.installEmulator(progress);
-    }
-    if (!env.sysimg.ok) {
-      progress({ message: '正在准备 Android 系统镜像…' });
-      await runtime.provisioner.installSystemImage(progress);
-    }
-    const after = await runtime.provisioner.checkEnv();
-    succeeded = !!(after.adb.ok && after.emulator.ok && after.sysimg.ok);
-    return { ok: succeeded };
-  } catch (e) {
-    return { ok: false, error: e.message };
-  } finally {
-    // 只有「真失败」才进冷却；部署成功要把旧失败记录清掉。
-    try {
-      store.saveSettings({ runtime: { deployFailedAt: succeeded ? 0 : Date.now() } });
-    } catch (_) { /* 设置写不进去不影响本次结果 */ }
-    deploying = false;
-  }
-}
+  },
+  log: appLog,
+});
 
 function launcherInfo() {
   if (app.isPackaged) {
@@ -1146,6 +1073,8 @@ async function runInstall(filePath) {
 async function installOne(filePath) {
   try {
     showWindow();
+    // 安装由管理窗口接管；置顶的开机图不能挡住 Android 的 ADB 授权提示。
+    startupSplash?.close();
     send('install:start', { file: filePath });
     const result = await installer.install(filePath, (p) => send('install:progress', p));
     send('install:done', result);
@@ -1512,6 +1441,11 @@ function connectAppWindow() {
   });
 
   runtime.emulator.onBeforeSpawn = () => desktopAgent.arm();
+  runtime.presentAdbConsent = (identity) => {
+    // The always-on-top startup window must not cover Android's own authorization dialog.
+    startupSplash?.close();
+    return desktopAgent.presentAdbConsent(identity);
+  };
   desktopAgent.preconnect();
 }
 

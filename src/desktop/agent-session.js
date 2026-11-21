@@ -14,6 +14,31 @@ function createAgentSession({ createAgent, scopeDirs, ownerPid, wheelRouter, whe
     return agent.bootHide().catch(() => ({ ok: false }));
   }
 
+  async function presentAdbConsent(identity) {
+    const agent = current;
+    const pid = identity?.pid;
+    if (!isCurrent(agent) || !Number.isInteger(pid) || pid <= 0
+      || typeof identity.revalidate !== 'function' || typeof agent.reserveAdbConsent !== 'function') return null;
+    let lease;
+    let shown = false;
+    try {
+      lease = await agent.reserveAdbConsent(pid);
+      // The helper has pinned a native window; recheck the runtime before showing it.
+      if (!lease || !isCurrent(agent) || !await identity.revalidate() || !isCurrent(agent)) return null;
+      if (!await lease.show() || !isCurrent(agent)) return null;
+      shown = true;
+      return async () => {
+        if (!shown) return;
+        shown = false;
+        await lease.close().catch(() => {});
+      };
+    } catch (_) {
+      return null;
+    } finally {
+      if (!shown && lease) await lease.close().catch(() => {});
+    }
+  }
+
   function subscribe(agent) {
     agent.on('back', () => { if (isCurrent(agent)) onBack().catch(() => {}); });
     agent.on('forward', () => { if (isCurrent(agent)) onForward().catch(() => {}); });
@@ -32,6 +57,7 @@ function createAgentSession({ createAgent, scopeDirs, ownerPid, wheelRouter, whe
   return {
     get current() { return current; },
     arm,
+    presentAdbConsent,
     preconnect() {
       const agent = current;
       return agent.ensure().then(() => arm(agent)).catch(() => ({ ok: false }));

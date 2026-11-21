@@ -56,6 +56,9 @@ public class ApkAgent
     [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr h, int i, int v);
     [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int w, int hh, uint f);
     [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int c);
+    [DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr h, int c);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr h, uint cmd);
     // 裁剪嵌入窗口的可见区域：把压到标题栏上的那条外框去掉
     [DllImport("user32.dll")] static extern int SetWindowRgn(IntPtr h, IntPtr rgn, bool redraw);
     [DllImport("gdi32.dll")] static extern IntPtr CreateRectRgn(int l, int t, int r, int b);
@@ -298,6 +301,119 @@ public class ApkAgent
         if (_ourTitle.Length > 0 && String.Equals(title, _ourTitle, StringComparison.Ordinal)) return true;
         return false;
     }
+
+    // Consent is a short-lived exception to suppression, not normal attach/detach.
+    sealed class AdbConsentLease
+    {
+        public IntPtr Window;
+        public uint Pid;
+        public long ProcessStarted, Deadline;
+        public string Token;
+        public bool ShowRequested, WasVisible, WasMinimized;
+    }
+
+    static AdbConsentLease _adbConsent;
+
+    static long ScopedEmulatorStart(uint pid)
+    {
+        try
+        {
+            using (Process p = Process.GetProcessById((int)pid))
+            {
+                string name = p.ProcessName.ToLowerInvariant();
+                if (name != "qemu-system-x86_64" && name != "qemu-system-aarch64" && name != "emulator") return 0;
+                string file = p.MainModule.FileName.ToLowerInvariant();
+                for (int i = 0; i < _scopeDirs.Count; i++)
+                    if (file.StartsWith(_scopeDirs[i], StringComparison.Ordinal)) return p.StartTime.ToUniversalTime().Ticks;
+            }
+        }
+        catch { }
+        return 0;
+    }
+
+    static bool IsAdbConsentMainWindow(IntPtr h, uint pid)
+    {
+        uint owner;
+        if (!IsWindow(h) || GetWindowThreadProcessId(h, out owner) == 0 || owner != pid ||
+            GetAncestor(h, 2) != h || GetWindow(h, 4) != IntPtr.Zero) return false; // GA_ROOT, GW_OWNER
+        string title = TitleOf(h);
+        if (!title.StartsWith("Android Emulator - ", StringComparison.OrdinalIgnoreCase) &&
+            (_ourTitle.Length == 0 || !String.Equals(title, _ourTitle, StringComparison.Ordinal))) return false;
+        RECT r;
+        return ClassOf(h).IndexOf("QWindowIcon", StringComparison.Ordinal) >= 0 &&
+            GetClientRect(h, out r) && r.R - r.L >= 200 && r.B - r.T >= 200;
+    }
+
+    static bool SameAdbConsentWindow(AdbConsentLease lease)
+    {
+        return lease != null && IsAdbConsentMainWindow(lease.Window, lease.Pid) &&
+            ScopedEmulatorStart(lease.Pid) == lease.ProcessStarted;
+    }
+
+    static bool ReserveAdbConsent(long pid, string token)
+    {
+        if (_adbConsent != null || pid <= 0 || pid > Int32.MaxValue ||
+            !System.Text.RegularExpressions.Regex.IsMatch(token, "^[0-9a-f]{32}$")) return false;
+        long started = ScopedEmulatorStart((uint)pid);
+        if (started == 0) return false;
+        IntPtr selected = IntPtr.Zero;
+        bool ambiguous = false;
+        EnumWindows(delegate(IntPtr h, IntPtr p)
+        {
+            if (!IsAdbConsentMainWindow(h, (uint)pid)) return true;
+            if (selected != IntPtr.Zero) { ambiguous = true; return false; }
+            selected = h;
+            return true;
+        }, IntPtr.Zero);
+        if (ambiguous || selected == IntPtr.Zero) return false;
+        var lease = new AdbConsentLease { Window = selected, Pid = (uint)pid,
+            ProcessStarted = started, Token = token, Deadline = NowMs() + 15000 };
+        if (!SameAdbConsentWindow(lease)) return false;
+        _adbConsent = lease;
+        return true;
+    }
+
+    static void RestoreAdbConsent()
+    {
+        AdbConsentLease lease = _adbConsent;
+        _adbConsent = null;
+        if (lease == null || !lease.ShowRequested || !SameAdbConsentWindow(lease)) return;
+        if (!lease.WasVisible) ShowWindowAsync(lease.Window, 0); // SW_HIDE
+        else if (lease.WasMinimized) ShowWindowAsync(lease.Window, 7); // SW_SHOWMINNOACTIVE
+    }
+
+    static bool ShowAdbConsent(long pid, string token)
+    {
+        AdbConsentLease lease = _adbConsent;
+        if (lease == null || lease.Pid != pid || lease.Token != token || lease.ShowRequested) return false;
+        if (NowMs() >= lease.Deadline || !SameAdbConsentWindow(lease)) { RestoreAdbConsent(); return false; }
+        lease.WasVisible = IsWindowVisible(lease.Window);
+        lease.WasMinimized = IsIconic(lease.Window);
+        lease.ShowRequested = true;
+        lease.Deadline = NowMs() + 180000; // Native failsafe if the requesting process disappears.
+        if (ShowWindowAsync(lease.Window, lease.WasMinimized ? 9 : 5)) // SW_RESTORE / SW_SHOW
+        {
+            long limit = NowMs() + 500;
+            while (NowMs() < limit)
+            {
+                if (IsWindowVisible(lease.Window) && !IsIconic(lease.Window) && SameAdbConsentWindow(lease))
+                {
+                    SetForegroundWindow(lease.Window);
+                    return true;
+                }
+                Thread.Sleep(20);
+            }
+        }
+        RestoreAdbConsent();
+        return false;
+    }
+
+    static bool IsAdbConsentShown(IntPtr h)
+    {
+        AdbConsentLease lease = _adbConsent;
+        return lease != null && lease.ShowRequested && lease.Window == h && SameAdbConsentWindow(lease);
+    }
+
     static IntPtr FindEmulator()
     {
         IntPtr best = IntPtr.Zero;
@@ -509,7 +625,7 @@ public class ApkAgent
         EnumWindows(delegate(IntPtr h, IntPtr p)
         {
             if (!IsWindowVisible(h)) return true;
-            if (h == embeddedRoot) return true;
+            if (h == embeddedRoot || IsAdbConsentShown(h)) return true;
             uint pid;
             GetWindowThreadProcessId(h, out pid);
             if (!IsOurs(pid)) return true;
@@ -588,7 +704,7 @@ public class ApkAgent
         bool embedded = _emu != IntPtr.Zero && ep != IntPtr.Zero
                      && (ep == _host || ep == _chromeRender);
         IntPtr e = embedded ? _emu : FindEmulator();
-        if (!embedded && e != IntPtr.Zero && IsWindowVisible(e)) ShowWindow(e, 0);
+        if (!embedded && e != IntPtr.Zero && IsWindowVisible(e) && !IsAdbConsentShown(e)) ShowWindow(e, 0);
         HideToolWindows();
         HideConsoleWindows();
         HideStrayWindows();
@@ -1097,6 +1213,7 @@ public class ApkAgent
         while (run)
         {
             Pump();
+            if (_adbConsent != null && NowMs() >= _adbConsent.Deadline) RestoreAdbConsent();
             FlushWheel(false);
 
             string ev;
@@ -1162,6 +1279,7 @@ public class ApkAgent
                 int n = sock.Receive(buf);
                 if (n <= 0)
                 {
+                    RestoreAdbConsent();
                     try { sock.Close(); } catch { }
                     sock = null;
                     if (_quiet) { _lingerUntil = Environment.TickCount + 180000; continue; }
@@ -1187,6 +1305,20 @@ public class ApkAgent
                         _appPid = appPid > 0 ? (uint)appPid : 0;
                         _hostPid = 0;
                         Reply(sock, "{\"ok\":true,\"n\":" + _scopeDirs.Count + "}");
+                    }
+                    else if (cmd == "adbConsentTarget" || cmd == "adbConsentShow" || cmd == "adbConsentEnd")
+                    {
+                        long pid = L(line, "pid");
+                        string token = S(line, "token");
+                        bool ok;
+                        if (cmd == "adbConsentTarget") ok = ReserveAdbConsent(pid, token);
+                        else if (cmd == "adbConsentShow") ok = ShowAdbConsent(pid, token);
+                        else
+                        {
+                            ok = _adbConsent != null && _adbConsent.Pid == pid && _adbConsent.Token == token;
+                            if (ok) RestoreAdbConsent();
+                        }
+                        Reply(sock, "{\"ok\":" + (ok ? "true" : "false") + "}");
                     }
                     else if (cmd == "embed")
                     {
@@ -1454,6 +1586,7 @@ public class ApkAgent
             }
             catch (SocketException)
             {
+                RestoreAdbConsent();
                 try { sock.Close(); } catch { }
                 sock = null;
                 if (_quiet) { _lingerUntil = Environment.TickCount + 180000; continue; }
@@ -1461,6 +1594,7 @@ public class ApkAgent
             }
             catch (Exception) { }
         }
+        RestoreAdbConsent();
         HookOff();
         try { sock.Close(); } catch { }
     }
