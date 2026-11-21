@@ -4,7 +4,9 @@ const { isIP } = require('node:net');
 
 const WIFI_STATUS = 'cmd wifi status 2>/dev/null; printf "\\n__APKSTART_VALIDATION_MODE__="; settings get global captive_portal_mode';
 const SNAPSHOT_COMMAND = 'dumpsys connectivity';
-const STOCK_WIFI_CONNECT = 'cmd wifi connect-network AndroidWifi open -b 02:15:b2:00:01:00';
+const STOCK_WIFI_BSSIDS = new Set(['02:15:b2:00:01:00', '02:15:b2:00:00:01']);
+const stockWifiConnect = (bssid) => `cmd wifi connect-network AndroidWifi open -b ${bssid}`;
+const STOCK_WIFI_CONNECT = stockWifiConnect('02:15:b2:00:01:00');
 const REACHABILITY_CHECK =
   'printf "GET /generate_204 HTTP/1.0\\r\\nHost: connect.rom.miui.com\\r\\n\\r\\n"'
   + ' | nc -w 4 connect.rom.miui.com 80 2>/dev/null | head -1';
@@ -60,10 +62,20 @@ function isUsableAddress(ip) {
     : isIP(ip) === 6 && !/^(?:fe[89ab]|::(?:1)?$)/i.test(ip);
 }
 
-function isStockWifiVisible(scanResults) {
+function stockWifiBssid(scanResults) {
   // Never connect to an arbitrary SSID or a look-alike with a different virtual BSSID.
-  return /^\s*02:15:b2:00:01:00[ \t]+\S+[ \t]+\S+[ \t]+\S+[ \t]+AndroidWifi[ \t]+\[ESS\][ \t]*$/im
-    .test(scanResults);
+  // The shipped images use different radio addresses; always select the one actually scanned.
+  const candidates = new Set();
+  for (const row of String(scanResults).split(/\r?\n/)) {
+    const match = /^[ \t]*([0-9a-f:]+)[ \t]+\S+[ \t]+\S+[ \t]+\S+[ \t]+AndroidWifi[ \t]+\[ESS\][ \t]*$/i.exec(row);
+    const bssid = match?.[1].toLowerCase();
+    if (STOCK_WIFI_BSSIDS.has(bssid)) candidates.add(bssid);
+  }
+  return candidates.size === 1 ? candidates.values().next().value : null;
+}
+
+function isStockWifiVisible(scanResults) {
+  return stockWifiBssid(scanResults) !== null;
 }
 
 const pauseFor = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -148,11 +160,11 @@ async function repairStockWifi(client, { canMutate = async () => true, pause = p
   };
   const scan = await command('cmd wifi list-scan-results');
   if (scan === null) return false;
-  if (!isStockWifiVisible(scan)) {
+  let bssid = stockWifiBssid(scan);
+  if (!bssid) {
     if (await command('cmd wifi start-scan') === null) return false;
     // start-scan acknowledges that Android queued the scan, not that results arrived.
     const scanDeadline = now() + 5500;
-    let found = false;
     for (const interval of [800, 1200, 1800, 1200]) {
       const available = scanDeadline - now();
       if (available <= 0) break;
@@ -161,16 +173,17 @@ async function repairStockWifi(client, { canMutate = async () => true, pause = p
       if (timeout <= 0) break;
       const results = await command('cmd wifi list-scan-results', timeout);
       if (results === null) return false;
-      if (isStockWifiVisible(results)) { found = true; break; }
+      bssid = stockWifiBssid(results);
+      if (bssid) break;
     }
-    if (!found) return false;
+    if (!bssid) return false;
   }
   const beforeConnect = await check();
   if (beforeConnect.ok) return true;
   if (beforeConnect.reason !== 'wifi-not-connected') return false;
   // Shell accepts this command on stock images. "Connection initiated" only
   // acknowledges the request, so require verified guest connectivity afterwards.
-  if (await command(STOCK_WIFI_CONNECT) === null) return false;
+  if (await command(stockWifiConnect(bssid)) === null) return false;
   return (await check(12000)).ok;
 }
 

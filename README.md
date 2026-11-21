@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/readme/hero.svg" alt="Apk Start --Q 1.0.8：让 Android 应用在 Windows 桌面上有个位置" width="100%">
+  <img src="docs/images/readme/hero.svg" alt="Apk Start --Q 1.0.9：让 Android 应用在 Windows 桌面上有个位置" width="100%">
 </p>
 
 <h3 align="center">把 APK 变成桌面上可以双击的窗口。</h3>

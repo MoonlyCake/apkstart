@@ -1365,7 +1365,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     const { WinAgent } = require('../src/core/agent');
     const a = new WinAgent();
     const sent = [];
-    a.call = async (obj) => { sent.push(obj); return { ok: true, hooked: true }; };
+    a.call = async (obj) => { sent.push(obj); return { ok: true, hooked: Boolean(obj.on) }; };
     const on = await a.setHook(true, { rightBack: true, wheel: true, side: false });
     assert(on.hooked === true && sent.length === 1, '开启应只发一次命令');
     assert(sent[0].right === 1 && sent[0].wheel === 1 && sent[0].side === 0, '配置必须随 hook 命令下发');

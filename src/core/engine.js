@@ -499,10 +499,11 @@ class Runtime {
       if (consentReadyIdentity && (identity.pid !== consentReadyIdentity.pid || !await consentReadyIdentity.revalidate())) {
         return { ok: false, error: OWNER_UNKNOWN };
       }
+      if (!await identity.revalidate()) return { ok: false, code: 'OWNER_UNKNOWN', error: OWNER_UNKNOWN };
+      this._bindVerifiedEmulator(identity);
       this.lastActivity = Date.now();
       this.emuSerial = identity.serial;
       const client = this.client(this.emuSerial);
-      if (!await identity.revalidate()) return { ok: false, code: 'OWNER_UNKNOWN', error: OWNER_UNKNOWN };
       await this.prepare(client);
       if (!await identity.revalidate()) return { ok: false, code: 'OWNER_UNKNOWN', error: OWNER_UNKNOWN };
       const performance = this.settings.engine.priorityMode === 'performance';
@@ -995,6 +996,7 @@ class Runtime {
     if (result.state !== 'owned') return unknown;
     const { emulator } = result;
     if (!await emulator.revalidate()) return unknown;
+    this._bindVerifiedEmulator(emulator);
     let client = this.client(emulator.serial);
     let probe = await this.reuseProbe(client);
     const stateOf = (endpoint) => Promise.resolve().then(() => endpoint.deviceState()).catch(() => 'unknown');
@@ -1096,8 +1098,19 @@ class Runtime {
 
   get guestGeneration() { return this._guestGeneration ?? 0; }
 
+  _bindVerifiedEmulator({ pid, generation }) {
+    const previous = this._guestOwner;
+    if (previous && (previous.pid !== pid || previous.generation !== generation)) {
+      // A restarted emulator can have the same ADB serial. Its input connection and
+      // per-boot setup flags belong to the former AVD lock, not to the port number.
+      this._retireGuest();
+    }
+    this._guestOwner = { pid, generation };
+  }
+
   _retireGuest() {
     this._guestGeneration = this.guestGeneration + 1;
+    this._guestOwner = null;
     this._lastNetwork = null;
     this._client?.disposeInput?.();
     this._client = null;

@@ -44,11 +44,18 @@ class UpdateChannel {
   constructor(fetchRelease = globalThis.fetch) {
     this.fetchRelease = fetchRelease;
     this.cached = null;
+    this.inFlight = null;
   }
 
   async latest({ force = false } = {}) {
+    // 手动刷新可以跳过已有缓存，但不用和后台检查争用或覆盖同一份结果。
+    if (this.inFlight) return this.inFlight;
     if (!force && this.cached && Date.now() - this.cached.at < CACHE_TTL) return this.cached.release;
+    this.inFlight = this._fetchLatest().finally(() => { this.inFlight = null; });
+    return this.inFlight;
+  }
 
+  async _fetchLatest() {
     // 安装程序只认本 fork；运行时的 Gitee / 镜像设置不参与版本检查。
     const response = await this.fetchRelease(LATEST_API, {
       headers: { Accept: 'application/vnd.github+json' },
