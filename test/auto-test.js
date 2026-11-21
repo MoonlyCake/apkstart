@@ -1243,26 +1243,13 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     const instJs = fs.readFileSync(path.join(root, 'src', 'core', 'installer.js'), 'utf8');
     const mainJs = fs.readFileSync(path.join(root, 'src', 'main.js'), 'utf8');
 
-    // 实机测出来的：进程在 2 秒时就出现了，但我们为了「确认不会马上崩」又等了 4 秒
-    // 才把窗口接上去，用户看到的就是「点了没反应」。改成进程一出现就接。
-    assert(/onAppUp/.test(instJs), 'installer.launch 需要 onAppUp 回调');
-    assert(/if \(!seen && typeof onAppUp === 'function'\)/.test(instJs),
-      'onAppUp 必须在「第一次看到进程」时触发，且只触发一次');
+    // 存活窗口和首次进程回调由 rewrite-launch.test.js 按行为验证。
+    assert(/launchPolicy[\s\S]{0,480}onAppUp/.test(instJs), '启动策略要收到窗口接管回调');
 
-    // 主进程要接这个回调，并且是并行接（不 await），否则又变成串行等待
+    // early attach 与失败后的最终补救由 rewrite-queue.test.js 按行为验证。
     assert(/onAppUp:\s*\(\)\s*=>/.test(mainJs), 'main.js 要传 onAppUp');
-    const block = mainJs.slice(mainJs.indexOf('onAppUp: () =>'), mainJs.indexOf('beforeStart:'));
-    assert(/attachAppWindow\(\)/.test(block), 'onAppUp 里要立刻接画面');
-    assert(!/await attachAppWindow\(\)/.test(block),
-      'onAppUp 里不能 await 接画面（会和存活判定串行，等于没优化）');
-
-    // 提前接过了就不能再在后面重复接一次 —— 独立窗口模式下会把刚摆好的窗口
-    // 再隐藏/显示一遍，画面会闪。
-    assert(/attachDoneEarly/.test(mainJs), '要记住是否已经提前接过画面');
-    assert(/if \(attachDoneEarly\)/.test(mainJs), '最终判定要跳过重复接画面');
-
-    // 存活观察期本身不能删：它是防「闪一下就崩」的兜底
-    assert(/aliveSince >= 4000/.test(instJs), '4 秒存活观察期要保留（防闪崩）');
+    assert(mainJs.includes('attachment.startEarly().then(watchFirstFrame)'), '提前接画面不能阻塞存活判定');
+    assert(mainJs.includes('await attachment.finish()'), '稳定后应等待接管结果，失败时重试');
   });
 
   await test('虚拟机联网：AVD 必须开虚拟 Wi-Fi，且能主动重连「不会自动连」的热点', () => {
@@ -2459,18 +2446,13 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(/SnapshotConsoles\(\);/.test(ps1), 'boothide 时要先拍快照');
   });
 
-  await test('启动要串行化：连点/切换应用不能并发跑两遍', () => {
+  await test('安装与启动复用同一个操作队列，拒绝安装要保留失败状态', () => {
     const root = path.join(__dirname, '..');
     const mainJs = fs.readFileSync(path.join(root, 'src', 'main.js'), 'utf8');
-    // 一次启动最长 80 秒（换面板重启 + 冷启动）。以前这期间再点一个应用会真的
-    // 并发跑第二遍：openAppWindow 把正在启动的应用关掉，虚拟机又在重启，
-    // 两边一起失败，日志里是 `cmd: Can't find service: activity`。
-    assert(/let launchInFlight = null;/.test(mainJs), '要有进行中启动的记录');
-    assert(/if \(launchInFlight\.pkg === pkg\)[\s\S]{0,120}return launchInFlight\.promise;/.test(mainJs),
-      '同一个应用连点要复用进行中的那次');
-    assert(/launch queued \$\{pkg\}/.test(mainJs), '换应用要排队而不是把运行时抽走');
-    assert(/async function launchOne\(pkg\)/.test(mainJs), '原主体要拆成 launchOne');
-    assert(/launchInFlight = entry;/.test(mainJs), '要在 finally 里清空，避免卡死后续启动');
+    // 排队顺序、并发、去重和失败恢复由 rewrite-queue.test.js 按行为验证。
+    assert(mainJs.includes("appOperations.run('install', () => installOne(filePath))"), '安装要入队');
+    assert(mainJs.includes('appOperations.run(key, () => launchOne(pkg))'), '启动要走同一队列');
+    assert(mainJs.includes('if (r.ok === false) return r;'), '不能把拒绝安装返回成成功');
   });
 
   await test('硬件加速：商店版引导用户开 WHPX，安装版一键开启并可退 AEHD', () => {
@@ -2749,8 +2731,8 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(/setState\(\{ ready: true/.test(fn), '收尾要通知 boot 遮罩淡出');
     assert(/splashDone/.test(fn), '收尾要同时关掉早期 splash 窗口');
     // launch 结束处不能再无条件 setState ready（会在白底 Splash 阶段提前收动画）
-    assert(/if \(!attachDoneEarly\) finishBootAnimation\(\)/.test(mainJs),
-      '只有没走提前接画面时才在 launch 结束直接收');
+    assert(/if \(!embedded\) finishBootAnimation\(\)/.test(mainJs),
+      '只有窗口接入失败时才直接结束等待；接入成功后交给首帧监测');
     // 总保险丝：任何路径卡住都会强制收，绝不永久停在动画里
     assert(/setTimeout\(finishBootAnimation, 24000\)/.test(mainJs), '要有 24 秒总保险丝');
   });

@@ -1362,15 +1362,26 @@ class Runtime {
    * @returns {{ok:boolean, reclaimed:number, avdDir:string, error?:string}}
    */
   async resetAndroidData() {
-    const fs = require('fs');
-    const path = require('path');
+    let reclaimed = 0;
+    let avdDir = '';
     try {
-      if (this.vmRunning) await this.stop().catch(() => {});
-      const avdDir = path.join(this.provisioner.paths().avdHome, 'apkstart.avd');
-      let reclaimed = 0;
+      // 清空前确认应用清单可读。不能在删除镜像后才发现清单已损坏。
+      store.getApps();
+      if (this.vmRunning) {
+        await this.stop();
+        if (this.vmRunning) throw new Error('安卓运行时尚未停止，未清除数据');
+        store.getApps(); // 关机等待期间，清单可能已被外部程序修改。
+      }
+      const { avdHome } = this.provisioner.paths();
+      avdDir = path.join(avdHome, 'apkstart.avd');
       if (fs.existsSync(avdDir)) {
-        for (const e of fs.readdirSync(avdDir, { withFileTypes: true })) {
-          const p = path.join(avdDir, e.name);
+        const root = fs.realpathSync(avdDir);
+        const relative = path.relative(fs.realpathSync(avdHome), root);
+        if ((process.platform === 'win32' ? relative.toLowerCase() : relative) !== 'apkstart.avd') {
+          throw new Error('安卓数据目录不在当前 AVD 位置，未清除数据');
+        }
+        for (const e of fs.readdirSync(root, { withFileTypes: true })) {
+          const p = path.join(root, e.name);
           // 删除：用户数据镜像（含 qcow2 差量 + 基址）、快速启动快照、残留锁文件/锁目录。
           // 保留：config.ini / hardware-qemu.ini / AVD.conf / cache.img / encryptionkey* / initrd /
           //       modem_simulator / 各类 *.ini / *.txt / *.cache —— 它们是 AVD 的身份与基础设施，
@@ -1383,23 +1394,28 @@ class Runtime {
           if (e.isDirectory() && !isSnapshot && !isLock) continue;
           try {
             if (e.isDirectory()) {
-              const s = require('./layers').dirSize(p);
-              fs.rmSync(p, { recursive: true, force: true });
-              reclaimed += s;
+              const target = fs.realpathSync(p);
+              if (path.relative(root, target) !== e.name) continue;
+              const size = require('./layers').dirSize(target);
+              fs.rmSync(target, { recursive: true, force: true });
+              reclaimed += size;
             } else {
-              const s = fs.statSync(p).size;
+              const size = fs.statSync(p).size;
               fs.rmSync(p, { force: true });
-              reclaimed += s;
+              reclaimed += size;
             }
           } catch (_) { /* 占用中的暂跳，下次再清 */ }
         }
       }
-      // 用户数据镜像被删后，用户侧「已安装 app」的记录也要清掉，
-      // 否则桌面/启动器还显示着其实已不存在的 app。
-      try { store.saveApps([]); } catch (_) { /* ignore */ }
+      try {
+        store.saveApps([]);
+      } catch (e) {
+        // 磁盘操作已经执行，不应把清单写入失败误报为成功或承诺数据仍在。
+        return { ok: false, reclaimed, avdDir, error: `已执行安卓数据清理，但应用清单未能更新：${e.message}` };
+      }
       return { ok: true, reclaimed, avdDir };
     } catch (e) {
-      return { ok: false, reclaimed: 0, avdDir: '', error: e.message };
+      return { ok: false, reclaimed, avdDir, error: e.message };
     }
   }
 

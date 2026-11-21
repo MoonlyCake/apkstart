@@ -138,6 +138,11 @@ function parsePmPaths(text) {
     .filter((l) => /^package:/.test(l)).map((l) => l.slice(8).trim()).filter(Boolean);
 }
 
+function parsePidList(text) {
+  const out = String(text || '').trim();
+  return /^[1-9]\d*(?:\s+[1-9]\d*)*$/.test(out) ? out.split(/\s+/) : null;
+}
+
 /** 已解析过的启动入口（adbPath|pkg → activity），10 分钟有效 */
 const LAUNCHER_CACHE = new Map();
 
@@ -451,13 +456,13 @@ class AdbClient {
    *  - adb 版本不认该参数 / 中文路径 / 传输错误时自动换写法重试；
    *  - NO_MATCHING_ABIS 抛带 code 的错误，交给上层自动切换兼容镜像。
    */
-  async install(apkPath) {
+  async install(apkPath, { grantPermissions = true } = {}) {
     if (!fs.existsSync(apkPath)) throw new Error(`APK 不存在: ${apkPath}`);
     const staged = stageApk(apkPath);
     const file = staged.path;
     const variants = [
       // -g 自动授予运行时权限，省掉应用里的授权弹窗；部分镜像不支持则自动降级去掉
-      ['install', '-r', '-t', '-g', '--bypass-low-target-sdk-block', file],
+      ...(grantPermissions ? [['install', '-r', '-t', '-g', '--bypass-low-target-sdk-block', file]] : []),
       ['install', '-r', '-t', '--bypass-low-target-sdk-block', file],
       ['install', '-r', '-t', file],
       ['install', '-r', file],
@@ -480,7 +485,7 @@ class AdbClient {
           const tag = (/INSTALL_[A-Z_]+/.exec(raw) || [])[0] || '';
 
           if (tag === 'INSTALL_FAILED_NO_MATCHING_ABIS') {
-            const err = new Error(friendlyInstallError(raw));
+            const err = new Error(friendlyInstallError(raw), { cause: e });
             err.code = 'NO_MATCHING_ABIS';
             err.raw = raw;
             throw err;
@@ -530,8 +535,9 @@ class AdbClient {
           const raw = String(e.raw || e.stdout || e.message || '');
           if (/Unknown option|unrecognized option/i.test(raw)) continue;
           if (/INSTALL_FAILED_NO_MATCHING_ABIS/.test(raw)) {
-            const err = new Error(friendlyInstallError(raw));
+            const err = new Error(friendlyInstallError(raw), { cause: e });
             err.code = 'NO_MATCHING_ABIS';
+            err.raw = raw;
             throw err;
           }
           throw new Error(friendlyInstallError(raw));
@@ -562,14 +568,32 @@ class AdbClient {
    *
    * @returns {Promise<boolean>}
    */
-  async isInstalled(pkg) {
-    const out = await this.shell(`pm path ${pkg}`);
+  async isInstalled(pkg, { strictProbe = false } = {}) {
+    const absent = '__APKSTART_ABSENT__';
+    const present = '__APKSTART_PRESENT__';
+    const command = 'pm path ' + pkg;
+    // Turn a remote exit 1 into an explicit marker without masking ADB transport failures.
+    const out = await this.shell(strictProbe
+      ? command + ' 2>&1; rc=$?; if [ "$rc" -eq 1 ]; then echo ' + absent + '; else exit "$rc"; fi'
+      : command);
     const paths = parsePmPaths(out);
-    if (!paths.length) return false;
-    // 分片 APK 全部要在；任一片丢了都启动不了。合并成一条 shell，省一次 adb 往返。
-    const checks = paths.map((p) => `[ -s "${p}" ]`).join(' && ');
-    const probe = await this.shell(`${checks} && echo __APKSTART_PRESENT__`, { timeout: 10000 }).catch(() => '');
-    return /__APKSTART_PRESENT__/.test(String(probe));
+    if (!paths.length) {
+      if (!strictProbe || out === absent) return false;
+      throw new Error('无法确认安卓应用的安装状态');
+    }
+    // Single-quote guest-reported file paths without interpreting shell syntax.
+    const checks = paths.map((p) => "[ -s '" + p.replace(/'/g, "'\\''") + "' ]").join(' && ');
+    if (!strictProbe) {
+      const probe = await this.shell(checks + ' && echo ' + present, { timeout: 10000 }).catch(() => '');
+      return probe.includes(present);
+    }
+    const probe = await this.shell(
+      'if ' + checks + '; then echo ' + present + '; else echo ' + absent + '; fi',
+      { timeout: 10000 },
+    );
+    if (probe === absent) return false;
+    if (probe === present) return true;
+    throw new Error('无法确认安卓应用的 APK 文件状态');
   }
 
   async listPackages() {
@@ -604,12 +628,15 @@ class AdbClient {
   }
 
   /** 应用是否真的活着：am start 返回成功 ≠ 进程没崩 */
-  async waitAppAlive(pkg, timeoutMs = 12000) {
+  async waitAppAlive(pkg, timeoutMs = 12000, onProcessSeen) {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       // eslint-disable-next-line no-await-in-loop
       const pid = await this.shell(`pidof ${pkg}`, { timeout: 6000 }).catch(() => '');
-      if (String(pid).trim()) return { ok: true };
+      if (String(pid).trim()) {
+        if (onProcessSeen && parsePidList(pid)) onProcessSeen();
+        return { ok: true };
+      }
       // 350ms 轮询（原 1000ms）：进程一出现就更快确认存活、让启动流程往下走。
       // pidof 是轻量 shell，密一点不会增加可感知负担，但对「点开到出画面」有直接收益。
       // eslint-disable-next-line no-await-in-loop
@@ -619,7 +646,7 @@ class AdbClient {
     try {
       crash = await this.shell(
         `logcat -d -t 250 -v brief AndroidRuntime:E DEBUG:E libc:E 2>/dev/null | `
-        + `grep -i -E '${pkg}|FATAL|ndk_translation|SIGABRT|SIGSEGV|UnsatisfiedLink' | tail -n 30`,
+        + `grep -i -E '${pkg}|FATAL|Process:|Cmdline:|>>>|ndk_translation|SIGABRT|SIGSEGV|UnsatisfiedLink' | tail -n 30`,
         { timeout: 12000 },
       );
     } catch (_) { /* ignore */ }
@@ -633,7 +660,7 @@ class AdbClient {
    *   freeform 独立窗口 → 普通全屏 → monkey 兜底；
    * 每次都验证进程是否存活，崩溃时抓 logcat 并抛带 code 的错误供上层自动切镜像。
    */
-  async startApp(pkg, activity, { freeform = true, bounds = null, forceStop = false } = {}) {
+  async startApp(pkg, activity, { freeform = true, bounds = null, forceStop = false, onProcessSeen } = {}) {
     if (forceStop) await this.forceStop(pkg);
     // 必须用系统解析出来的 LAUNCHER 入口，不能只用 APK 里解析到的主 Activity：
     // 很多应用（红果短剧等）的启动页才做真正的初始化，直接进主 Activity 会
@@ -664,7 +691,7 @@ class AdbClient {
 
       if (bounds) this.resizeTaskOfPackage(pkg, bounds).catch(() => {});
       // eslint-disable-next-line no-await-in-loop
-      const alive = await this.waitAppAlive(pkg, 6000);
+      const alive = await this.waitAppAlive(pkg, 6000, onProcessSeen);
       if (alive.ok) return out;
       if (alive.uncertain) return `${out}\n（应用仍在加载中）`;
       lastError = alive.crash || lastError;
@@ -682,7 +709,7 @@ class AdbClient {
       const out = await this.shell(
         `monkey -p ${pkg} -c android.intent.category.LAUNCHER 1`, { timeout: 20000 },
       );
-      const alive = await this.waitAppAlive(pkg, 12000);
+      const alive = await this.waitAppAlive(pkg, 12000, onProcessSeen);
       if (alive.ok || alive.uncertain) return out;
       lastError = alive.crash || lastError;
     } catch (e) {
@@ -1186,6 +1213,7 @@ class AdbClient {
 }
 
 module.exports = {
+  parsePidList,
   AdbClient, AdbError, parseStatList, friendlyInstallError, friendlyLaunchError,
   componentArg, parseResolvedActivity, parseDeviceState, isUnauthorizedError, parsePmPaths,
 };

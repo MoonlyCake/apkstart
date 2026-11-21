@@ -194,7 +194,7 @@ ApkStart.exe --launch &lt;包名&gt;
 <p><strong>症状</strong>：安装时报 <code>INSTALL_FAILED_NO_MATCHING_ABIS</code>，文案写着"应用只提供 ARM 原生库……当前系统镜像没有 ARM 转译层"；或应用装上后一启动就闪退，日志出现 <code>DoBadTrampoline</code>、<code>libndk_translation</code>、<code>UnsatisfiedLinkError</code>、<code>...so not found</code>。</p>
 <p><strong>原理</strong>：0.6.3 用<strong>一个通用 Android 14 镜像</strong>同时支持 x86 和 ARM，翻译层已内置。老版本需要手动切换镜像，那个「通用兼容镜像（自动管理）」开关现在<strong>仅用于旧配置兼容，正常无需手动动</strong>。</p>
 <p><strong>ApkStart 会自动做什么：</strong></p>
-<ol><li>安装时若报 <code>NO_MATCHING_ABIS</code>，自动切换兼容镜像 → 重启运行时 → 把已装应用从本地 APK 备份重新灌回去 → 重新安装（见日志"正在切换到兼容镜像并重启运行时…"）。</li><li>若应用启动崩溃且日志明确指向 ARM 翻译层（如 <code>DoBadTrampoline</code>），自动切到 Android 14 兼容镜像重试（日志"检测到 ARM 翻译层崩溃，正在自动切换兼容镜像…"）。</li></ol>
+<ol><li>安装时若报 <code>NO_MATCHING_ABIS</code>，自动切换兼容镜像 → 重启运行时 → 把已装应用从本地 APK 备份重新灌回去 → 重新安装（见日志"正在切换到兼容镜像并重启运行时…"）。</li><li>普通启动时如果发现 ARM 转译异常，会提示检查兼容镜像，不自动切换。更换镜像可能重建安卓数据盘；如需切换，请先备份应用内数据。</li></ol>
 <p><strong>你需要做的：</strong></p>
 <ul><li><strong>耐心等</strong>：切换镜像会重启运行时，一次约 40 秒到 1 分钟，期间可能看到提示窗口。</li><li><strong>确认镜像已就位</strong>：设置 → 常用与安装 → 运行时，看「通用兼容镜像（自动管理）」状态；若显示未下载，点「下载兼容镜像」（约 1.5 GB），完成后<strong>重启运行时</strong>生效。</li><li><strong>仍是闪退</strong>：少数应用自带更深的反模拟检测（强制校验真实传感器、基带等），无法在模拟器里运行；这类应用会给出中文说明，属于限制，不是故障。</li></ul>
 <p><strong>看到「红色『安装失败』+ 文案却说『正在自动切换兼容镜像后重试』」怎么办？</strong></p>

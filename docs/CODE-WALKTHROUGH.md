@@ -109,8 +109,8 @@ Explorer 双击 .apk
      │   ├ beforeStart → prepareForeground()（沉浸式/关动画/收锁屏）
      │   ├ 应用不在当前运行时里？从备份 APK 自动重装        installer.js:404
      │   ├ grantRuntimePermissions()
-     │   └ startApp() + staysAlive()（25s 窗口 / 连续存活 4s）
-     │        失败重试 3 次 → pm clear + 补权限 → 再拉一次
+     │   └ startApp() + launchPolicy（25s 内观察同一 PID 稳定 4s）
+     │        确认退出才重试，最多三次；ADB 断连或超时不清数据
      │        崩溃带 evidence(APP_CRASHED) → 自动切兼容镜像重来
      ├ appWin.embed()：SetParent 把模拟器窗口嵌进来        appwin.js:213
      └ runtime.beginApp(pkg)：停其他 App、提优先级、开同步/通知  engine.js:901
