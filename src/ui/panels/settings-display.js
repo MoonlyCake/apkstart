@@ -21,11 +21,27 @@
     }
 
     function bindWindow() {
+      async function applyLayout(patch, label) {
+        try {
+          const r = await api.displaySet(patch);
+          if (r?.ok !== true) throw new Error(r?.error || '没有收到窗口设置确认');
+          const { ok: _ok, windowLayoutApplied, ...display } = r;
+          state.settings = { ...state.settings, display };
+          $('setDisplayMode').value = display.mode;
+          $('portraitField').hidden = display.mode === 'fullscreen';
+          $('setPortrait').value = display.portrait;
+          toast({ title: windowLayoutApplied ? label : '窗口偏好已保存',
+            body: windowLayoutApplied ? '仅调整 Windows 窗口，不重启安卓。' : '下次打开安卓应用窗口时应用。', type: 'ok' });
+        } catch (e) {
+          $('setDisplayMode').value = state.settings?.display?.mode || 'window';
+          $('setPortrait').value = state.settings?.display?.portrait || '900x1600';
+          $('portraitField').hidden = $('setDisplayMode').value === 'fullscreen';
+          toast({ title: '窗口设置失败', body: e.message, type: 'error' });
+        }
+      }
       $('setDisplayMode').addEventListener('change', async (e) => {
         const mode = e.target.value;
-        $('portraitField').hidden = mode === 'fullscreen';
-        state.settings = await api.setSettings({ display: { mode } });
-        toast({ title: mode === 'fullscreen' ? '已切全屏' : '已切竖屏窗口', type: 'ok' });
+        await applyLayout({ mode }, mode === 'fullscreen' ? '已切全屏' : '已切换为窗口模式');
       });
       if ($('setAutoFullscreen')) {
         $('setAutoFullscreen').addEventListener('change', async (e) => {
@@ -81,8 +97,7 @@
         });
       }
       $('setPortrait').addEventListener('change', async (e) => {
-        state.settings = await api.setSettings({ display: { portrait: e.target.value } });
-        toast({ title: '画面大小已更新', body: '下次打开应用或切换应用时生效', type: 'ok' });
+        await applyLayout({ portrait: e.target.value }, 'Windows 窗口大小已调整');
       });
       $('setWindowEmbed').addEventListener('change', async (e) => {
         const embed = e.target.value === 'embed';

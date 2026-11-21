@@ -13,6 +13,7 @@ const { validPackageName } = require('./core/pkgname');
 const { OperationQueue } = require('./application/operation-queue');
 const { AppSessions } = require('./application/app-sessions');
 const { createLaunchPresentation } = require('./desktop/launch-presentation');
+const { createDesktopShutdown } = require('./desktop/shutdown');
 const { createAgentSession } = require('./desktop/agent-session');
 const { createStartupServices } = require('./desktop/startup-services');
 const { createStartupSplash } = require('./desktop/startup-splash');
@@ -174,48 +175,12 @@ function bootstrapBundledRuntime() {
     if (!bundled) return;
 
     const s = store.getSettings();
-    // 旧版只在 settings.json 不存在时接管：用户先装过在线版再解压完整版，
-    // 就会一直走「缺组件」的部署向导。现在只要当前运行时目录里没有 emulator 就接管。
     const explicit = String(s.runtime.dir || '').trim();
     const current = explicit || path.join(store.DATA_DIR, 'runtime');
-    // 「另一个安装包的运行时」：路径是 <某目录>/resources/runtime，但不在本次 EXE 的目录树里。
-    // 这只可能来自「解压了新版便携包、settings.json 还记着旧包路径」——
-    // 实测后果很隐蔽：新包启动，实际跑的是上个版本的 emulator/镜像/快照，
-    // 用户升级后仍然卡顿、方向参数还是旧的，甚至旧包一删就彻底起不来。
-    // 用户自己挑的目录（D:\ApkStartRuntime 之类）不会被这条规则误伤。
-    const looksForeignBundle = /[\\/]resources[\\/]runtime$/i.test(current)
-      && !path.resolve(current).toLowerCase().startsWith(path.resolve(exeDir).toLowerCase());
-    if (looksForeignBundle && fs.existsSync(path.join(bundled, 'emulator', 'emulator.exe'))) {
-      store.saveSettings({ runtime: { dir: bundled } });
-      bundledRuntimeDir = bundled;
-      appLog(`运行时目录指向别的安装包（${current}），改用随包内置运行时 ${bundled}`);
-      return;
-    }
-    const currentExe = path.join(current, 'emulator', 'emulator.exe');
-    // 便携版被移动/升级（解压到新目录）后，settings 里记的还是旧路径：
-    // 必须只认「本次 EXE 所在目录下的 runtime」，否则会一直用旧包里的组件
-    // （实测踩过：旧包的 emulator 缺 emulator-check → 加速探测失败 → 退回 TCG 软件模拟）。
-    const sameTree = path.resolve(current).toLowerCase()
-      .startsWith(path.resolve(exeDir).toLowerCase());
-    const currentOk = fs.existsSync(currentExe) && sameTree;
-    // 用户自己挑的目录（不在 EXE 目录树里，例如 D:\ApkStartRuntime 或别的盘）
-    // 一律尊重：他可能就是为了省 C 盘空间、或让多个便携版共用一个运行时。
-    // 旧版在这里无条件覆盖成 exe 旁边的 bundled runtime，表现就是
-    // 「设置里改了运行时数据目录，结果还是下到旧目录 / AppData」（issue #23）。
-    if (explicit && !sameTree && fs.existsSync(currentExe)) {
-      if (s.engine.gpuMode === 'swiftshader_indirect' || s.engine.memoryMB === 4096) {
-        store.saveSettings({ engine: { gpuMode: 'auto', autoMemory: true, memoryMB: 0, cores: 0 } });
-      }
-      return;
-    }
-    // 已有可用运行时（含在线版）就尊重它：AVD 用户数据就在该目录下，不能悄悄搬走
-    if (currentOk) {
-      // 运行时就在 EXE 目录树里 = 它是安装包自带的（完整版 / 商店版）
-      bundledRuntimeDir = current;
-      // 但仍把自动参数打开，旧配置里的硬编码 4G/4核/弃用 GPU 模式不能继续用
-      if (s.engine.gpuMode === 'swiftshader_indirect' || s.engine.memoryMB === 4096) {
-        store.saveSettings({ engine: { gpuMode: 'auto', autoMemory: true, memoryMB: 0, cores: 0 } });
-      }
+    if (fs.existsSync(path.join(current, 'emulator', 'emulator.exe'))) {
+      // Preserve a user's working Android path and resource choices. A path's suffix
+      // doesn't prove it came from another package, nor does 4096 MB mark a migration.
+      if (path.resolve(current).toLowerCase() === path.resolve(bundled).toLowerCase()) bundledRuntimeDir = current;
       return;
     }
     // 包里带的是 Google Play 镜像才开兼容模式；AOSP 镜像带的是原生 x86_64 库
@@ -228,10 +193,7 @@ function bootstrapBundledRuntime() {
         }
       }
     } catch (_) { /* 忽略 */ }
-    store.saveSettings({
-      runtime: { dir: bundled, compatImage: playBundled },
-      engine: { gpuMode: 'auto', autoMemory: true },
-    });
+    store.saveSettings({ runtime: { dir: bundled, compatImage: playBundled } });
     bundledRuntimeDir = bundled;
   } catch (_) { /* 接管失败不阻塞启动，走在线引导 */ }
 }
@@ -530,7 +492,7 @@ async function attachAppWindow(isCurrent = () => true) {
         return false;
       }
       // eslint-disable-next-line no-await-in-loop
-      const ok = await target.openDetached().catch((e) => {
+      const ok = await target.openDetached(active).catch((e) => {
         target.lastEmbedError = (e && e.message) || 'threw';
         return false;
       });
@@ -546,7 +508,7 @@ async function attachAppWindow(isCurrent = () => true) {
     // 并明确告诉用户这是兜底 —— 下次启动仍然优先原生窗口。
     if (!active()) return false;
     appLog('attach detached: 重试全部失败，临时退回嵌入模式');
-    const fallback = await target.embed().catch(() => false);
+    const fallback = await target.embed(active).catch(() => false);
     if (!active()) return false;
     if (fallback) {
       try {
@@ -559,7 +521,7 @@ async function attachAppWindow(isCurrent = () => true) {
   for (const delay of [0, 1500, 2500]) {
     if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
     if (!active()) return false;
-    const ok = await target.embed().catch(() => false);
+    const ok = await target.embed(active).catch(() => false);
     if (ok && active()) return true;
   }
   return false;
@@ -599,6 +561,7 @@ async function openAppWindow(pkg, tip) {
       iconPath: rec && rec.icoPath,
       // 横屏时窗口按横比例开，否则竖窗口里塞横画面会留出大片黑边
       portrait: land ? { w: p0.h, h: p0.w } : p0,
+      rememberedBounds: displaySettings().rememberBounds !== false ? rec?.bounds : null,
       // 全屏有两种来路：显式选了「全屏」模式，或者勾了「启动时自动全屏」。
       // 后者以前是个死开关（只在默认设置里声明，没有任何代码读它），这里补上。
       fullscreen: displaySettings().mode === 'fullscreen'
@@ -630,21 +593,14 @@ async function toggleDisplayMode() {
   const next = store.saveSettings({
     display: { mode: displaySettings().mode === 'fullscreen' ? 'window' : 'fullscreen' },
   });
-  const full = next.display.mode === 'fullscreen';
-  if (appWin && appWin.isOpen) {
-    // 独立窗口模式下画面在模拟器原生窗口里，maximize 壳窗口毫无视觉效果，
-    // 走 appWin.toggleMaximize 才会把模拟器窗口铺满/还原。
-    if (displaySettings().windowEmbed === false) {
-      appWin.toggleMaximize().catch(() => {});
-    } else if (full) appWin.win.maximize();
-    else appWin.win.unmaximize();
-    appWin.scheduleFit(6);
-    // 注意：这里**不再**顺手把面板方向也切了。
-    // 全屏和横屏是两件事：面板方向现在由「应用自己声明的方向」决定
-    // （见 wantLandscapeFor）。以前 F11 会连带重启运行时切横屏，结果竖屏应用
-    // 被塞进横屏面板 → 两侧黑边 → 用户以为「全屏没生效」。
+  const mode = next.display.mode;
+  let windowLayoutApplied = false;
+  if (appWin?.isOpen) {
+    // 保存的偏好和眼前的布局是两件事；这里只调整 Windows 窗口，不重启安卓。
+    windowLayoutApplied = await appWin.toggleMaximize(mode === 'fullscreen').catch(() => false) === true;
+    if (!windowLayoutApplied) notify('显示模式已保存', '当前窗口未能应用，下次打开时生效。');
   }
-  return next.display.mode;
+  return { ok: true, mode, windowLayoutApplied };
 }
 
 const autoDeploy = createRuntimeDeployment({
@@ -664,20 +620,6 @@ function launcherInfo() {
     return { target: process.execPath, args: '', cwd: path.dirname(process.execPath) };
   }
   return { target: process.execPath, args: `"${APP_ROOT}"`, cwd: APP_ROOT };
-}
-
-/** 递归复制目录内容（best-effort，不删源；用于共享目录改路径时一次性搬迁旧文件） */
-function copyDirContents(src, dest) {
-  if (!fs.existsSync(src)) return;
-  fs.mkdirSync(dest, { recursive: true });
-  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    const s = path.join(src, entry.name);
-    const d = path.join(dest, entry.name);
-    try {
-      if (entry.isDirectory()) copyDirContents(s, d);
-      else fs.copyFileSync(s, d);
-    } catch (_) { /* 单文件失败不影响其余 */ }
-  }
 }
 
 /** 以管理员权限启用一个 Windows 可选功能（如 VirtualMachinePlatform / HypervisorPlatform） */
@@ -988,7 +930,10 @@ function buildTray() {
           const pkg = appSessions?.currentPackage;
           if (!pkg) return;
           // 复用 app:stop 的同一条路径，不在两处写同样的逻辑
-          stopApp(pkg).then(() => refresh());
+          stopApp(pkg).then((result) => {
+            if (!result.ok) notify('停止失败', result.error);
+            refresh();
+          });
         },
       },
       {
@@ -1030,8 +975,7 @@ function buildTray() {
       { type: 'separator' },
       {
         label: '退出',
-        click: async () => {
-          try { appWin.close({ keepApp: true }); } catch (_) { /* ignore */ }
+        click: () => {
           quitting = true;
           app.quit();
         },
@@ -1126,7 +1070,7 @@ async function runUpdate() {
     sendProgress({ stage: 'download', percent: 0, message: '准备下载…' });
     const job = await updater.prepare(info);
     sendProgress({ stage: 'apply', percent: 100, message: '正在替换程序并重启…' });
-    updater.apply(job);
+    await updater.apply(job);
     // 给界面一点时间显示「即将重启」，然后走正常退出流程（before-quit 会把模拟器窗口藏好）
     setTimeout(() => { quitting = true; app.quit(); }, 900);
     return { ok: true, version: info.version, mode: job.mode };
@@ -1142,6 +1086,7 @@ async function runUpdate() {
 let accelWarned = false;
 
 async function runLaunch(pkg) {
+  if (quitting) return { ok: false, error: 'Apk Start 正在退出' };
   if (!isLaunchPackage(pkg)) return { ok: false, error: '无效的安卓应用包名' };
   const key = `launch:${pkg}`;
   if (appOperations.has(key)) appLog(`launch reused in-flight ${pkg}`);
@@ -1195,7 +1140,7 @@ async function launchOne(pkg) {
   let guestGeneration;
   let attaching = true;
   const ownsSession = () => appSessions.isCurrent(session);
-  const isCurrent = () => attaching && ownsSession()
+  const isCurrent = () => !quitting && attaching && ownsSession()
     && (guestGeneration === undefined || guestGeneration === runtime.guestGeneration);
   const presentation = createLaunchPresentation({
     pkg, isCurrent, mark, log: appLog, attach: attachAppWindow, getWindow: () => appWin,
@@ -1203,6 +1148,7 @@ async function launchOne(pkg) {
     isDetached: () => displaySettings().windowEmbed === false,
     firstFrame: (target, options) => runtime.client()?.waitForAppFirstFrame?.(target, options) ?? true,
     finishSplash: () => startupSplash?.finish(),
+    canShowWait: () => !runtime._adbConsentPending,
   });
 
   appLog(`launch start ${pkg}`);
@@ -1235,20 +1181,25 @@ async function launchOne(pkg) {
     if (!isCurrent()) throw new Error('应用会话已失效');
     mark('app started');
 
-    const embedded = await presentation.finishAttachment();
+    const attached = await presentation.finishAttachment();
     if (!isCurrent()) throw new Error('应用窗口已关闭');
-    const attachMode = displaySettings().windowEmbed === false ? 'detached' : 'embed';
-    if (!embedded) appLog(`attach failed (${attachMode}): ${appWin.lastEmbedError || 'unknown'}`);
-    mark(`${attachMode}=${embedded}`);
+    if (!attached) {
+      appLog(`attach failed: ${appWin.lastEmbedError || 'unknown'}`);
+      const error = new Error('安卓应用已启动，但未能显示画面。请再打开一次应用窗口。');
+      error.code = 'APP_WINDOW_UNAVAILABLE';
+      throw error;
+    }
+    const attachMode = appWin.detachedMode ? 'detached' : 'embed';
+    mark(`${attachMode}=true`);
     deviceSize.value = null;
     appWin.refreshPointer();
     if (!await appSessions.activate(session) || !isCurrent()) throw new Error('应用会话已失效');
     const game = store.getSettings().engine?.priorityMode === 'game';
     desktopAgent?.current.setPerformanceMode(game).catch(() => {});
     send('app:launched', { package: pkg, engine: result.engine });
-    appLog(`launch ok ${pkg} ${attachMode}=${embedded}`);
+    appLog(`launch ok ${pkg} ${attachMode}=true`);
     warnAboutSoftwareEmulation();
-    return { ok: true, embedded };
+    return { ok: true, embedded: attachMode === 'embed' };
   } catch (error) {
     attaching = false;
     await presentation.abort();
@@ -1257,10 +1208,12 @@ async function launchOne(pkg) {
       appSessions.discard(session);
       await appWin.close({ keepApp: true }).catch(() => {});
     }
-    desktopAgent?.arm().catch(() => {});
-    showWindow();
-    send('toast', { type: 'error', message: `启动失败：${error.message}` });
-    return { ok: false, error: error.message };
+    if (!quitting) {
+      desktopAgent?.arm().catch(() => {});
+      showWindow();
+      send('toast', { type: 'error', message: `启动失败：${error.message}` });
+    }
+    return { ok: false, error: error.message, ...(error.code ? { code: error.code } : {}) };
   }
 }
 
@@ -1289,12 +1242,15 @@ async function stopApp(pkg, { keepWindow = false } = {}) {
   try {
     await appSessions.stop(target);
     appLog(`stop ${target}`);
-    if (!keepWindow && opening?.pkg === target && appWin?.isOpen && appWin.win === shell) {
-      // 独立窗口先隐藏原生画面，再关闭同一代宿主窗口。
-      if (displaySettings().windowEmbed === false) await appWin.agent.hide().catch(() => {});
-      if (appWin.win === shell) await appWin.close({ keepApp: true });
-    }
     send('apps:changed');
+    if (!keepWindow && opening?.pkg === target && appWin?.isOpen
+      && appWin.win === shell && appWin.session === opening) {
+      try { await appWin.close({ keepApp: true }); }
+      catch (error) {
+        appLog(`stop window cleanup failed ${target}: ${error.message}`);
+        return { ok: false, stopped: true, error: `应用已停止，但未能确认安卓窗口已停放：${error.message}` };
+      }
+    }
     return { ok: true, pkg: target };
   } catch (error) {
     appLog(`stop failed: ${error.message}`);
@@ -1327,7 +1283,7 @@ function startNotifier() {
 function registerIpc(keymapEngine) {
   require('./ipc').registerIpc(ipcMain, {
     app, APP_ROOT, APPICON_FILE, appLog, applyAutoStart, appOperations, assoc,
-    autodebugConfig, autoDeploy, copyDirContents, dialog, displaySettings,
+    autodebugConfig, autoDeploy, dialog, displaySettings,
     enableWhpxFeatures, findUninstaller, fs, ICON_PNG, IS_DEV, KEYMAP_PRESETS,
     launcherInfo, leftovers, MSIX_ACCEL_HINT, NO_SHELL_PROBE, notify, openManual,
     parseApk, parseArgs, path, portraitSize, refreshPointerMapping, rotateCurrentApp,
@@ -1534,7 +1490,7 @@ if (!gotLock) {
     // 记一行：排查「应用窗口明明开着，ApkStart 却自己没了」时，这行能直接
     // 区分「所有窗口被收干净」和「进程被外部杀掉」。
     appLog(`window-all-closed quitting=${quitting}`);
-    if (quitting) app.exit(0);
+    if (shutdown.ready) app.exit(0);
   });
 
   // 渲染进程 / GPU 进程崩溃时，Electron 默认只是让窗口变白，不一定会退出主进程；
@@ -1545,7 +1501,6 @@ if (!gotLock) {
     } catch (_) { /* 日志写不进去不影响 */ }
   });
 
-  let quitReady = false;
   /**
    * 只在「运行时还归我管」时才停掉它。
    *
@@ -1567,31 +1522,21 @@ if (!gotLock) {
       appLog('另一个实例已接管运行时，跳过停止（否则会误杀它的模拟器）');
     }
   };
-  app.on('before-quit', (e) => {
-    quitting = true;
-    appLog(`before-quit ready=${quitReady}`);
-    // 退出前必须先让窗口代理把模拟器窗口「摘下 + 藏好」。这一步是异步的
-    // （要等代理回包），所以第一次 before-quit 先拦下来，收尾完成再真正退出。
-    // 少了这一步，宿主窗口一销毁，Windows 会把模拟器子窗口重挂到桌面并显示出来——
-    // 表现就是「关掉 ApkStart 之后，桌面上还留着一个 Android Emulator 黑窗」。
-    if (!quitReady) {
-      e.preventDefault();
-      quitReady = true;
+  const shutdown = createDesktopShutdown({
+    stopBackground() {
       sharer?.stop();
       notifier?.stop();
-      try { appWin?.close({ keepApp: true }); } catch (_) { /* ignore */ }
-      const finish = () => {
-        try { desktopAgent?.dispose(); } catch (_) { /* ignore */ }
-        releaseRuntime();
-        // 隐藏的图标解码窗口也算一个窗口，不关掉会让 window-all-closed 永远不触发
-        try { if (decodeWindow && !decodeWindow.isDestroyed()) decodeWindow.destroy(); } catch (_) { /* ignore */ }
-        app.quit();
-      };
-      setTimeout(finish, 400);
-      return;
-    }
-    try { desktopAgent?.dispose(); } catch (_) { /* ignore */ }
-    releaseRuntime();
-    try { if (decodeWindow && !decodeWindow.isDestroyed()) decodeWindow.destroy(); } catch (_) { /* ignore */ }
+    },
+    parkWindow: () => appWin?.close({ keepApp: true }),
+    disposeAgent: () => desktopAgent?.dispose(),
+    releaseRuntime,
+    closeDecoder: () => { if (decodeWindow && !decodeWindow.isDestroyed()) decodeWindow.destroy(); },
+    quit: () => app.quit(),
+    log: appLog,
+  });
+  app.on('before-quit', (event) => {
+    quitting = true;
+    appLog(`before-quit ready=${shutdown.ready}`);
+    return shutdown.beforeQuit(event);
   });
 }

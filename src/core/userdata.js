@@ -214,9 +214,12 @@ function clearEncryptFlag(file) {
   try {
     const b = Buffer.alloc(4);
     const at = 1024 + 0x60;
-    fs.readSync(fd, b, 0, 4, at);
-    b.writeUInt32LE(b.readUInt32LE(0) & ~INCOMPAT_ENCRYPT, 0);
-    fs.writeSync(fd, b, 0, 4, at);
+    if (fs.readSync(fd, b, 0, 4, at) !== 4) throw new Error('无法读取 ext4 特性位');
+    const previous = b.readUInt32LE(0);
+    if (!(previous & INCOMPAT_ENCRYPT)) return false;
+    b.writeUInt32LE((previous & ~INCOMPAT_ENCRYPT) >>> 0, 0);
+    if (fs.writeSync(fd, b, 0, 4, at) !== 4) throw new Error('无法暂时修改 ext4 特性位');
+    return true;
   } finally {
     fs.closeSync(fd);
   }

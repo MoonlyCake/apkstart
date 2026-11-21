@@ -22,6 +22,7 @@ const userdata = require('./userdata');
 const { hasStockDataTemplate, stageBootPublicKey } = require('./emulator-boot-data');
 const audio = require('./audio-policy');
 const { adbEnvironment, resolveAdbPort } = require('./adb');
+const { checkGuestNetwork, repairStockWifi } = require('./emulator-network');
 const { AVD_NAME, readAvdOwner } = require('./runtime-ownership');
 const SNAPSHOT_NAME = 'apkstart';
 const ADB_CONSENT_WAIT_MS = 90000;
@@ -521,15 +522,23 @@ class EmulatorEngine {
       if (size >= wantBytes && fsOk) return { ok: true, created: false, size, fsBytes };
       // 容量配置变大了（或文件系统没长到位）：就地扩容，不重建、保留已装应用
       try {
-        userdata.clearEncryptFlag(img);
-        if (size < wantBytes) this._qemuImg('resize', img, wantBytes);
-        this._resize2fs(img);
-        userdata.setEncryptFlag(img);
+        const wasEncrypted = userdata.clearEncryptFlag(img);
+        try {
+          if (size < wantBytes) this._qemuImg('resize', img, wantBytes);
+          this._resize2fs(img);
+        } finally {
+          // Old resize2fs needs the bit cleared, but a failing tool must not leave it cleared.
+          if (wasEncrypted) userdata.setEncryptFlag(img);
+        }
         const grown = userdata.fsBytes(img);
-        this.log(`userdata 扩容：文件 ${size} → ${wantBytes}，文件系统 ${fsBytes} → ${grown}`);
-        return { ok: true, created: false, grown: true, size: wantBytes, fsBytes: grown };
+        const actualSize = fs.statSync(img).size;
+        if (actualSize < wantBytes || grown < wantBytes * 0.95) {
+          return { ok: false, created: false, size: actualSize, fsBytes: grown, error: '未能验证安卓文件系统已扩容到指定容量。' };
+        }
+        this.log(`userdata 扩容：文件 ${size} → ${actualSize}，文件系统 ${fsBytes} → ${grown}`);
+        return { ok: true, created: false, grown: true, size: actualSize, fsBytes: grown };
       } catch (e) {
-        this.log(`扩容 userdata 失败（继续用现有分区）：${e.message}`);
+        this.log(`扩容 userdata 失败：${e.message}`);
         // 老分区仍然可用，但必须如实告诉调用方「这次没扩成」，不能让设置页显示成功
         return { ok: false, created: false, size, fsBytes, error: e.message };
       }
@@ -845,8 +854,8 @@ class EmulatorEngine {
     const wantBytes = Math.max(1024, Math.round(Number(dataMB || 0))) * 1048576;
     if (r && r.ok && fsAfter < wantBytes * 0.95) {
       return {
-        ok: false,
         ...r,
+        ok: false,
         fsGB: Number((fsAfter / 1073741824).toFixed(1)),
         error: `镜像已扩到 ${wantGB} GB，但文件系统只到 ${(fsAfter / 1073741824).toFixed(1)} GB（resize2fs 没成功）。`
           + '可以再点一次「立即扩容」，或清理磁盘后重试。',
@@ -935,143 +944,11 @@ class EmulatorEngine {
    */
   forceColdBootOnNextStart() { this._coldBoot = true; }
 
-  /**
-   * 体检虚拟机内是否真的能联网。
-   *
-   * 为什么需要这一步：安卓虚拟机的 Wi-Fi 配置存在 /data 里，一旦写坏（典型表现是
-   * `cmd wifi list-networks` 里同一个 AndroidWifi 出现两条、网络 id 撞车），
-   * wlan0 就会一直 NO-CARRIER、拿不到 IP。这时「需要联网的页面」在应用里就是一块
-   * 黑屏 —— 用户看到的「红果点同意后黑屏」就是这么来的，跟 GPU/渲染完全无关。
-   *
-   * @param {import('./adb').AdbClient} client 已由 Runtime 核验的目标 ADB 客户端
-   * @returns {Promise<{ok:boolean, reason:string, gateway?:string, ip?:string}>}
-   */
-  async checkNetwork(client, { waitMs = 0, interval = 3000, canProbe = async () => true } = {}) {
-    const sh = (cmd, timeout = 8000) => client.shell(cmd, { timeout });
-    if (!await canProbe()) return { ok: false, reason: 'guest-changed' };
-    // 安卓的多路由表会让 `ip route` 的主表看起来是空的（默认路由在 per-interface 表里），
-    // 而且 shell 的 uid 不在应用的 network 组里，`ping` 经常误报 "Network is unreachable"，
-    // 哪怕 Wi-Fi 其实已经连上、应用也能正常上网。所以这里只认「有没有拿到 IPv4 地址」，
-    // 再叠加 `cmd wifi status` 的连接状态做交叉确认，不用 ping 判断。
-    const addr = await sh('ip -o addr').catch(() => null);
-    if (addr === null) return { ok: false, reason: 'device-offline' };
-    const ips = [];
-    const re = /inet ((?:\d{1,3}\.){3}\d{1,3})\//g;
-    let m = re.exec(addr);
-    while (m) {
-      const ip = m[1];
-      if (!/^127\./.test(ip)) ips.push(ip);
-      m = re.exec(addr);
-    }
-    const wifi = await sh('cmd wifi status').catch(() => '');
-    const connected = /Wifi is connected/i.test(wifi);
-    if (!ips.length) {
-      // Wi-Fi 关联 + DHCP 往往比 sys.boot_completed 晚几十秒才完成。
-      // 调用方给了 waitMs 就继续等，不要在这一刻就断定「没有网络」。
-      if (waitMs > 0) {
-        const t0 = Date.now();
-        while (Date.now() - t0 < waitMs) {
-          // eslint-disable-next-line no-await-in-loop
-          await new Promise((r) => setTimeout(r, interval));
-          // eslint-disable-next-line no-await-in-loop
-          const again = await this.checkNetwork(client, { canProbe });
-          if (again.ok || again.reason === 'guest-changed' || again.reason === 'device-offline') return again;
-        }
-      }
-      return { ok: false, reason: connected ? 'no-ip-address' : 'wifi-not-connected', addrs: ips };
-    }
-    const ip = ips[0];
-    const gw = /^10\.0\.2\./.test(ip) ? '10.0.2.2' : ip.replace(/\.\d+$/, '.1');
-    // 有 IP 不等于能上网。实测拿到 10.0.2.16 但 DNS/路由被掐时，应用首页还是
-    // 「网络错误」，而上层却以为网络正常。这里补一次真实 HTTP 探测。
-    // 用 nc 直连 80 端口而不是 ping：QEMU 用户态 NAT 会拦 ICMP，ping 必然误报。
-    // 只在「等待网络就绪」那条路径（waitMs>0）上做，快速轮询跳过——否则每 3 秒
-    // 就要花 4 秒探测，反而把启动拖慢。结论放进 reachable，不改 ok：有 IP 就先
-    // 让应用起来，一次 DNS 抖动不该卡住整个启动。
-    let reachable = null;
-    if (waitMs > 0 && await canProbe()) {
-      const probe = await sh(
-        "echo -e 'GET /generate_204 HTTP/1.0\\r\\nHost: connect.rom.miui.com\\r\\n\\r\\n' "
-        + "| nc -w 4 connect.rom.miui.com 80 2>/dev/null | head -1",
-        7000,
-      ).catch(() => '');
-      reachable = /HTTP\/1\.[01]\s+204/.test(probe);
-    }
-    return { ok: true, reason: '', gateway: gw, ip, wifiConnected: connected, reachable };
-  }
+  /** 只报告经默认路由和联网验证确认的安卓网络。 */
+  checkNetwork(client, options) { return checkGuestNetwork(client, options); }
 
-  /**
-   * 把「已保存但不会自动连」的 AndroidWifi 主动连上。
-   *
-   * 这是实机踩出来的：模拟器自带的虚拟热点 AndroidWifi 在配置库里可能落成
-   * 两条记录（open + owe），系统据此判定为
-   *   「Saved / Won't automatically connect」
-   * 于是开机后 wlan0 永远 NO-CARRIER，应用里一直报网络错误。
-   *
-   * 麻烦的是 shell（uid 2000）没有 NETWORK_SETTINGS 权限，
-   * `cmd wifi connect-network` 会直接抛 SecurityException，所以不能走命令行。
-   * 这里改为拉起 Wi-Fi 设置页、点一下那条已保存的网络——和用户手动点的效果一样。
-   *
-   * @returns {Promise<boolean>} 是否已连上
-   */
-  async repairWifi(client, { canMutate = async () => true, pause = sleep } = {}) {
-    const sh = (cmd, maxBuffer) => client.shell(cmd, { timeout: 10000, maxBuffer });
-    const wifi = () => sh('cmd wifi status').catch(() => '');
-    const write = async (cmd, bestEffort = false) => {
-      // Waiting for Settings/UI can outlive the owned guest; recheck before each write.
-      if (!await canMutate()) throw new Error('安卓运行时已更换，取消网络修复');
-      return bestEffort ? sh(cmd).catch(() => '') : sh(cmd);
-    };
-    // 连上之后顺手把「联网验证」的探测地址换成国内可达的。
-    // 安卓默认拿 connectifitycheck.gstatic.com 判断「是否真能上网」，国内连不上它，
-    // 系统就一直给网络打「!」标记（已连接但无法访问互联网）。部分应用会因此
-    // 自我判定为离线、拒绝加载内容。换成一个返回 204 的国内端点即可。
-    const tune = async () => {
-      await write('settings put global captive_portal_http_url http://connect.rom.miui.com/generate_204', true);
-      await write('settings put global captive_portal_https_url https://connect.rom.miui.com/generate_204', true);
-      await write('settings put global captive_portal_mode 0', true);
-    };
-    // 已经连上就别折腾了
-    if (/Wifi is connected/i.test(await wifi())) {
-      await tune();
-      return true;
-    }
-    // 开关被关掉时（用户手滑 / 之前 -svc wifi disable）先打开
-    await write('svc wifi enable', true);
-    await pause(1500);
-
-    // 打开 Wi-Fi 设置页，用 uiautomator 找到 AndroidWifi 那一行再点它。
-    // 比按坐标点稳：不同分辨率 / 语言下坐标都不一样。
-    await write('am start -a android.settings.WIFI_SETTINGS');
-    await pause(2500);
-    await write('uiautomator dump /sdcard/ui.xml');
-    const xml = await sh('cat /sdcard/ui.xml', 8 * 1024 * 1024);
-    // 节点形如 <node text="AndroidWifi" ... bounds="[x1,y1][x2,y2]" />
-    const re = /<node[^>]*\btext="([^"]*)"[^>]*\bbounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/g;
-    let m = re.exec(xml);
-    while (m) {
-      const label = m[1];
-      if (/AndroidWifi/i.test(label)) {
-        const cx = Math.round((Number(m[2]) + Number(m[4])) / 2);
-        const cy = Math.round((Number(m[3]) + Number(m[5])) / 2);
-        await write(`input tap ${cx} ${cy}`);
-        await pause(6000);
-        if (/Wifi is connected/i.test(await wifi())) {
-          await tune();
-          return true;
-        }
-      }
-      m = re.exec(xml);
-    }
-    // 兜底：直接重连一次看看（有些版本 dump 里没有 text，只有 content-desc）
-    await sh('svc wifi disable');
-    await new Promise((r) => setTimeout(r, 1500));
-    await sh('svc wifi enable');
-    await new Promise((r) => setTimeout(r, 6000));
-    const ok = /Wifi is connected/i.test(await sh('cmd wifi status'));
-    if (ok) await tune();
-    return ok;
-  }
+  /** 在同一台经过核验的虚拟机里重连自带热点，不改系统联网验证策略。 */
+  repairWifi(client, options) { return repairStockWifi(client, options); }
 
   /** 等用户在同一台模拟器里确认，而不是通过重启或改密钥回避 Android 的授权。 */
   async _waitForAdbConsent({ endpoint, probe, present, onLog, waitMs }) {
@@ -1382,10 +1259,9 @@ class EmulatorEngine {
         try {
           network = await networkProbe?.(this.serial, { waitMs: 12000, interval: 3000 }) ?? null;
         } catch (_) { /* 体检失败不算启动失败 */ }
-        if (['wifi-not-connected', 'no-ip-address'].includes(network?.reason)) {
-          onLog('⚠ 安卓虚拟机暂时没连上网（Wi-Fi 未关联或没拿到地址）。'
-            + '需要联网的应用打开后可能一直黑屏：稍后重开应用即可；'
-            + '若持续无网，可在「设置 → 修复网络」重连（不会删除已装应用）。');
+        if (network && !network.ok && !['guest-changed', 'device-offline'].includes(network.reason)) {
+          onLog('⚠ 安卓已开机，但外网连接尚未确认。应用仍可打开；'
+            + '若持续无网，可在设置中尝试「修复网络」（不会删除已装应用）。');
         }
         return {
           ok: true, serial: this.serial, port, accel: accelInfo, logFile,

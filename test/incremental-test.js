@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { Updater } = require('../src/core/updater');
+const { writeUpdatePayload } = require('./helpers/update-fixture');
 const inc = require('../src/core/incremental');
 const { ZipFile } = require('../src/core/zip');
 
@@ -116,64 +117,60 @@ console.log('\n[增量 · 哈希校验]');
   });
 
   console.log('\n[增量 · apply 脚本与续做]');
-  test('app 模式脚本只替换 resources/app、失败回滚并双路径重启', () => {
+  await atest('app 模式脚本只替换已校验的 resources/app，先暂存再切换', async () => {
     const dataDir = path.join(TMP, 'apply');
     const exe = path.join(dataDir, 'ApkStart.exe');
     fs.mkdirSync(dataDir, { recursive: true });
     fs.writeFileSync(exe, 'old');
     const u = new Updater({ currentVersion: '0.6.2', exePath: exe, isPackaged: true, dataDir });
     const payload = path.join(u.updateDir, '0.6.3', 'app-payload');
-    fs.mkdirSync(path.join(payload, 'resources', 'app'), { recursive: true });
-    fs.writeFileSync(path.join(payload, 'resources', 'app', 'package.json'), '{"version":"0.6.3"}');
+    writeUpdatePayload(payload, '0.6.3', 'app');
+    await u._markPayloadReady(payload, '0.6.3', 'app');
     const script = u.apply({ mode: 'app', payload, version: '0.6.3' }, { spawn: false });
-    assert(/Join-Path \$appDst 'package\.json'/.test(script) || /'package\.json'/.test(script), '没校验 package.json');
-    assert(/Move-Item -LiteralPath \$appDst -Destination \$backup/.test(script), '没备份 app 目录');
-    assert(/app copy FAILED - rollback and keep payload/.test(script), '失败没回滚/保留载荷');
-    assert(/Start-Process -FilePath/.test(script) && /cmd\.exe/.test(script), '重启没兜底');
-    assert(!/Join-Path \$src '\*'\) -Destination \$dst -Recurse/.test(script), '不应整目录覆盖外壳');
+    assert(script.includes('Assert-File $to $file.sha256 $file.size'), '没有校验暂存文件');
+    assert(script.includes('Move-Item -LiteralPath $change.Current -Destination $change.Saved'), '没有备份旧目录');
+    assert(script.includes('Move-Item -LiteralPath (LocalPath $change.Saved) -Destination (LocalPath $change.Current)'), '没有回滚路径');
+    assert(script.includes('Start-Process -FilePath $exe'), '没有重启');
   });
 
-  test('增量应用失败标记强制完整包，脚本写标记且不再续做坏载荷', () => {
+  await atest('增量应用失败标记强制完整包，脚本写标记且不再续做坏载荷', async () => {
     const dataDir = path.join(TMP, 'forcefull');
     const exe = path.join(dataDir, 'ApkStart.exe');
     fs.mkdirSync(path.dirname(exe), { recursive: true });
     fs.writeFileSync(exe, 'x');
     const u = new Updater({ currentVersion: '0.6.2', exePath: exe, isPackaged: true, dataDir });
     const payload = path.join(u.updateDir, '0.6.3', 'app-payload');
-    fs.mkdirSync(path.join(payload, 'resources', 'app'), { recursive: true });
-    fs.writeFileSync(path.join(payload, 'resources', 'app', 'package.json'), '{}');
-    u._markPayloadReady(payload, '0.6.3', 'app');
+    writeUpdatePayload(payload, '0.6.3', 'app');
+    await u._markPayloadReady(payload, '0.6.3', 'app');
     assert(u.findResumableJob().mode === 'app', '标记前可续做');
     fs.writeFileSync(path.join(u.updateDir, '0.6.3', '.apkstart-force-full'), '');
     assert(u.findResumableJob() === null, '标记后不能再续做增量');
     const script = u.apply({ mode: 'app', payload, version: '0.6.3' }, { spawn: false });
-    assert(/\.apkstart-force-full/.test(script), 'apply 失败分支要写强制完整包标记');
+    assert(script.includes('-Path $spec.forceFull'), 'apply 失败分支要写强制完整包标记');
   });
 
-  test('增量载荷可被 findResumableJob 找回，完整载荷仍兼容', () => {
+  await atest('增量载荷可被 findResumableJob 找回，完整载荷仍兼容', async () => {
     const dataDir = path.join(TMP, 'resume');
     const exe = path.join(dataDir, 'ApkStart.exe');
     fs.mkdirSync(path.dirname(exe), { recursive: true });
     fs.writeFileSync(exe, 'x');
     const u = new Updater({ currentVersion: '0.6.2', exePath: exe, isPackaged: true, dataDir });
     const appPayload = path.join(u.updateDir, '0.6.3', 'app-payload');
-    fs.mkdirSync(path.join(appPayload, 'resources', 'app'), { recursive: true });
-    fs.writeFileSync(path.join(appPayload, 'resources', 'app', 'package.json'), '{}');
-    u._markPayloadReady(appPayload, '0.6.3', 'app');
+    writeUpdatePayload(appPayload, '0.6.3', 'app');
+    await u._markPayloadReady(appPayload, '0.6.3', 'app');
     const job = u.findResumableJob();
     assert(job && job.mode === 'app' && job.version === '0.6.3', `应找回 app 续做，实际 ${JSON.stringify(job)}`);
 
     const zipPayload = path.join(u.updateDir, '0.6.4', 'payload');
-    fs.mkdirSync(zipPayload, { recursive: true });
-    fs.writeFileSync(path.join(zipPayload, 'ApkStart.exe'), 'new');
-    u._markPayloadReady(zipPayload, '0.6.4', 'zip');
+    writeUpdatePayload(zipPayload, '0.6.4');
+    await u._markPayloadReady(zipPayload, '0.6.4', 'zip');
     // 0.6.4 排在 0.6.3 前面
     const job2 = u.findResumableJob();
     assert(job2 && job2.mode === 'zip' && job2.version === '0.6.4', '完整载荷续做回归');
   });
 
   console.log('\n[增量 · 构建产物]');
-  test('build/incremental.js 生成合法清单与代码包', async () => {
+  await atest('build/incremental.js 生成合法清单与代码包', async () => {
     const fixture = path.join(TMP, 'portable');
     fs.mkdirSync(path.join(fixture, 'resources', 'app', 'src'), { recursive: true });
     fs.writeFileSync(path.join(fixture, 'ApkStart.exe'), 'shell-bytes-not-in-app-pack');

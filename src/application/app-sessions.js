@@ -87,13 +87,14 @@ class AppSessions {
   close(ticket) {
     const phase = this.#drop(ticket);
     if (!phase || phase === 'dormant') return Promise.resolve(this.#state());
-    return this.#stopPackage(ticket.pkg, true);
+    return this.#stopPackage(ticket.pkg, { canPark: true });
   }
 
   stop(pkg) {
     if (!validPackageName(pkg)) return Promise.reject(new Error('无效的安卓应用包名'));
     const entry = this.#entries.get(pkg);
-    return entry ? this.close(entry.ticket) : this.#stopPackage(pkg, false);
+    // Closing an already-dismissed window is best effort; an explicit stop must wait for Android.
+    return this.#stopPackage(pkg, { canPark: !!entry, ticket: entry?.ticket, strict: true });
   }
 
   discard(ticket) { return !!this.#drop(ticket); }
@@ -108,14 +109,29 @@ class AppSessions {
     this.#publishActivity();
   }
 
-  #stopPackage(pkg, canPark) {
+  #stopPackage(pkg, { canPark = false, ticket, strict = false } = {}) {
     const guest = this.#guest;
+    const current = () => guest === this.#guest && this.#entries.get(pkg)?.ticket === ticket;
+    const stale = () => {
+      if (strict) throw new Error('应用会话或安卓运行时已切换，停止请求未完成');
+      return this.#state();
+    };
     return this.#queue(async () => {
       // A delayed event from a prior window must not stop a reopened copy.
-      if (guest !== this.#guest || this.#entries.has(pkg)) return this.#state();
+      if (!current()) return stale();
       const { getClient, getSettings, setPriority, scheduleSnapshot, log } = this.effects;
-      const client = getClient();
-      await client.forceStop(pkg).catch(() => {});
+      let client;
+      try {
+        client = getClient();
+        if (!client) throw new Error('安卓运行时尚未连接');
+        if (await client.forceStop(pkg) === false) throw new Error('Android 未确认停止应用');
+      } catch (error) {
+        if (strict) throw error;
+        log(`窗口已关闭，但未能停止 ${pkg}：${error.message}`);
+        return this.#state();
+      }
+      if (!current()) return stale();
+      if (ticket) this.#drop(ticket);
       if (canPark && guest === this.#guest && this.isIdle) {
         const engine = getSettings().engine || {};
         const commands = container.buildIdleCommands({ deep: !!engine.deepTrim });

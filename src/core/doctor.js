@@ -271,14 +271,14 @@ function chooseProfile({
 /**
  * 把「高级参数」里的用户设置转成 overrides。
  * 0 / auto / 未设置一律视为「不覆盖」，仍然走自动推导；
- * 只有用户主动关掉自动内存并填了具体数值才生效。
+ * 自动内存只控制内存；CPU 的 0/自动和手动核数独立。
  */
 function overridesFromSettings(engine = {}) {
   const e = engine || {};
   const manual = e.autoMemory === false;
   return {
     memoryMB: manual ? Number(e.memoryMB) || 0 : 0,
-    cores: manual ? Number(e.cores) || 0 : 0,
+    cores: Number(e.cores) || 0,
     gpuMode: e.gpuMode && e.gpuMode !== 'auto' ? e.gpuMode : '',
   };
 }

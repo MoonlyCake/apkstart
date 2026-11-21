@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/readme/hero.svg" alt="Apk Start --Q 1.0.4：让 Android 应用在 Windows 桌面上有个位置" width="100%">
+  <img src="docs/images/readme/hero.svg" alt="Apk Start --Q 1.0.5：让 Android 应用在 Windows 桌面上有个位置" width="100%">
 </p>
 
 <h3 align="center">把 APK 变成桌面上可以双击的窗口。</h3>
@@ -59,6 +59,7 @@ npm start
 
 - **运行时串行调度，会话独立管理。** [`RuntimeLifecycle`](src/application/runtime-lifecycle.js) 把启动、停机、换向和维护排进同一条队列，只合并未被停机、换向或维护隔开的同类启动；物理换向须确认停机后才写面板配置。[`AppSessions`](src/application/app-sessions.js) 用窗口令牌隔离旧窗口的迟到回调，避免误关新窗口。
 - **ADB 统一路由，按实例核验归属。** [`AdbClient`](src/core/adb.js) 收口 ADB 程序、服务端口与命令传输，区分服务端操作和指定设备的命令；[归属校验](src/core/runtime-ownership.js) 交叉核对 AVD 锁、监听端口所属 PID 与控制台报告的 AVD 名称，不靠端口猜。
+- **有 IP 不算联网。** 检查安卓默认网络、路由和连通性；只对已确认属于当前实例的 `AndroidWifi` 尝试恢复。没有网络时仍可打开能离线使用的应用，但不会报网络就绪。
 - **拆分包流式暂存。** [`parseBundle`](src/core/installer.js) 按 ZIP 条目声明的体积预检磁盘，把 `.apks` / `.xapk` 的分片流式写进独立临时目录，再按实际写入量复查容量；ABI 兼容性重试复用这批分片，结束即清理。
 - **IPC 单点注册。** [`dispatch.js`](src/ipc/dispatch.js) 在注册前检查重复通道，处理器按业务拆成 12 个模块，保留原有 preload 通道名与返回结构；[失败日志](src/ipc/failure.js) 只记通道、分类与项目内位置，不写请求参数。
 - **残留扫描离开主进程的同步路径。** [`leftovers.js`](src/core/leftovers.js) 异步查注册表、分批并行取文件信息，只读预览与确认后的删除分开，避免磁盘盘点期间主进程干等。
@@ -69,7 +70,7 @@ npm start
 
 | 会做 | 需要知道的 |
 | --- | --- |
-| **独立窗口与快捷方式** | 原生窗口与嵌入窗口都支持，默认原生。可在工具栏、托盘或设置里改；物理面板换向可能要重启运行时。 |
+| **独立窗口与快捷方式** | 默认原生窗口。「Windows 窗口大小」可单独放大，不改安卓画质、不重启；内部渲染分辨率和物理面板方向则可能在下一次开机时生效。 |
 | **普通与拆分安装包** | `.apks` / `.xapk` 里的分片一并安装。能否运行取决于应用要求的 Android 版本、原生库架构与所用镜像。 |
 | **Windows 麦克风与声音输出** | 录音与播放分开控制，开启方法见[双向音频](#双向音频)。 |
 | **共享目录与诊断** | 两系统经目录同步交换文件；设置页提供诊断报告、运行时日志与残留缓存扫描。 |

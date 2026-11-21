@@ -3,7 +3,7 @@
  * 运行时自举（Provisioning）
  *
  * ApkStart 不依赖任何第三方模拟器：adb、QEMU、系统镜像全部由自己下载/校验/管理。
- * 所有运行时文件都放在 %APPDATA%\apkstart\runtime 下，保证在任何安装位置都可写。
+ * 默认用 %APPDATA%\apkstart\runtime；允许引擎、系统镜像和安卓数据分别存放。
  */
 const fs = require('fs');
 const path = require('path');
@@ -126,6 +126,32 @@ async function runVerifiedAehdInstaller(bat) {
 
 function fileSize(p) {
   try { return fs.statSync(p).size; } catch (_) { return 0; }
+}
+
+function sameOrInside(parent, child) {
+  const rel = path.relative(path.resolve(parent), path.resolve(child));
+  return !rel || (!path.isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${path.sep}`));
+}
+
+function avdHasUserData(home, assumeOnError = false) {
+  const dir = path.join(home, 'apkstart.avd');
+  const entries = ['userdata-qemu.img', 'userdata-qemu.img.qcow2', 'sdcard.img'];
+  return entries.some((name) => {
+    try { return fs.statSync(path.join(dir, name), { throwIfNoEntry: false })?.size > 0; }
+    catch (_) { return assumeOnError; }
+  });
+}
+
+function resolveAvdHome(root, dataDir, requested) {
+  const insideData = sameOrInside(dataDir, root);
+  const legacyHome = insideData ? path.join(root, 'avd') : path.join(dataDir, 'avd');
+  if (!requested) return { avdHome: legacyHome, avdDirConflict: null };
+  // Older versions ignored this setting under the default layout. Don't make an existing guest look empty on upgrade.
+  if (insideData && path.relative(legacyHome, requested) && avdHasUserData(legacyHome, true)) {
+    const targetReady = fs.existsSync(path.join(requested, 'apkstart.avd', 'config.ini')) && avdHasUserData(requested);
+    if (!targetReady) return { avdHome: legacyHome, avdDirConflict: { current: legacyHome, requested } };
+  }
+  return { avdHome: requested, avdDirConflict: null };
 }
 
 /**
@@ -266,8 +292,7 @@ class Provisioner {
     // 另外：允许在设置里单独指定「安卓数据目录」——它才是真正吃盘的地方
     // （6~24GB 数据分区 + 2~3GB 快照），只挪运行时、不挪它，C 盘一样会满。
     const explicitAvd = String(store.getSettings().runtime.avdDir || '').trim();
-    const writable = explicitAvd || path.join(store.DATA_DIR, 'avd');
-    const insideData = root.toLowerCase().startsWith(store.DATA_DIR.toLowerCase());
+    const avd = resolveAvdHome(root, store.DATA_DIR, explicitAvd);
     // 系统镜像放哪儿：**运行时目录优先**。
     // 之前的顺序是「用户数据目录优先」，后果是——用户把运行时目录改到 D 盘省 C 盘空间，
     // 1.4GB 的整包解到 D 盘以后，materializeImages 又把 3.3GB 的 system.img 展开回
@@ -314,7 +339,7 @@ class Provisioner {
       emulatorExe: path.join(root, 'emulator', 'emulator.exe'),
       sysImgRoot: sysRoot,
       sysImgDir: path.join(sysRoot, `android-${sysApi}`, sysTag, sysAbi),
-      avdHome: insideData ? path.join(root, 'avd') : writable,
+      ...avd,
       aehdDir: path.join(rootWritable ? root : path.join(store.DATA_DIR, 'runtime'), 'aehd'),
       imagesDir: path.join(rootWritable ? root : path.join(store.DATA_DIR, 'runtime'), 'images'),
       iso: path.join(root, 'images', 'android-x86.iso'),
@@ -352,7 +377,9 @@ class Provisioner {
     const buf = 1024; // 额外预留 1GB（快照 / 数据分区 / 解压中间文件）
     const dir = targetDir || this.root;
     const free = doctor.freeDiskMB(dir);
-    if (free && free < need + buf) {
+    // freeDiskMB reports zero both for a full volume and an unreadable path. Neither can be treated as enough space.
+    if (!(free > 0)) throw new Error(`无法确认「${dir}」所在磁盘有可用空间，未开始下载或解压。`);
+    if (free < need + buf) {
       throw new Error(
         `目标磁盘空间不足：该组件约需 ${need + buf} MB，但「${dir}」所在盘仅剩 ${free} MB。\n`
         + '建议：把「运行时数据目录」改到空间更大的盘（设置 → 系统集成 → 运行时数据目录 → 浏览），'
@@ -622,6 +649,7 @@ class Provisioner {
    */
   async installRuntimePack(onProgress = () => {}) {
     const p = this.ensureDirs();
+    if (!p.rootWritable) throw new Error('运行时目录不可写，请选择可写的运行时目录或修复现有安装。');
     // 先给一条进度：找版本 + 测速这一段没有字节数，不给提示用户会以为「卡死了」。
     onProgress({ stage: 'download', message: '正在获取运行时版本信息…', percent: 1 });
     const pack = await this.resolveRuntimePack();
@@ -643,6 +671,7 @@ class Provisioner {
     // 一两百 KB/s，8 线程能跑满本地带宽。中途断掉会退回单流续传。
     await downloadMulti(urls, zip, {
       connections: conn,
+      expectSize: Number.isSafeInteger(total) && total > 0 ? total : undefined,
       onProgress: (pr) => {
         const pct = pr.percent != null ? pr.percent : (total ? Math.round((pr.got / total) * 100) : 0);
         const mb = `${(pr.got / 1048576).toFixed(1)} MB${total ? ` / ${(total / 1048576).toFixed(1)} MB` : ''}`;
@@ -666,19 +695,25 @@ class Provisioner {
         }
       },
     });
-    try {
-      fs.writeFileSync(path.join(p.root, '.runtime-pack.json'), JSON.stringify({
-        name: pack.name, tag: pack.tag, at: new Date().toISOString(), from: pack.url,
-      }));
-      fs.rmSync(zip, { force: true });
-    } catch (_) { /* 标记写不进去不影响使用 */ }
-
     // 整包里的 system.img 是 .xz 压缩的（和完整版安装包一致）。这里立刻展开，
     // 否则紧接着 checkEnv() 会认为「没装系统镜像」，又去 Google 下一套 1.4 GB。
     // 展开失败必须让部署失败并带上原因：旧版这里 catch 成 0，用户看到进度
     // 停在 99% 之后又跳回「改用官方源补齐」，白下一套 1.4GB。
     onProgress({ stage: 'extract', message: '展开系统镜像（约 1 分钟，只需一次）…', percent: 99 });
     await this.materializeImages((m) => onProgress({ stage: 'extract', message: m, percent: 99 }));
+    this._adbCache = null;
+    this.invalidateEnvCache();
+    const verified = await this.checkEnv();
+    if (!verified.adb.ok || !verified.emulator.ok || !verified.sysimg.ok || verified.needsExtract) {
+      throw new Error('运行时整包解压后未通过 ADB、引擎与系统镜像校验。');
+    }
+    // Keep the archive for retry until all components, not just extraction, have passed.
+    try {
+      fs.writeFileSync(path.join(p.root, '.runtime-pack.json'), JSON.stringify({
+        name: pack.name, tag: pack.tag, at: new Date().toISOString(), from: pack.url,
+      }));
+      fs.rmSync(zip, { force: true });
+    } catch (_) { /* 安装结果已独立验证，暂存清理失败不影响使用。 */ }
 
     onProgress({ stage: 'done', message: '运行时已就绪', percent: 100 });
     return { ok: true, name: pack.name, tag: pack.tag };
@@ -1203,8 +1238,11 @@ class Provisioner {
 
   /** 下载并安装 ARM 兼容镜像（Google Play 版，约 1.5GB） */
   async installPlayImage(onProgress = () => {}) {
+    const present = this.playImageInfo();
+    if (present.ok) return present;
     const p = this.ensureDirs();
-    await this.guardDisk('playimg', p.sysImgRoot);
+    // The archive and expanded image can live on different volumes (for example in a read-only bundle layout).
+    await Promise.all([this.guardDisk('playimg', p.tmp), this.guardDisk('playimg', p.sysImgRoot)]);
     const url = await this.resolvePlayUrl();
     const zip = path.join(p.tmp, 'play-sysimg.zip');
     onProgress({ stage: 'download', message: '下载 ARM 兼容镜像（Android 14，约 1.5GB）…', percent: 1 });
@@ -1231,16 +1269,11 @@ class Provisioner {
         percent: 82 + Math.round((i / Math.max(1, total)) * 15),
       }),
     });
-    fs.rmSync(zip, { force: true });
-
     const info = this.playImageInfo();
     if (!info.ok) throw new Error('兼容镜像解压后校验失败');
-    // 旧版（API 30）兼容镜像不再使用，成功装好后清理腾空间
-    for (const old of ['android-30']) {
-      const legacy = path.join(p.sysImgRoot, old, 'google_apis_playstore');
-      if (fs.existsSync(legacy)) fs.rmSync(legacy, { recursive: true, force: true });
-    }
-    onProgress({ stage: 'done', message: 'ARM 兼容镜像就绪，重新启动运行时即可生效', percent: 100 });
+    try { fs.rmSync(zip, { force: true }); } catch (_) { /* 已验证镜像，保留占用的暂存包。 */ }
+    // AVDs may live on a different volume and still depend on an earlier API. Installing never uninstalls them.
+    onProgress({ stage: 'done', message: 'ARM 兼容镜像已安装；现有安卓数据和它所用的系统镜像未改动', percent: 100 });
     return info;
   }
 

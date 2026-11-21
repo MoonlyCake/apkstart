@@ -8,6 +8,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { AndroidSettings, volumeCmd, parseVolume, volumePercent } = require('../src/core/android');
+const { rejects } = require('node:assert/strict');
 
 let passed = 0;
 let failed = 0;
@@ -36,7 +37,10 @@ function fakeSettings(replies) {
       return replies.length ? replies.shift() : '';
     },
   };
-  const runtime = { async ensure() { return { ok: true, client }; } };
+  const runtime = {
+    async ensure() { return { ok: true, client }; },
+    async _networkEndpoint() { return { client, revalidate: async () => true }; },
+  };
   return { set: new AndroidSettings(runtime), scripts };
 }
 
@@ -96,6 +100,28 @@ function fakeSettings(replies) {
     assert(scripts[0].includes('cmd media_session volume --stream 3 --get'), '状态应通过 media_session 读音量');
     assert(s.volume === 40, `应为 40%，实际 ${s.volume}`);
     assert(s.sdk === 34 && s.wifi === true, JSON.stringify(s));
+  });
+
+  await test('打开设置页不会为了读取状态启动安卓', async () => {
+    let started = false;
+    const set = new AndroidSettings({
+      async ensure() { started = true; return { ok: false }; },
+      async _networkEndpoint() { return null; },
+    });
+    await rejects(set.status(), /安卓运行时未就绪/);
+    assert(!started, '读取设置不能调用 ensure');
+  });
+
+  await test('安卓确认已授予的权限才计为成功', async () => {
+    const permissions = (granted) => [
+      '    runtime permissions:',
+      `      android.permission.RECORD_AUDIO: granted=${granted}`,
+      '      android.permission.CAMERA: granted=false',
+      '    next:',
+    ].join('\n');
+    const { set } = fakeSettings([permissions(false), '', '', permissions(true)]);
+    const r = await set.grantAll('com.example.karaoke');
+    assert(!r.ok && r.granted === 1 && r.error.includes('1 项权限未授予'), JSON.stringify(r));
   });
 
   // 真实 sh 里验证命令的回退：PATH 里只有一个假的 `media`（模拟没有 cmd 的旧镜像），

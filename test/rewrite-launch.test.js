@@ -62,6 +62,34 @@ test('waits for a delayed process without retry, notifying early without awaitin
   assert.deepEqual(info.marks, ['am start #1 ok', 'alive #1 true']);
 });
 
+test('prepares the display and samples the first PID concurrently without announcing too soon', async () => {
+  let prepared = false;
+  let lift;
+  let reads = 0;
+  const notices = [];
+  const displayReady = new Promise((resolve) => { lift = resolve; });
+  const run = runLaunchPolicy({
+    start: async () => {},
+    onStarted: () => displayReady.then(() => { prepared = true; }),
+    probe: async () => { reads += 1; return ['42']; },
+    onAppUp() { notices.push(prepared); },
+  }, timing());
+  await new Promise((resolve) => setImmediate(resolve));
+  const beforePreparation = { reads, prepared, notices: notices.length };
+  lift();
+  await run;
+  assert.deepEqual(beforePreparation, { reads: 1, prepared: false, notices: 0 });
+  assert.deepEqual(notices, [true]);
+});
+
+test('near the end of stable observation, polls at the target instead of rounding up an interval', async () => {
+  const { completion, info } = runScript([[['42']]], {
+    observeMs: 10000, stableMs: 4000, pollMs: 700, probeMs: 6000,
+  });
+  assert.equal(await completion, 4000);
+  assert.equal(info.probes.length, 7, 'keeps the same maximum poll gap without additional ADB calls');
+});
+
 test('PID replacement restarts the stability window; an overlapping PID may establish stability', async () => {
   const replaced = runScript([[['10'], ['10'], ['20'], ['20', '30']]]);
   assert.equal(await replaced.completion, 5);
@@ -170,14 +198,71 @@ test('orientation-only mode updates display without sending a key; existing defa
   t.mock.method(store, 'getSettings', () => ({ display: { tabletMode: true, autoRotate: true } }));
   const client = new AdbClient({ adbPath: 'never-run', serial: 'test' });
   const commands = [];
-  client.shell = async (command) => { commands.push(command); return ''; };
-  assert.equal(await client.setOrientation(true, { sendBackKey: false }), true);
+  client.shell = async (command) => {
+    commands.push(command);
+    if (command.startsWith('wm size && wm density')) {
+      return 'Physical size: 1080x1920\nPhysical density: 420\nOverride density: 285\n__APKSTART_TASKBAR__0';
+    }
+    return '';
+  };
+  assert.equal(await client.setOrientation(true, { sendBackKey: false, orientationOnly: true }), true);
+  assert.equal(commands.length, 1);
   assert.ok(commands.some((command) => command.includes('wm set-ignore-orientation-request true')));
-  assert.ok(commands.some((command) => command.startsWith('wm density ')));
+  assert.ok(commands.some((command) => command.includes('wm set-user-rotation lock 0')));
+  assert.ok(commands.some((command) => command.includes('wm set-fix-to-user-rotation enabled')));
+  assert.ok(!commands.some((command) => /wm (size|density)/.test(command)));
   assert.ok(!commands.some((command) => command.includes('input keyevent')));
   commands.length = 0;
   assert.equal(await client.setOrientation(true), true);
   assert.ok(commands.includes('input keyevent KEYCODE_BACK'));
+});
+
+test('1080p startup adjusts DPI once before launch, then skips writing size/density on repeat', async (t) => {
+  t.mock.method(store, 'getSettings', () => ({ display: { tabletMode: true } }));
+  const client = new AdbClient({ adbPath: 'never-run', serial: 'test' });
+  const commands = [];
+  let dpi = 190;
+  client.shell = async (command) => {
+    commands.push(command);
+    if (command.startsWith('wm size && wm density')) {
+      return 'Physical size: 1080x1920\nPhysical density: 420\nOverride density: ' + dpi + '\n__APKSTART_TASKBAR__0';
+    }
+    if (/^wm density 285\b/.test(command)) dpi = 285;
+    return '';
+  };
+  client.disableLauncherTaskbar = async () => true;
+  assert.equal(await client.resetDisplayOverrides(), true);
+  assert.equal(dpi, 285);
+  assert.equal(commands.length, 2);
+  assert.ok(!commands[1].includes('wm size reset'));
+  commands.length = 0;
+  assert.equal(await client.resetDisplayOverrides(), true);
+  assert.equal(commands.length, 2);
+  assert.ok(!/wm (size|density)/.test(commands[1]));
+});
+
+test('a focused window must itself be drawn; target splash blocks but unrelated splash does not', async () => {
+  const client = new AdbClient({ adbPath: 'never-run', serial: 'test' });
+  const target = '  Window #0 Window{abc u0 com.example.app/.Main}:\n'
+    + ' mHasSurface=true isReadyForDisplay()=true\n';
+  const drawn = target + ' mDrawState=HAS_DRAWN\n';
+  const focus = ' mCurrentFocus=Window{abc u0 com.example.app/.Main}\n__APKSTART_WINDOWS__\n';
+  const splash = (pkg) => '  Window #1 Window{def u0 Splash Screen ' + pkg + '}:\n mHasSurface=true\n';
+  const snapshots = [
+    focus.replace('com.example.app/', 'com.example.app.clone/') + drawn,
+    focus + target + ' mDrawState=READY_TO_SHOW\n',
+    focus + drawn + splash('com.example.app'),
+    focus + drawn + splash('com.example.other'),
+  ];
+  let calls = 0;
+  client.shell = async (command, { timeout }) => {
+    assert.match(command, /dumpsys window displays/);
+    assert.match(command, /dumpsys window windows/);
+    assert.ok(timeout >= 1 && timeout <= 1000);
+    return snapshots[calls++] || '';
+  };
+  assert.equal(await client.waitForAppFirstFrame('com.example.app', { timeoutMs: 1000, intervalMs: 1 }), true);
+  assert.equal(calls, 4);
 });
 
 test('readable launch errors recommend checking the actual image and never promise automatic switching', () => {
@@ -334,7 +419,7 @@ test('ordinary launch repairs verified missing cached data without granting perm
   assert.equal(updatedRecords[0].launchCount, 1);
   assert.deepEqual(events.map((e) => e[0]), ['install', 'invalidate', 'start', 'orientation', 'touch']);
   assert.deepEqual(events[0][3], { grantPermissions: false });
-  assert.deepEqual(events[3], ['orientation', 'base', true, { sendBackKey: false }]);
+  assert.deepEqual(events[3], ['orientation', 'base', true, { sendBackKey: false, orientationOnly: true }]);
 });
 
 test('ordinary launch does not reinstall or claim success from unknown probe results', async (t) => {

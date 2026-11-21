@@ -1,8 +1,20 @@
 'use strict';
 
 const { ipcFailure } = require('../failure');
+const { validPackageName } = require('../../core/pkgname');
+const { isValidMapping } = require('../../core/keymap');
 
 function createAndroidHandlers({ getCurrentAppPkg, keymapEngine, KEYMAP_PRESETS, live, store }) {
+  const writeKeymap = (pkg, mappings) => {
+    if (!keymapEngine || !validPackageName(pkg) || !Array.isArray(mappings)
+        || !mappings.every((m) => typeof m?.key === 'string' && isValidMapping(m))) {
+      return { ok: false, error: '无法保存这组按键映射' };
+    }
+    // Deep-merge storage keeps omitted keys. An explicit empty array clears the persisted map.
+    store.saveSettings({ engine: { keymaps: { [pkg]: mappings } } });
+    keymapEngine.setMap(pkg, mappings);
+    return { ok: true };
+  };
   return {
     'shell:back': async () => { await live.runtime.client().keyBack(); },
 
@@ -56,16 +68,7 @@ function createAndroidHandlers({ getCurrentAppPkg, keymapEngine, KEYMAP_PRESETS,
 
     'keymap:getMap': (_e, pkg) => keymapEngine ? keymapEngine.getMap(pkg) : [],
 
-    'keymap:setMap': (_e, pkg, mappings) => {
-      if (!keymapEngine) return { ok: false };
-      keymapEngine.setMap(pkg, mappings);
-      // 持久化到设置
-      const maps = { ...(store.getSettings().engine.keymaps || {}) };
-      if (mappings && mappings.length) maps[pkg] = mappings;
-      else delete maps[pkg];
-      store.saveSettings({ engine: { keymaps: maps } });
-      return { ok: true };
-    },
+    'keymap:setMap': (_e, pkg, mappings) => writeKeymap(pkg, mappings),
 
     'keymap:setEnabled': (_e, on) => {
       if (keymapEngine) keymapEngine.enable(!!on);
@@ -76,13 +79,10 @@ function createAndroidHandlers({ getCurrentAppPkg, keymapEngine, KEYMAP_PRESETS,
     'keymap:isEnabled': () => keymapEngine ? keymapEngine.enabled : false,
 
     'keymap:applyPreset': (_e, pkg, presetId) => {
-      if (!keymapEngine || !KEYMAP_PRESETS[presetId]) return { ok: false };
+      if (!Object.hasOwn(KEYMAP_PRESETS, presetId)) return { ok: false, error: '未找到按键映射预设' };
       const mappings = KEYMAP_PRESETS[presetId].mappings;
-      keymapEngine.setMap(pkg, mappings);
-      const maps = { ...(store.getSettings().engine.keymaps || {}) };
-      maps[pkg] = mappings;
-      store.saveSettings({ engine: { keymaps: maps } });
-      return { ok: true, mappings };
+      const result = writeKeymap(pkg, mappings);
+      return result.ok ? { ...result, mappings } : result;
     },
   };
 }

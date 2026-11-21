@@ -18,7 +18,7 @@ function makeSessions({ engine = {}, stop, priority } = {}) {
     getSettings: () => ({ engine }),
     getApps: () => [],
     getClient: () => ({
-      forceStop: async (pkg) => { calls.push(['stop', pkg]); await stop?.(pkg); },
+      forceStop: async (pkg) => { calls.push(['stop', pkg]); return stop?.(pkg); },
       shell: async (command) => { calls.push(['shell', command]); },
     }),
     touch: () => {},
@@ -121,12 +121,50 @@ test('a stopped guest invalidates queued app effects but retains its window tick
   assert.equal(sessions.hasActive(ticket.pkg), true);
 });
 
+test('explicit stop preserves the foreground ticket until Android confirms and never parks on rejection', async () => {
+  let acknowledge = false;
+  const { sessions, calls } = makeSessions({
+    stop: async () => {
+      if (!acknowledge) throw new Error('adb disconnected');
+      return true;
+    },
+  });
+  const ticket = sessions.reserve('com.example.app');
+  await sessions.activate(ticket);
+  await assert.rejects(sessions.stop(ticket.pkg), /adb disconnected/);
+  assert.equal(sessions.currentTicket, ticket);
+  assert.equal(sessions.hasActive(ticket.pkg), true);
+  assert.equal(calls.some(([kind]) => kind === 'snapshot'), false);
+  acknowledge = true;
+  await sessions.stop(ticket.pkg);
+  assert.equal(sessions.currentTicket, null);
+  assert.equal(sessions.isIdle, true);
+  assert.deepEqual(calls.at(-1), ['snapshot', 8000]);
+});
+
+test('an old acknowledged stop cannot discard a replacement ticket', async () => {
+  const issued = deferred();
+  const confirm = deferred();
+  const { sessions, calls } = makeSessions({ stop: () => { issued.resolve(); return confirm.promise; } });
+  const ticket = sessions.reserve('com.example.app');
+  await sessions.activate(ticket);
+  const pending = sessions.stop(ticket.pkg);
+  await issued.promise;
+  const next = sessions.reserve(ticket.pkg);
+  confirm.resolve(true);
+  await assert.rejects(pending, /会话或安卓运行时已切换/);
+  assert.equal(sessions.currentTicket, next);
+  assert.equal(calls.some(([kind]) => kind === 'snapshot'), false);
+});
+
 // A Node fixture supplies only the BrowserWindow boundary; no desktop or guest is started.
 class FixtureWindow extends EventEmitter {
   constructor() { super(); this.webContents = new EventEmitter(); this.destroyed = false; }
   loadFile() {}
   isDestroyed() { return this.destroyed; }
   destroy() { this.destroyed = true; this.emit('closed'); }
+  show() { this.visible = true; }
+  hide() { this.visible = false; this.hides = (this.hides || 0) + 1; }
 }
 
 function fixtureAppWindow() {
@@ -172,6 +210,50 @@ test('a late old BrowserWindow close reports its own ticket and does not remove 
   await win.waitForPark();
   assert.deepEqual(externalClosed, [[pkg, next]]);
   assert.equal(win.session, null);
+});
+
+test('failed detached lookup leaves the waiting shell open', async () => {
+  const AppWindow = fixtureAppWindow();
+  const win = new AppWindow({
+    agent: {
+      detach: async () => ({ ok: true }), setTitle: async () => ({ ok: true }),
+      show: async () => ({ ok: false }),
+    },
+  });
+  win._syncHook = () => {};
+  const shell = win.open({ pkg: 'com.example.app', detached: true, showWhileWaiting: true });
+  win._push = () => {};
+  shell.emit('ready-to-show');
+  assert.equal(await win.openDetached(), false);
+  assert.equal(shell.visible, true);
+  assert.equal(shell.hides, undefined);
+});
+
+test('close waits for in-flight attach before native park and prevents later show', async () => {
+  const AppWindow = fixtureAppWindow();
+  const sentDetach = deferred();
+  const detached = deferred();
+  const calls = [];
+  const win = new AppWindow({
+    agent: {
+      detach: () => { calls.push('detach'); sentDetach.resolve(); return detached.promise; },
+      setTitle: async () => calls.push('title'),
+      show: async () => calls.push('show'),
+      park: async (timeout) => { calls.push(['park', timeout]); return { ok: true }; },
+    },
+  });
+  win._syncHook = () => {};
+  const shell = win.open({ pkg: 'com.example.app', detached: true });
+  shell.on('closed', () => calls.push('destroy'));
+  const attaching = win.openDetached();
+  await sentDetach.promise;
+  const closing = win.close({ keepApp: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, ['detach']);
+  detached.resolve({ ok: true });
+  assert.equal(await attaching, false);
+  await closing;
+  assert.deepEqual(calls, ['detach', ['park', 0], 'destroy']);
 });
 
 test('a rejected physical rotate keeps the previous panel and does not apply a logical fallback', async () => {

@@ -83,6 +83,13 @@ test('provision version, daemon bootstrap, console and guest commands share the 
   assert.equal(transport[1].options.timeout, 12000);
 });
 
+const { WIFI_STATUS, SNAPSHOT_COMMAND, STOCK_WIFI_CONNECT } = require('../src/core/emulator-network');
+const CONNECTED_DUMP = 'Active default network: 100\n  NetworkAgentInfo{network{100} '
+  + 'lp{{InterfaceName: wlan0 LinkAddresses: [ 10.0.2.16/24 ] Routes: [ 0.0.0.0/0 -> 10.0.2.2 wlan0 mtu 0 ]}} '
+  + 'nc{[ Transports: WIFI Capabilities: INTERNET&VALIDATED ]}}';
+const WIFI_CONNECTED = 'Wifi is enabled\nWifi is connected to "AndroidWifi"\n__APKSTART_VALIDATION_MODE__=null';
+const WIFI_DISCONNECTED = 'Wifi is enabled\nWifi is not connected\n__APKSTART_VALIDATION_MODE__=null';
+
 function networkFixture() {
   const runtime = Object.create(Runtime.prototype);
   const emulator = Object.create(EmulatorEngine.prototype);
@@ -104,7 +111,7 @@ function networkFixture() {
       async shell(cmd) {
         writes.push({ serial, cmd });
         afterShell();
-        return cmd === 'ip -o addr' ? '2: wlan0 inet 10.0.2.16/24' : 'Wifi is connected';
+        return cmd === WIFI_STATUS ? WIFI_CONNECTED : CONNECTED_DUMP;
       },
     };
   };
@@ -117,11 +124,12 @@ test('network IPC delegates to Runtime and follows the verified TCP alias, not t
   const handlers = createRuntimeHandlers({ live: { runtime }, send: () => {} });
   const response = await handlers['runtime:checkNetwork']();
   assert.deepEqual(response, { ok: true, network: {
-    ok: true, reason: '', gateway: '10.0.2.2', ip: '10.0.2.16', wifiConnected: true, reachable: null,
+    ok: true, reason: '', gateway: '10.0.2.2', ip: '10.0.2.16', wifiConnected: true,
+    reachable: true, validated: true, networkId: 100,
   } });
   assert.deepEqual(selected, ['127.0.0.1:5557']);
   assert.equal(writes.length, 2);
-  assert.deepEqual(proofs, [true, true]);
+  assert.ok(proofs.length >= 2 && proofs.every((proof) => proof === true));
 });
 
 test('network facet rejects unknown owners and discards responses from a retired guest', async () => {
@@ -134,7 +142,7 @@ test('network facet rejects unknown owners and discards responses from a retired
   const stale = networkFixture();
   stale.afterShell(() => stale.runtime._retireGuest());
   assert.deepEqual(await stale.runtime.checkNetwork(), { ok: false, reason: 'guest-changed' });
-  assert.equal(stale.proofs.length, 1); // generation check avoids hitting the successor's transport
+  assert.deepEqual(stale.writes, [{ serial: '127.0.0.1:5557', cmd: WIFI_STATUS }]); // no command reaches the successor
 });
 
 test('tracked QEMU uses its own forwarded port and does not fall back to a foreign emulator', async () => {
@@ -149,27 +157,36 @@ test('tracked QEMU uses its own forwarded port and does not fall back to a forei
   assert.deepEqual(selected, ['127.0.0.1:5555']);
 });
 
-test('Wi-Fi repair uses the same scoped client for XML and drops writes after ownership changes', async () => {
+test('Wi-Fi repair uses the same scoped client for stock Wi-Fi and drops writes after ownership changes', async () => {
   const emulator = Object.create(EmulatorEngine.prototype);
   let owns = true;
+  let connected = false;
+  let revokeDuringScan = false;
   const calls = [];
   const client = {
     shell: async (command, options) => {
       calls.push([command, options]);
-      if (command === 'cat /sdcard/ui.xml') return '<node text="AndroidWifi" bounds="[0,2][12,10]" />';
-      if (command === 'cmd wifi status' && calls.some(([cmd]) => cmd === 'input tap 6 6')) return 'Wifi is connected';
-      return '';
+      if (command === WIFI_STATUS) return connected ? WIFI_CONNECTED : WIFI_DISCONNECTED;
+      if (command === SNAPSHOT_COMMAND) return connected ? CONNECTED_DUMP : 'Active default network: none';
+      if (command === 'cmd wifi list-scan-results') {
+        if (revokeDuringScan) owns = false;
+        return '02:15:b2:00:01:00 2447 -30 1.538 AndroidWifi [ESS]';
+      }
+      if (command === STOCK_WIFI_CONNECT) {
+        connected = true;
+        return 'Connection initiated';
+      }
+      throw new Error('unexpected guest shell command: ' + command);
     },
   };
   assert.equal(await emulator.repairWifi(client, { pause: async () => {}, canMutate: async () => owns }), true);
-  assert.deepEqual(calls.find(([cmd]) => cmd === 'cat /sdcard/ui.xml'), [
-    'cat /sdcard/ui.xml', { timeout: 10000, maxBuffer: 8 * 1024 * 1024 },
-  ]);
-  assert.ok(calls.some(([cmd]) => cmd === 'input tap 6 6'));
+  assert.ok(calls.some(([cmd]) => cmd === STOCK_WIFI_CONNECT));
   calls.length = 0;
-  await assert.rejects(emulator.repairWifi(client, {
-    pause: async () => { owns = false; },
+  connected = false;
+  revokeDuringScan = true;
+  assert.equal(await emulator.repairWifi(client, {
+    pause: async () => {},
     canMutate: async () => owns,
-  }), /取消网络修复/);
-  assert.deepEqual(calls.map(([cmd]) => cmd), ['cmd wifi status', 'svc wifi enable']);
+  }), false);
+  assert.deepEqual(calls.map(([cmd]) => cmd), [WIFI_STATUS, SNAPSHOT_COMMAND, 'cmd wifi list-scan-results']);
 });

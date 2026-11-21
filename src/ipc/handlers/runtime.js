@@ -10,7 +10,9 @@ function createRuntimeHandlers({ live, send }) {
 
     'runtime:start': async () => {
       const r = await live.runtime.ensure({ onLog: (m) => send('runtime:log', m) });
-      return r.ok ? { ok: true, engine: r.engine } : { ok: false, error: r.error, needsSetup: r.needsSetup };
+      return r.ok ? { ok: true, engine: r.engine } : {
+        ok: false, error: r.error, needsSetup: r.needsSetup, ...(r.code ? { code: r.code } : {}),
+      };
     },
 
     'runtime:stop': async () => {
@@ -70,7 +72,7 @@ function createRuntimeHandlers({ live, send }) {
     'runtime:repairNetwork': async () => {
       try {
         const r = await live.runtime.repairNetwork({
-          onLog: (m) => send('toast', { message: m, kind: 'info', timeout: 6000 }),
+          onLog: (m) => send('runtime:log', m),
         });
         return r;
       } catch (e) {

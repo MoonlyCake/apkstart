@@ -131,8 +131,21 @@ test('existing bare ext4 retains in-place growth and does not stage keys', (t) =
   fs.writeFileSync(f.base, userdata.buildEmptyExt4({ sizeMB: 64, encrypt: true }));
   const calls = [];
   f.emu._stageBootPublicKey = () => assert.fail('existing bare ext4 must not be reseeded');
-  f.emu._qemuImg = (...args) => { calls.push(args); };
-  f.emu._resize2fs = (img) => { calls.push(['resize2fs', img]); };
+  const stat = fs.statSync;
+  let logicalSize = 64 * 1024 ** 2;
+  t.mock.method(fs, 'statSync', (file, ...args) => {
+    const actual = stat(file, ...args);
+    return file === f.base ? { ...actual, size: logicalSize } : actual;
+  });
+  f.emu._qemuImg = (...args) => { calls.push(args); logicalSize = args[2]; };
+  f.emu._resize2fs = (img) => {
+    calls.push(['resize2fs', img]);
+    // Simulate the on-disk ext4 size change without allocating a 1 GiB file.
+    const count = Buffer.alloc(4);
+    count.writeUInt32LE(logicalSize / userdata.BLOCK);
+    const fd = fs.openSync(img, 'r+');
+    try { fs.writeSync(fd, count, 0, 4, 1024 + 0x04); } finally { fs.closeSync(fd); }
+  };
   const result = f.emu._prepareBootData(f.avdDir, f.home, f.dir, 1024);
   assert.equal(result.created, false);
   assert.equal(result.grown, true);

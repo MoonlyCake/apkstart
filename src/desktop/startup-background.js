@@ -50,25 +50,9 @@ function createStartupBackground({ log, send, now = Date.now, setTimer = setTime
   function scheduleUpdates({ packaged, storeBuild, updater, version, setInfo, requestQuit }) {
     if (!packaged || storeBuild) return;
 
-    try {
-      const job = updater.findResumableJob();
-      if (job) {
-        // Replay a verified cached update rather than download it again.
-        log(`resuming pending update ${job.version} from cached payload`);
-        send('update:progress', { stage: 'apply', percent: 100, message: '正在完成上次未完成的更新…' });
-        try {
-          updater.apply(job);
-          setTimer(requestQuit, 900);
-        } catch (error) {
-          log('resume check failed: ' + error.message);
-        }
-        return;
-      }
-    } catch (error) {
-      log('resume check failed: ' + error.message);
-    }
-
-    later(() => {
+    const previous = updater.takeApplyFailure?.();
+    if (previous) later(() => send('update:progress', { stage: 'error', percent: 0, message: previous.error }), 1200);
+    const scheduleCheck = () => later(() => {
       updater.check().then((info) => {
         setInfo(info);
         send('update:state', info);
@@ -77,6 +61,27 @@ function createStartupBackground({ log, send, now = Date.now, setTimer = setTime
         }
       }).catch((error) => log('update check failed: ' + error.message));
     }, 8000);
+    const resumeFailed = (error) => {
+      log('resume check failed: ' + error.message);
+      send('update:progress', { stage: 'error', percent: 0, message: error.message });
+      scheduleCheck();
+    };
+
+    try {
+      const job = updater.findResumableJob();
+      if (job) {
+        log(`resuming pending update ${job.version} from cached payload`);
+        Promise.resolve(updater.apply(job, { resume: true })).then(() => {
+          send('update:progress', { stage: 'apply', percent: 100, message: '正在完成上次未完成的更新…' });
+          setTimer(requestQuit, 900);
+        }, resumeFailed);
+        return;
+      }
+    } catch (error) {
+      resumeFailed(error);
+      return;
+    }
+    scheduleCheck();
   }
 
   return { scheduleDiagnostics, scheduleRuntime, scheduleUpdates };

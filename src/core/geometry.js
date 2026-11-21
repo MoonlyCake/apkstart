@@ -26,4 +26,18 @@ function physicalRect(rect, scaleFactor) {
   };
 }
 
-module.exports = { physicalRect };
+/** Global positions on mixed-DPI displays are not simply x*sf/y*sf. */
+function physicalScreenRect(rect, scaleFactor, dipToScreenRect) {
+  if (rect && typeof dipToScreenRect === 'function') {
+    try {
+      const native = dipToScreenRect({ x: rect.x, y: rect.y, width: rect.w, height: rect.h });
+      if (native && [native.x, native.y, native.width, native.height].every(Number.isFinite)
+        && native.width > 0 && native.height > 0) {
+        return { x: native.x, y: native.y, w: native.width, h: native.height };
+      }
+    } catch (_) { /* Older Electron APIs / non-Windows hosts can fall back to local scaling. */ }
+  }
+  return physicalRect(rect, scaleFactor);
+}
+
+module.exports = { physicalRect, physicalScreenRect };

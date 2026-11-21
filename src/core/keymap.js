@@ -62,7 +62,7 @@ const PRESETS = {
  * Electron KeyboardEvent.key 值如 'w', 'W', 'ArrowUp', ' ', 'Enter' 等。
  */
 function normalizeKey(key) {
-  if (!key) return '';
+  if (typeof key !== 'string') return '';
   // 单字母统一小写
   if (key.length === 1 && /[A-Za-z]/.test(key)) return key.toLowerCase();
   return key;
@@ -77,7 +77,18 @@ function normalizeKey(key) {
 function lookup(mappings, key) {
   const nk = normalizeKey(key);
   if (!nk || !Array.isArray(mappings)) return null;
-  return mappings.find((m) => normalizeKey(m.key) === nk) || null;
+  return mappings.find((m) => normalizeKey(m?.key) === nk) || null;
+}
+
+function isValidMapping(mapping) {
+  if (!mapping || typeof mapping !== 'object') return false;
+  const ratio = (value) => Number.isFinite(value) && value >= 0 && value <= 1;
+  if (mapping.action === 'tap') return ratio(mapping.x) && ratio(mapping.y);
+  if (mapping.action === 'swipe') {
+    return [mapping.x1, mapping.y1, mapping.x2, mapping.y2].every(ratio)
+      && (mapping.duration == null || (Number.isInteger(mapping.duration) && mapping.duration >= 0 && mapping.duration <= 5000));
+  }
+  return mapping.action === 'keyevent' && Number.isInteger(mapping.code) && mapping.code >= 0 && mapping.code <= 1000;
 }
 
 /**
@@ -88,7 +99,8 @@ function lookup(mappings, key) {
  * @returns {string} adb shell 命令（如 'input tap 192 612'）
  */
 function toCommand(mapping, width, height) {
-  if (!mapping) return '';
+  if (!isValidMapping(mapping)) return '';
+  if (mapping.action !== 'keyevent' && (![width, height].every(Number.isFinite) || width <= 0 || height <= 0)) return '';
   if (mapping.action === 'tap') {
     const x = Math.round(mapping.x * width);
     const y = Math.round(mapping.y * height);
@@ -108,4 +120,4 @@ function toCommand(mapping, width, height) {
   return '';
 }
 
-module.exports = { PRESETS, normalizeKey, lookup, toCommand };
+module.exports = { PRESETS, normalizeKey, lookup, isValidMapping, toCommand };

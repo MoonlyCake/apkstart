@@ -61,16 +61,11 @@ function createDesktopHandlers({
       return { response };
     },
 
-    'assoc:status': () => {
+    'assoc:status': async () => {
       // 冒烟/无 shell 环境：不探测注册表（reg.exe 可能被策略拦截）
-      if (NO_SHELL_PROBE) return { registered: false, skipped: true };
-      const { execFileSync } = require('child_process');
-      try {
-        const out = execFileSync('reg', ['query', 'HKCU\\Software\\Classes\\.apk', '/ve'], { windowsHide: true, encoding: 'utf8' });
-        return { registered: out.includes(assoc.PROGID) };
-      } catch (_) {
-        return { registered: false };
-      }
+      if (NO_SHELL_PROBE) return { registered: false, effective: false, skipped: true };
+      const l = launcherInfo();
+      return assoc.associationStatus(l.target, l.args);
     },
 
     'assoc:register': () => {
@@ -88,14 +83,33 @@ function createDesktopHandlers({
       return assoc.registerAssociation(l.target, icoPath, l.args);
     },
 
-    'assoc:unregister': () => assoc.unregisterAssociation(),
+    'assoc:unregister': () => {
+      const l = launcherInfo();
+      return assoc.unregisterAssociation(l.target, l.args);
+    },
+
+    'assoc:openDefaultSettings': async () => {
+      try {
+        if (process.platform !== 'win32') return { ok: false, error: '此平台没有 Windows 默认应用设置。' };
+        const l = launcherInfo();
+        const status = await assoc.associationStatus(l.target, l.args);
+        // Both URLs are chosen by the main process, never passed from the renderer.
+        const uri = !status.effective && status.registered ? assoc.DEFAULT_APPS_URI : 'ms-settings:defaultapps';
+        if (!uri) return { ok: false, error: '此平台没有 Windows 默认应用设置。' };
+        await shell.openExternal(uri);
+        return { ok: true };
+      } catch (e) {
+        return ipcFailure(e);
+      }
+    },
 
     'share:sync': async () => live.sharer.sync({ onLog: (m) => send('runtime:log', m) }),
 
     'share:open': async () => {
       const dir = store.getSettings().sharedDir;
       fs.mkdirSync(dir, { recursive: true });
-      shell.openPath(dir);
+      const error = await shell.openPath(dir);
+      return error ? { ok: false, error } : { ok: true };
     },
 
     /**
@@ -106,7 +120,6 @@ function createDesktopHandlers({
      */
     'app:removeSelf': async () => {
       try {
-        try { await assoc.unregisterAssociation(); } catch (_) { /* 取消关联失败不影响卸载 */ }
         const exeDir = path.dirname(process.execPath);
         // 和 updater.flavor 用同一套识别规则：electron-builder 生成的是
         // "Uninstall ApkStart.exe"，旧代码只找 "uninstaller.exe"，
@@ -122,6 +135,9 @@ function createDesktopHandlers({
         if (live.runtime && !await live.runtime.stop()) {
           return { ok: false, error: '请先关闭 ApkStart 安卓运行时，再卸载。' };
         }
+        const l = launcherInfo();
+        const assocResult = await assoc.unregisterAssociation(l.target, l.args);
+        if (assocResult?.ok === false) return assocResult;
         // 先让本程序退出，再由一个独立进程延迟 2 秒拉起卸载器：
         // 运行中的 exe 会锁住安装目录里的文件，直接拉起卸载器容易删不干净。
         const cmd = `ping 127.0.0.1 -n 3 >nul & start "" "${uninstaller}"`;

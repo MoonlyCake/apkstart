@@ -1,12 +1,22 @@
 'use strict';
 /**
  * 显示适配的纯计算部分（可单测，不依赖 Electron / adb）。
- *  - 全屏：Android 分辨率对齐显示器工作区，内容自动铺满；
- *  - 窗口：保持竖屏预设，用户拖动窗口时由 Qt 自动缩放，尺寸记在应用元数据里。
+ * Windows 窗口的显示尺寸与安卓的渲染尺寸独立，调大窗口不要求重启安卓。
  */
 function densityFor(w, h, manual) {
   if (manual > 0) return Math.max(120, Math.min(640, Math.round(manual)));
   return Math.max(200, Math.min(480, Math.round(Math.min(w, h) / 2.57)));
+}
+
+/** 保持平板布局的短边约 606dp，避免高分辨率面板仍用 190 DPI 而把控件缩小。 */
+function tabletDensityFor(w, h, manual) {
+  const preferred = Number(manual);
+  const width = Number(w);
+  const height = Number(h);
+  const automatic = Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0
+    ? (Math.min(width, height) * 190) / 720
+    : 190;
+  return Math.max(120, Math.min(640, Math.round(Number.isFinite(preferred) && preferred > 0 ? preferred : automatic)));
 }
 
 function portraitSize(str) {
@@ -17,14 +27,52 @@ function portraitSize(str) {
   return (h > w && w >= 320 && h >= 480) ? { w, h } : { w: 900, h: 1600 };
 }
 
-function defaultBounds(area) {
-  const h = Math.round((area.h || 1080) * 0.84);
-  const w = Math.round(h * 9 / 16);
+const WINDOW_PRESETS = [
+  [720, 0.64],
+  [900, 0.78],
+  [1080, 0.89],
+  [1440, 0.97],
+];
+
+function positive(value, fallback) {
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+/**
+ * Compute the outer desktop window in work-area DIP (not framebuffer pixels).
+ * Old width×height presets still select small through extra large by their short edge.
+ */
+function windowBounds(portrait, area = {}, { landscape = false, fullscreen = false, caption = 0, remembered } = {}) {
+  const panel = typeof portrait === 'string' ? portraitSize(portrait) : portrait || {};
+  const pw = positive(panel.w, 900);
+  const ph = positive(panel.h, 1600);
+  const short = Math.min(pw, ph);
+  const long = Math.max(pw, ph);
+  const ratio = landscape ? long / short : short / long;
+  const scale = fullscreen ? 1 : (WINDOW_PRESETS.find(([edge]) => short <= edge) || WINDOW_PRESETS.at(-1))[1];
+  const aw = Math.max(1, Math.round(positive(area.w, 1920)));
+  const ah = Math.max(1, Math.round(positive(area.h, 1080)));
+  const x0 = Number.isFinite(area.x) ? area.x : 0;
+  const y0 = Number.isFinite(area.y) ? area.y : 0;
+  const rememberedW = remembered?.w ?? remembered?.width;
+  const rememberedH = remembered?.h ?? remembered?.height;
+  const validRemembered = !fullscreen && remembered && Number.isFinite(remembered.x) && Number.isFinite(remembered.y)
+    && positive(rememberedW, 0) > 0 && positive(rememberedH, 0) > 0;
+  const maxW = Math.max(1, validRemembered ? Math.min(aw, Math.round(rememberedW)) : Math.floor(aw * scale));
+  const maxH = Math.max(1, validRemembered ? Math.min(ah, Math.round(rememberedH)) : Math.floor(ah * scale));
+  const frame = Math.min(maxH - 1, Math.round(positive(caption, 0)));
+  const contentH = Math.min(maxH - frame, maxW / ratio);
+  const w = Math.max(1, Math.min(maxW, Math.floor(contentH * ratio)));
+  const h = Math.max(1, Math.min(maxH, Math.floor(contentH) + frame));
   return {
-    x: Math.round((area.x || 0) + ((area.w || 1920) - w) / 2),
-    y: Math.round((area.y || 0) + ((area.h || 1080) - h) / 2),
+    x: Math.round(validRemembered ? Math.min(x0 + aw - w, Math.max(x0, remembered.x)) : x0 + (aw - w) / 2),
+    y: Math.round(validRemembered ? Math.min(y0 + ah - h, Math.max(y0, remembered.y)) : y0 + (ah - h) / 2),
     w, h,
   };
+}
+
+function defaultBounds(area) {
+  return windowBounds('900x1600', area);
 }
 
 /**
@@ -34,15 +82,7 @@ function defaultBounds(area) {
  * 「应用占满屏幕」，且画面不会变形。
  */
 function fullscreenBounds(portrait, area) {
-  const p = portraitSize(portrait);
-  const ratio = p.w / p.h;
-  const h = Math.max(320, Math.round(area.h || 1080));
-  const w = Math.max(240, Math.round(h * ratio));
-  return {
-    x: Math.round((area.x || 0) + ((area.w || 1920) - w) / 2),
-    y: Math.round(area.y || 0),
-    w, h,
-  };
+  return windowBounds(portrait, area, { fullscreen: true });
 }
 
 /**
@@ -56,4 +96,4 @@ function sizeFor(mode, portrait, area) {
   return portraitSize(portrait);
 }
 
-module.exports = { densityFor, portraitSize, defaultBounds, fullscreenBounds, sizeFor };
+module.exports = { densityFor, tabletDensityFor, portraitSize, defaultBounds, fullscreenBounds, sizeFor, windowBounds };

@@ -116,15 +116,22 @@ test('configured ceiling and actual disk availability are distinct limits', asyn
   t.mock.method(resources, 'hostProfile', () => assert.fail('a disk-only update must not probe RAM/CPU'));
   assert.equal(store.saveSettings({ engine: { dataPartitionGB: 1024 } }).engine.dataPartitionGB, 256);
   const doctor = require('../src/core/doctor');
-  t.mock.method(doctor, 'freeDiskMB', () => 1024 * 1024);
+  let freeMB = 1024 * 1024;
+  t.mock.method(doctor, 'freeDiskMB', () => freeMB);
   const calls = [];
   const runtime = {
     provisioner: { paths: () => ({ root: store.DATA_DIR }) },
     resizeDataPartition: async (mb) => { calls.push(mb); return { ok: true }; },
   };
   const handlers = captureHandlers({ store, live: { runtime }, appLog: () => {}, notify: () => {} });
-  assert.deepEqual(await handlers.get('runtime:setDataSize')({}, 1024), { ok: true });
-  assert.deepEqual(calls, [256 * 1024], 'actual resize cannot exceed the setting persisted later');
+  const setSize = handlers.get('runtime:setDataSize');
+  assert.equal((await setSize({}, 1024)).ok, false, 'explicit resize cannot silently choose a smaller target');
+  assert.deepEqual(calls, []);
+  assert.deepEqual(await setSize({}, 256), { ok: true });
+  freeMB = 20 * 1024;
+  assert.equal((await setSize({}, 256)).ok, false, 'volume capacity is a separate limit');
+  assert.deepEqual(await setSize({}, 16), { ok: true });
+  assert.deepEqual(calls, [256 * 1024, 16 * 1024]);
   assert.equal(resources.clampDataGB(256, 20 * 1024).gb, 16);
   assert.equal(resources.clampDataGB(256, 0).gb, 256);
   assert.equal(resources.diskLimits(1024 * 1024).maxGB, 256);

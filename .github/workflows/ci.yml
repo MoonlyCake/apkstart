@@ -40,3 +40,26 @@ jobs:
           $out = & .\test\pointer-hook-logic.ps1
           $out | ForEach-Object { Write-Host $_ }
           if (-not ($out -contains 'POINTER_HOOK_LOGIC_OK')) { exit 1 }
+
+  ui:
+    name: 窗口与设置回归（Windows）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Electron 设置及启动画面（静音、独立配置）
+        shell: pwsh
+        run: |
+          $electron = (Resolve-Path 'node_modules/electron/dist/electron.exe').Path
+          foreach ($test in 'settings-ui-test', 'splash-ui-test') {
+            $base = Join-Path $env:RUNNER_TEMP "apkstart-$test"
+            $argsList = @("test/$test.js", "--user-data-dir=`"$base`"", '--mute-audio')
+            $proc = Start-Process -FilePath $electron -ArgumentList $argsList -WindowStyle Hidden -Wait -PassThru `
+              -RedirectStandardOutput "$base.stdout" -RedirectStandardError "$base.stderr"
+            Get-Content -LiteralPath "$base.stdout", "$base.stderr"
+            if ($proc.ExitCode -ne 0) { exit $proc.ExitCode }
+          }

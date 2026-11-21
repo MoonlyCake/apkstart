@@ -11,7 +11,8 @@ const fs = require('fs');
 const path = require('path');
 const { hookOptions } = require('./pointer');
 const store = require('./store');
-const { physicalRect } = require('./geometry');
+const { physicalScreenRect } = require('./geometry');
+const { windowBounds } = require('./display');
 
 const TITLEBAR_H = 38;
 /**
@@ -45,55 +46,29 @@ class AppWindow {
     this._fitTimer = null;
     this._windowLifecycle = null;
     this._pendingPark = Promise.resolve();
+    this._pendingAttachment = Promise.resolve();
+    this._layoutRequest = 0;
   }
 
   get isOpen() { return !!(this.win && !this.win.isDestroyed()); }
 
-  /** 竖屏 / 横屏下窗口内容的目标尺寸（自动缩放到屏幕内） */
-  static sizeFor(area, portrait, landscape) {
-    const p = portrait || { w: 540, h: 960 };
-    // 留足边距：标题栏 38 + 上下各 24，左右各 40
-    const availH = Math.max(360, (area.h || 1040) - TITLEBAR_H - 48);
-    const availW = Math.max(300, (area.w || 1920) - 80);
-    const k = landscape
-      ? Math.min(availW / p.h, availH / p.w)
-      : Math.min(availH / p.h, availW / p.w);
-    const w = Math.round((landscape ? p.h : p.w) * k);
-    const h = Math.round((landscape ? p.w : p.h) * k);
-    // 双保险：绝不超过屏幕可用区，否则会被系统裁掉，看起来就是「有黑边 / 没填满」
-    return {
-      w: Math.max(320, Math.min(w, Math.round(availW))),
-      h: Math.max(360, Math.min(h, Math.round(availH))),
-    };
-  }
-
-  _area() {
-    const d = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  _area(point) {
+    const d = point ? screen.getDisplayNearestPoint(point)
+      : this.isOpen ? screen.getDisplayMatching(this.win.getBounds())
+        : screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
     const a = d.workArea || d.bounds;
-    // workArea 是 DIP（逻辑像素）。窗口代理进程是 per-monitor DPI-aware 的，
-    // SetWindowPos 收的是物理像素，所以独立窗口模式把这里的值交给 agent.layout
-    // 之前必须乘 sf 换算。sf 与 area 取自同一块屏幕，多显示器也不会用错缩放比。
     return { x: a.x, y: a.y, w: a.width, h: a.height, sf: d.scaleFactor || 1 };
   }
 
-  /**
-   * 模拟器原生窗口自己按设备面板锁宽高比，给错比例会被夹回去。
-   * 这里算出当前窗口应有的 w/h 比（含标题栏高度），用来一次给对的尺寸。
-   * 独立窗口模式下壳窗口是隐藏的、bounds 可能是竖屏默认值，
-   * 所以要按面板方向校正（横屏时宽 > 高，比值 > 1）。
-   */
-  _panelRatio() {
-    const b = this.win ? this.win.getBounds() : this._area();
-    if (b && b.width > 0 && b.height > 0) {
-      // 横屏面板下，壳窗口的 bounds 可能还是竖的（detached 模式 hide 了），
-      // 直接读会得到 0.56 (9:16)，但实际面板是 16:9。
-      // 此时用 portrait 的 h/w 作为宽（横屏 = 竖屏面板旋转 90°）
-      if (this.state.landscape && b.height > b.width) {
-        return b.height / b.width;
-      }
-      return b.width / b.height;
+  _areaForNative(rect) {
+    if (rect?.w > 0 && rect?.h > 0 && typeof screen.screenToDipPoint === 'function') {
+      try {
+        return this._area(screen.screenToDipPoint({
+          x: Math.round(rect.x + rect.w / 2), y: Math.round(rect.y + rect.h / 2),
+        }));
+      } catch (_) { /* Fall back to the shell's display. */ }
     }
-    return 0.5625; // 竖屏 9:16 兜底
+    return this._area();
   }
 
   _scale() {
@@ -109,17 +84,17 @@ class AppWindow {
    * 把一块 DIP（逻辑像素）矩形换算成物理像素，供窗口代理的 SetWindowPos 使用。
    * Electron 的 screen/BrowserWindow 坐标一律是 DIP；而 agent.ps1 顶层声明了
    * per-monitor v2 DPI 感知，Win32 的 SetWindowPos 收到的是物理像素。二者混用
-   * 在 125%/150% 缩放下就是「窗口只显示一半 / 偏到角落 / 点击错位」的根因
-   * （issue #99）。_rect() 早已乘过 sf，这里补上独立窗口模式缺的这一环。
+   * 混用缩放的显示器上，屏幕全局坐标不能直接乘缩放比。
    */
   _physical(rect, sf) {
-    return physicalRect(rect, sf || this._scale());
+    return physicalScreenRect(rect, sf || this._scale(), typeof screen.dipToScreenRect === 'function'
+      ? (bounds) => screen.dipToScreenRect(null, bounds) : undefined);
   }
 
   /**
    * 打开（或复用）应用窗口。
    * @param {object} o { pkg, label, iconPath, portrait, fullscreen, detached,
-   *                     showWhileWaiting, session, onClosed }
+   *                     rememberedBounds, showWhileWaiting, session, onClosed }
    *        detached=true 时走「独立窗口模式」：壳窗口只加载不显示，画面在模拟器原生窗口里。
    *        showWhileWaiting=true 时，**在等待期间**先把壳窗口显示出来（带提示文案），
    *        等模拟器窗口接上后由 openDetached() 收起。切换应用到另一个方向的 App
@@ -142,7 +117,7 @@ class AppWindow {
       }
       return this.win;
     }
-    this.close({ keepApp: true });
+    this.close({ keepApp: true }).catch(() => {});
 
     this.pkg = pkg;
     this.session = session;
@@ -153,22 +128,25 @@ class AppWindow {
     // 独立窗口模式下「全屏」要作用在模拟器窗口上（我们这层壳是隐藏的，
     // maximize 一个隐藏窗口没有任何视觉效果，openDetached 会读这个标记）。
     this._wantFullscreen = !!fullscreen;
+    this._layoutFullscreen = !!fullscreen;
+    this._preFullscreenRect = null;
+    this._surfaceAttached = false;
+    this._rememberedBounds = o.rememberedBounds || null;
     this.state = { label: label || '应用', tip: '正在启动安卓运行时…', ready: false, landscape: false };
 
     const area = this._area();
-    const size = AppWindow.sizeFor(area, this.portrait, false);
-    const w = Math.max(320, size.w);
-    const h = Math.max(420, size.h + TITLEBAR_H);
+    const size = windowBounds(this.portrait, area, { fullscreen, caption: TITLEBAR_H,
+      landscape: this.portrait.w > this.portrait.h, remembered: this._rememberedBounds });
 
     const iconFile = iconPath && fs.existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : undefined;
 
     this.win = new BrowserWindow({
-      width: w,
-      height: h,
-      minWidth: 320,
-      minHeight: 420,
-      x: Math.round(area.x + (area.w - w) / 2),
-      y: Math.round(area.y + (area.h - h) / 2),
+      width: size.w,
+      height: size.h,
+      minWidth: Math.min(320, size.w),
+      minHeight: Math.min(420, size.h),
+      x: size.x,
+      y: size.y,
       show: false,
       frame: false,
       thickFrame: true,
@@ -228,13 +206,14 @@ class AppWindow {
       // close() clears the reference before destroy(); an old window cannot close its successor.
       if (!current()) return;
       this._syncHook(false);
+      this._cancelFit();
       this.win = null;
       this.pkg = null;
       this.session = null;
       this._windowLifecycle = null;
       this.waitingForRestart = false;
       this.lastEmbedOk = false;
-      this._parkThen(() => lifecycle.onClosed?.(pkg, session));
+      this._parkThen(() => lifecycle.onClosed?.(pkg, session)).catch(() => {});
       if (pkg && this._onCloseApp) {
         try { this._onCloseApp(pkg, session); } catch (_) { /* 通知失败不打断窗口收尾 */ }
       }
@@ -244,10 +223,6 @@ class AppWindow {
     win.on('focus', () => { if (current()) this._syncHook(true); });
     win.on('blur', () => { if (current()) this._syncHook(false); });
 
-    // 注意：maximize() 会把 show:false 的窗口直接显示出来。
-    // 独立窗口模式下画面在模拟器原生窗口里，这里一 maximize 就会在屏幕正中
-    // 多出一个黑色空壳窗口 —— 用户反馈的「打开应用出现多个窗口」有一半来自这里。
-    if (fullscreen && !this.detachedMode) this.win.maximize();
     return this.win;
   }
 
@@ -295,18 +270,29 @@ class AppWindow {
    * 但那时候 pre-attach 一成功就会把它收起来；等到真正重启时反而没人再显示。
    *
    * 所以重启前后显式调用一次：先亮出带提示的壳，等新窗口接上后由
-   * openDetached() 第一行的 hide() 收掉。
+   * openDetached() 确认原生窗口出现后收掉。
    */
   showWaiting(tip) {
     if (!this.isOpen) return false;
     // 标记「正在等待重启」：启动阶段那条 pre-attach 轮询看到它会主动让路，
-    // 否则它下一轮 openDetached() 会先把壳窗口 hide 掉，用户就又对着空桌面干等。
+    // 新面板未就绪前，不能让旧面板的接管轮询收掉等候提示。
     this.waitingForRestart = true;
+    this._surfaceAttached = false;
     if (tip) this.state = { ...this.state, tip, ready: false };
     this._push();
+    return this.showWaitSurface();
+  }
+
+  showWaitSurface({ activate = true } = {}) {
+    if (!this.isOpen || this.state.ready) return false;
+    this._showWhileWaiting = true;
     try {
-      this.win.show();
-      this.win.moveTop();
+      if (activate) {
+        this.win.show();
+        this.win.moveTop();
+      } else {
+        this.win.showInactive();
+      }
     } catch (_) {
       return false;
     }
@@ -343,20 +329,22 @@ class AppWindow {
    *
    * @returns {Promise<boolean>} 是否成功切到独立窗口
    */
-  async openDetached() {
+  openDetached(isCurrent) {
+    return this._attachSurface((context) => this._openDetached(context), isCurrent);
+  }
+
+  async _openDetached({ shell, agent, current }) {
     // 壳窗口已经关掉（用户点了关闭 / 启动过程中被收掉）时没有可承载的对象。
     // 把原因记下来：否则上层日志只能打一个 "unknown"，完全看不出是「窗口没了」
     // 还是「模拟器窗口找不到」。
     if (!this.isOpen) { this.lastEmbedError = 'shell-closed'; return false; }
     // 真正开始接管，等待标记到此为止（下一轮 pre-attach 可以正常重试）
     this.waitingForRestart = false;
-    // 壳窗口在独立模式下绝不能露脸（它没有内容，只会是一块黑）。
-    // 但 showWhileWaiting 时它现在是可见的「等待提示」，这里负责收起它。
-    try { this.win.hide(); } catch (_) { /* ignore */ }
     // 先确保它没被嵌在里面（从嵌入切过来时 _emu 的父窗口还是宿主）。
     // keep=true：告诉代理这是「切独立窗口」，不是「结束嵌入」——否则它会把
     // 用户正在看的模拟器窗口当成杂物藏掉。
-    const dt = await this.agent.detach(true).catch((e) => ({ ok: false, error: e.message }));
+    const dt = await agent.detach(true).catch((e) => ({ ok: false, error: e.message }));
+    if (!current()) return false;
     this._detachedDebug = `detach=${JSON.stringify(dt)}`;
     // 标题必须在 show 之前设。
     // 代理进程是常驻的，里面缓存着「上次设过的标题」（_ourTitle）；新模拟器窗口
@@ -364,75 +352,50 @@ class AppWindow {
     // 名字**闪 0.5 秒，首次启动则先显示 "Android Emulator - apkstart:5554"。
     // 以前的顺序是 show() → setTitle()，所以那半秒一定看得到。
     const title = this.state && this.state.label ? this.state.label : 'ApkStart';
-    await this.agent.setTitle(title).catch(() => {});
-    // 图标和标题都在窗口 show 之前设好：既避免旧标题/绿色机器人图标先闪一下，
-    // 又把原来「setTitle 后等 600ms + show + setIcon 后再等 300ms」两次等待合并成
-    // 一次 —— 打开应用到出画面省约 300ms（默认就是原生窗口模式，每次都走这里）。
+    await agent.setTitle(title).catch(() => {});
+    if (!current()) return false;
+    // 图标和标题都在窗口 show 之前设好，等代理回包即可，不再人为暂停每次接管。
     // 图标只影响任务栏/Alt+Tab，设给已存在的 Qt 窗口，不依赖它 show 过。
     const icoForNative = this.iconFilePath
       ? this.iconFilePath.replace(/\.png$/i, '.ico')
       : '';
     if (icoForNative && fs.existsSync(icoForNative)) {
-      try { await this.agent.setIcon(icoForNative); } catch (_) { /* ignore */ }
+      try { await agent.setIcon(icoForNative); } catch (_) { /* ignore */ }
     } else if (this.iconFilePath) {
-      try { await this.agent.setIcon(this.iconFilePath); } catch (_) { /* ignore */ }
+      try { await agent.setIcon(this.iconFilePath); } catch (_) { /* ignore */ }
     }
-    await sleep(600);
+    if (!current()) return false;
     // 让模拟器窗口真的可见
-    const shown = await this.agent.show().catch((e) => ({ ok: false, error: e.message }));
+    const shown = await agent.show().catch((e) => ({ ok: false, error: e.message }));
+    if (!current()) return false;
     this._detachedDebug += ` show=${JSON.stringify(shown)}`;
-    if (!shown || shown.ok === false) { this.lastEmbedError = this._detachedDebug; return false; }
-    // 按屏幕可用区居中和 sizing。
-    // 注意：模拟器原生窗口自己按设备面板比例锁宽高比（竖屏 9:16），
-    // 给一个不匹配的 w/h，它会把宽夹回高度对应的值，结果就是「设了 1280 宽
-    // 却只有 400 宽」。所以这里主动按面板比例算尺寸，一次给对。
-    //
-    // 全屏（「启动时自动全屏」）时铺满整个可用区；横屏面板下宽高比本来就贴合
-    // 屏幕，铺满不会留黑边 —— 这也是横屏比竖屏更值得用全屏的原因。
+    if (shown?.ok !== true) { this.lastEmbedError = this._detachedDebug; return false; }
     const area = this._area();
-    const ratio = this._panelRatio();
-    let w;
-    let h;
-    let x;
-    let y;
-    if (this._wantFullscreen) {
-      // 「铺满」也要守住面板比例。竖屏面板（720x1280）塞进 1920x1080 的屏幕时，
-      // 直接把窗口设成 area.w × area.h，Qt 会按比例把它缩回去，但位置仍留在
-      // area 左上角 —— 用户看到的是贴在屏幕左上角的一条竖窗，而不是"全屏"。
-      // 这里按比例取最大可用矩形并居中，横屏面板本来比例贴合，效果就是真正的铺满。
-      const fitW = Math.min(area.w, Math.round(area.h * ratio));
-      w = fitW;
-      h = Math.round(fitW / ratio);
-      x = Math.round(area.x + (area.w - w) / 2);
-      y = Math.round(area.y + (area.h - h) / 2);
-      // 同步全屏标记，否则第一次点「最大化」按钮会误判为「进入全屏」而不是还原。
-      this._detachedFullscreen = true;
-    } else {
-      this._detachedFullscreen = false;
-      const maxH = Math.min(area.h - 140, 1000);
-      const maxW = Math.min(area.w - 80, 1280);
-      w = maxW;
-      h = Math.round(w / ratio);
-      if (h > maxH) { h = maxH; w = Math.round(h * ratio); }
-      x = Math.round(area.x + (area.w - w) / 2);
-      y = Math.round(area.y + 60);
-    }
-    // area/x/y/w/h 都是 Electron 的 DIP 逻辑像素，而窗口代理的 SetWindowPos 收
-    // 物理像素。150% 缩放下不换算，窗口就只有 2/3 大并偏左上角——即 issue #99
-    // 的「显示一半」。_rect()（嵌入模式）早已乘过 sf，这里补齐独立模式的缺口。
-    const lay = await this.agent.layout(this._physical({ x, y, w, h }, area.sf))
+    const bounds = this._displayBounds(area, this._wantFullscreen);
+    const lay = await agent.layout(this._physical(bounds, area.sf))
       .catch((e) => ({ ok: false, error: e.message }));
+    if (!current()) return false;
     this._detachedDebug += ` layout=${JSON.stringify(lay)}`;
-    this.lastEmbedError = this._detachedDebug;
     this.lastEmbedOk = false;
-    return !!(lay && lay.ok !== false);
+    if (lay?.ok !== true) { this.lastEmbedError = this._detachedDebug; return false; }
+    this.lastEmbedError = '';
+    this.detachedMode = true;
+    this._surfaceAttached = true;
+    this._layoutFullscreen = this._wantFullscreen;
+    this._showWhileWaiting = false;
+    // A failed native lookup must leave the waiting shell visible.
+    try { shell.hide(); } catch (_) { /* The native window has already been shown. */ }
+    return true;
   }
 
-  async embed() {
-    if (!this.isOpen) return false;
+  embed(isCurrent) {
+    return this._attachSurface((context) => this._embed(context), isCurrent);
+  }
+
+  async _embed({ agent, current }) {
     let last = null;
     for (let attempt = 0; attempt < 4; attempt += 1) {
-      if (!this.isOpen) return false;
+      if (!current()) return false;
       const hwnd = this._hwnd();
       if (!hwnd) return false;
       // 外部若提供了候选句柄（历史接口，当前恒为 null）；拿不到就等一下再试
@@ -441,6 +404,7 @@ class AppWindow {
       if (typeof this.windowTargets === 'function') {
         // eslint-disable-next-line no-await-in-loop
         targets = await Promise.resolve(this.windowTargets()).catch(() => null);
+        if (!current()) return false;
         if (Array.isArray(targets) && !targets.length) {
           // eslint-disable-next-line no-await-in-loop
           await sleep(attempt < 2 ? 400 : 1000);
@@ -448,16 +412,40 @@ class AppWindow {
         }
       }
       // eslint-disable-next-line no-await-in-loop
-      const r = await this.agent.embed(hwnd, this._rect(), targets).catch((e) => ({ ok: false, error: e.message }));
+      const r = await agent.embed(hwnd, this._rect(), targets).catch((e) => ({ ok: false, error: e.message }));
+      if (!current()) return false;
       last = r;
-      if (r && r.ok) { this.lastEmbedOk = true; return true; }
+      if (r?.ok === true) {
+        this.lastEmbedOk = true;
+        this.lastEmbedError = '';
+        this.detachedMode = false;
+        this._surfaceAttached = true;
+        return true;
+      }
       // eslint-disable-next-line no-await-in-loop
       await sleep(attempt < 2 ? 300 : 800);
     }
     // 把失败原因带出去：上层会写进 app.log，出问题时一眼能看出是「没找到模拟器窗口」
     // 还是「SetParent 失败」，不用再靠猜。
-    this.lastEmbedError = last ? (last.error || `emu=${last.emu}`) : 'no-response';
+    if (current()) this.lastEmbedError = last ? (last.error || `emu=${last.emu}`) : 'no-response';
     return false;
+  }
+
+  _attachSurface(effect, isCurrent = () => true) {
+    const shell = this.win;
+    const ticket = this.session;
+    const agent = this.agent;
+    const parked = this._pendingPark.catch(() => {});
+    const current = () => this.isOpen && this.win === shell && this.session === ticket
+      && this.agent === agent && isCurrent();
+    // An older native call can already be in flight when close() runs. Park must
+    // follow it; a replacement window must in turn wait for that park.
+    const pending = this._pendingAttachment.then(async () => {
+      await parked;
+      return current() ? effect({ shell, agent, current }) : false;
+    });
+    this._pendingAttachment = pending.catch(() => false);
+    return pending;
   }
 
   async fitNow() {
@@ -484,9 +472,12 @@ class AppWindow {
    */
   scheduleFit(rounds = 1) {
     if (!this.isOpen) return;
-    if (this._fitTimer) clearTimeout(this._fitTimer);
+    this._cancelFit();
+    const window = this.win;
     const run = async (left) => {
+      if (this.win !== window || !this.isOpen) return;
       await this.fitNow().catch(() => {});
+      if (this.win !== window || !this.isOpen) return;
       if (left > 1) {
         this._fitTimer = setTimeout(() => run(left - 1), 160);
       } else {
@@ -494,6 +485,11 @@ class AppWindow {
       }
     };
     this._fitTimer = setTimeout(() => run(Math.max(1, rounds)), 40);
+  }
+
+  _cancelFit() {
+    if (this._fitTimer) clearTimeout(this._fitTimer);
+    this._fitTimer = null;
   }
 
   _hwnd() {
@@ -556,73 +552,63 @@ class AppWindow {
     return next;
   }
 
-  /** 需要时切到指定方向（全屏=横屏，窗口=竖屏） */
+  /** 需要时切到指定面板方向；Windows 全屏不会修改它。 */
   async setLandscape(want) {
     if (!this.isOpen) return this.state.landscape;
     if (!!this.state.landscape === !!want) return this.state.landscape;
     return this.rotate();
   }
 
-  async toggleMaximize() {
-    if (!this.isOpen) return;
-    // 独立窗口模式：画面在模拟器原生窗口里，壳窗口是隐藏的 —— maximize 一个隐藏
-    // 窗口没有任何视觉效果（这正是「右上角按钮点了没反应」的原因）。这里改成把
-    // 模拟器窗口铺满工作区 / 还原到之前的尺寸。
-    if (this.detachedMode) {
-      const area = this._area();
-      if (this._detachedFullscreen) {
-        // 还原：回到全屏前记住的尺寸（如果有的话），否则用默认按比例居中
-        this._detachedFullscreen = false;
-        if (this._preFullscreenRect) {
-          await this.agent.layout(this._preFullscreenRect).catch(() => {});
-          this._preFullscreenRect = null;
-        } else {
-          await this.openDetachedLayoutOnly(area);
-        }
-      } else {
-        // 全屏前记住当前窗口位置和大小，还原时用
-        try {
-          const probe = await this.agent.probe().catch(() => null);
-          if (probe && probe.w > 0 && probe.h > 0) {
-            this._preFullscreenRect = { x: probe.x, y: probe.y, w: probe.w, h: probe.h };
-          }
-        } catch (_) { /* 拿不到就还原时用默认 */ }
-        this._detachedFullscreen = true;
-        // 同 openDetached：全屏也要守住面板比例并居中，否则竖屏应用会被
-        // Qt 按比例缩回去、停在左上角。
-        const ratio = this._panelRatio();
-        const fitW = Math.min(area.w, Math.round(area.h * ratio));
-        const fitH = Math.round(fitW / ratio);
-        await this.agent.layout(this._physical({
-          x: Math.round(area.x + (area.w - fitW) / 2),
-          y: Math.round(area.y + (area.h - fitH) / 2),
-          w: fitW,
-          h: fitH,
-        }, area.sf)).catch(() => {});
-      }
-      return;
-    }
-    if (this.win.isMaximized()) this.win.unmaximize();
-    else this.win.maximize();
-    this.scheduleFit();
+  _displayBounds(area, fullscreen, caption = 0) {
+    return windowBounds(this.portrait, area, {
+      fullscreen, caption, landscape: this.state.landscape, remembered: this._rememberedBounds,
+    });
   }
 
-  /**
-   * 只重摆模拟器窗口尺寸（不重新 detach/show），供全屏/还原切换复用 openDetached
-   * 的尺寸计算逻辑。抽出来避免重复一遍 detach 流程。
-   */
-  async openDetachedLayoutOnly(area) {
-    const maxH = Math.min(area.h - 140, 1000);
-    const maxW = Math.min(area.w - 80, 1280);
-    const ratio = this._panelRatio();
-    let w = maxW;
-    let h = Math.round(w / ratio);
-    if (h > maxH) { h = maxH; w = Math.round(h * ratio); }
-    await this.agent.layout(this._physical({
-      x: Math.round(area.x + (area.w - w) / 2),
-      y: Math.round(area.y + 60),
-      w, h,
-    }, area.sf)).catch(() => {});
+  async toggleMaximize(fullscreen = !this._layoutFullscreen) {
+    return this.applyWindowSize(this.portrait, { fullscreen });
+  }
+
+  /** Only change the Windows surface; an Android framebuffer change is a separate setting. */
+  async applyWindowSize(portrait, { fullscreen } = {}) {
+    const request = ++this._layoutRequest;
+    const presetChanged = !!portrait && (portrait.w !== this.portrait?.w || portrait.h !== this.portrait?.h);
+    if (portrait) this.portrait = portrait;
+    if (presetChanged) {
+      this._rememberedBounds = null;
+      this._preFullscreenRect = null;
+    }
+    if (typeof fullscreen === 'boolean') this._wantFullscreen = fullscreen;
+    if (!this.isOpen || !this._surfaceAttached || this.waitingForRestart
+      || (fullscreen === undefined && this._layoutFullscreen)) return false;
+    const targetFullscreen = fullscreen ?? this._layoutFullscreen;
+    return this._attachSurface(async ({ shell, agent, current }) => {
+      let accepted = false;
+      if (this.detachedMode) {
+        const probe = await agent.probe().catch(() => null);
+        if (!current()) return false;
+        const area = this._areaForNative(probe);
+        const prior = this._preFullscreenRect;
+        // Probe rectangles already are physical pixels. Keep a dragged size when exiting fullscreen.
+        const target = !targetFullscreen && this._layoutFullscreen && prior
+          ? prior : this._physical(this._displayBounds(area, targetFullscreen), area.sf);
+        const result = await agent.layout(target).catch(() => null);
+        if (!current() || result?.ok !== true) return false;
+        if (targetFullscreen && !this._layoutFullscreen && probe?.w > 0 && probe?.h > 0) {
+          this._preFullscreenRect = { x: probe.x, y: probe.y, w: probe.w, h: probe.h };
+        } else if (!targetFullscreen) this._preFullscreenRect = null;
+        accepted = true;
+      } else {
+        const area = this._area();
+        const { x, y, w, h } = this._displayBounds(area, targetFullscreen, TITLEBAR_H);
+        if (shell.isMaximized()) shell.unmaximize();
+        shell.setBounds({ x, y, width: w, height: h });
+        const result = await agent.fit(this._rect()).catch(() => null);
+        accepted = current() && result?.ok === true;
+      }
+      if (accepted) this._layoutFullscreen = targetFullscreen;
+      return accepted;
+    }, () => request === this._layoutRequest).catch(() => false);
   }
 
   minimize() {
@@ -647,6 +633,7 @@ class AppWindow {
     const session = this.session;
     const lifecycle = this._windowLifecycle;
     this._syncHook(false);
+    this._cancelFit();
     this.lastEmbedOk = false;
     this.win = null;
     this.pkg = null;
@@ -661,10 +648,19 @@ class AppWindow {
     return pending;
   }
 
-  waitForPark() { return this._pendingPark; }
+  waitForPark() { return this._pendingPark.catch(() => {}); }
 
   _parkThen(done) {
-    const pending = this._pendingPark.then(() => this.agent?.park()).catch(() => {}).then(done);
+    const attachment = this._pendingAttachment;
+    const pending = this._pendingPark.catch(() => {}).then(() => attachment)
+      .then(async () => {
+        try {
+          const result = await this.agent?.park(0);
+          if (result?.ok === false) throw new Error('窗口代理未确认已停放安卓窗口');
+        } finally {
+          done();
+        }
+      });
     this._pendingPark = pending;
     return pending;
   }

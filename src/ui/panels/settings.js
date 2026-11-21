@@ -2,7 +2,9 @@
 
 (() => {
   const panels = window.apkstartUiPanels ||= {};
-  panels.createSettingsPanel = function createSettingsPanel({ api, $, state, toast, refreshStatus, refreshAndroid, navigation, diagnostics, preflight }) {
+  panels.createSettingsPanel = function createSettingsPanel({
+    api, $, state, toast, refreshStatus, refreshAndroid, navigation, diagnostics, preflight, networkExplanation,
+  }) {
     // The panel selectors share one renderer; each domain owns its DOM bindings and state.
     const { createRuntimeSettings, createDisplaySettings, createStorageSettings } = window.apkstartUiPanels;
     const save = async (patch) => { state.settings = await api.setSettings(patch); };
@@ -13,7 +15,7 @@
     };
     const runtime = createRuntimeSettings({ api, $, state, save, toast, fillSettings: fill, refreshStatus });
     const display = createDisplaySettings({ api, $, state, save, toast });
-    const storage = createStorageSettings({ api, $, save, toast });
+    const storage = createStorageSettings({ api, $, save, toast, refreshStatus, networkExplanation });
 
     function fillSettings(s) {
       $('setAdbPath').value = s.adbPath || '';
@@ -86,10 +88,7 @@
       if (info.version) $('aboutVer').textContent = info.version;
       const curVerEl = document.getElementById('updateCurrent');
       if (curVerEl && info.version) curVerEl.textContent = `v${info.version}`;
-      const assoc = await api.assocStatus();
-      const btn = $('btnAssoc');
-      btn.textContent = assoc.registered ? '已关联 · 点击取消' : '未关联 · 点击开启';
-      btn.dataset.on = assoc.registered ? '1' : '0';
+      storage.refreshAssoc().catch(() => { $('btnAssoc').textContent = '无法检查 Windows 默认关联'; });
 
       api.doctorProfile().then((r) => {
         if (r && r.text) $('autoProfileText').textContent = r.text;
