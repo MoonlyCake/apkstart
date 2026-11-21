@@ -1,6 +1,6 @@
 'use strict';
 /**
- * 内置手册映射测试（0.6.3）
+ * 内置手册映射测试
  *
  * 重点守两件事：
  *  1) 每个章节锚点都必须真的存在于随包分发的 src/ui/manual.html；
@@ -39,8 +39,10 @@ test('每个主题的锚点都存在于随包 HTML', () => {
   }
 });
 
-test('手册正文包含 0.6.3 版本号与声音章节', () => {
-  assert(html.includes('v0.6.3'), '手册应标注 v0.6.3');
+test('手册适用于本分支，并保留声音与自动教程章节', () => {
+  assert(html.includes('Apk Start --Q 1.x'), '手册应标注本分支系列');
+  assert(html.includes('href="https://github.com/MoonlyCake/apkstart/releases"'), '手册应链接本分支发行页');
+  assert(html.includes('href="https://github.com/MoonlyCake/apkstart/issues"'), '手册应链接本分支反馈页');
   assert(html.includes('应用没有声音'), '手册应有声音排障章节');
   assert(html.includes('内置使用手册与自动教程'), '手册应说明自动教程');
 });

@@ -1,11 +1,11 @@
 <p align="center">
-  <img src="docs/images/readme/hero.svg" alt="Apk Start --Q 1.0.2：让 Android 应用在 Windows 桌面上有个位置" width="100%">
+  <img src="docs/images/readme/hero.svg" alt="Apk Start --Q 1.0.3：让 Android 应用在 Windows 桌面上有个位置" width="100%">
 </p>
 
 <h3 align="center">把 APK 变成桌面上可以双击的窗口。</h3>
 
 <p align="center">
-  <a href="#三分钟上手">三分钟上手</a> ·
+  <a href="#三步上手">三步上手</a> ·
   <a href="#双向音频">双向音频</a> ·
   <a href="#内部结构">内部结构</a> ·
   <a href="#边界">边界</a> ·
@@ -16,9 +16,9 @@
 
 它不是一个完整的安卓系统：没有应用商店，不替你批量授权，也不会为了「看起来正常」而清空已有的应用数据。
 
-<img src="docs/images/readme/app-ui.svg" alt="Apk Start --Q 的应用库界面：搜索、安装 APK 与两行应用卡片" width="100%">
+<img src="docs/images/readme/app-ui.svg" alt="Apk Start --Q 的应用库界面示意：搜索、安装 APK 与两行应用卡片" width="100%">
 
-## 三分钟上手
+## 三步上手
 
 <img src="docs/images/readme/workflow.svg" alt="三步：选择安装包、准备运行时、打开应用" width="100%">
 
@@ -31,7 +31,7 @@ npm ci
 npm start
 ```
 
-**2 · 准备运行时。** 首次打开时按提示部署 Android Emulator、ADB 与系统镜像。这一步需要联网，并为镜像、应用数据和快照留出约 3 GB 空间。
+**2 · 准备运行时。** 首次打开时按提示部署 Android Emulator、ADB 与系统镜像。这一步需要联网；若下载完整运行时包，部署时需约 6 GB 可用空间，安装应用和保存快照还需额外预留。
 
 **3 · 安装并打开。** 从界面选择 `.apk`、`.apks` 或 `.xapk`；也可以先打开 `.apk` 文件关联，之后从资源管理器双击安装。装完即可从应用列表或已创建的快捷方式启动。
 
@@ -102,4 +102,4 @@ npm start
 
 欢迎在 [Issues](https://github.com/MoonlyCake/apkstart/issues) 反馈，附上 Windows 版本、复现步骤与必要的诊断摘要。开发约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-上游为 [RoutineMiku/apkstart](https://github.com/RoutineMiku/apkstart)，本分支遵循 [MIT 许可证](LICENSE)。
+上游为 [RoutineMiku/apkstart](https://github.com/RoutineMiku/apkstart)，本项目遵循 [MIT 许可证](LICENSE)。随应用分发的 ApkStart Display 字体源自 Archivo，遵循 [SIL Open Font License 1.1](src/ui/assets/fonts/OFL-Archivo.txt)。

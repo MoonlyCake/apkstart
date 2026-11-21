@@ -152,10 +152,31 @@ app.whenReady().then(async () => {
     && brand[1] === productName && brand[2] === version);
 
   console.log('\n[设置页 · 分类导航]');
-  // 先打开设置弹窗（自动检测结果是在打开设置时取回来渲染的）
-  await evalJs(`document.getElementById('btnSettings').click()`);
+  const welcome = await evalJs(`(() => {
+    const mask = document.getElementById('welcomeMask');
+    const buttons = document.querySelectorAll('.welcome-actions button');
+    const card = mask.querySelector('.welcome').getBoundingClientRect();
+    return !mask.hidden && getComputedStyle(mask).display === 'grid'
+      && card.height > 0 && card.top >= 0 && card.bottom <= innerHeight
+      && Math.abs(card.x + card.width / 2 - innerWidth / 2) < 1
+      && mask.querySelectorAll('.welcome-stat').length === 3
+      && Array.from(buttons).every(button => button.getBoundingClientRect().height > 0);
+  })()`);
+  step('首次打开时欢迎卡居中可见，内容和按钮未被裁切', welcome);
+
+  win.webContents.send('update:state', { ok: true, current: version, tag: 'v9.9.9', hasUpdate: true, releasePublished: true });
+  await new Promise((r) => setTimeout(r, 100));
+  step('更新状态从独立页面模块同步到欢迎提示', await evalJs(`
+    document.getElementById('updateState').textContent.includes('v9.9.9')
+      && document.getElementById('welcomeTips').textContent.includes('v9.9.9')
+  `));
+
+  // 从欢迎卡进入设置（自动检测结果是在打开设置时取回来渲染的）。
+  await evalJs(`document.getElementById('welcomeSettings').click()`);
   await new Promise((r) => setTimeout(r, 900));
   const modalOpen = await evalJs(`document.getElementById('settingsMask').classList.contains('on')`);
+  const welcomeDismissed = await evalJs(`getComputedStyle(document.getElementById('welcomeMask')).display === 'none'`);
+  step('从欢迎卡打开设置会关闭遮罩', modalOpen && welcomeDismissed);
   step('设置弹窗能打开', modalOpen);
   const about = await evalJs(`[
     document.getElementById('aboutProductName').textContent,
@@ -241,13 +262,6 @@ app.whenReady().then(async () => {
       && document.getElementById('btnDoUpdate').hidden
   `));
 
-  win.webContents.send('update:state', { ok: true, current: version, tag: 'v9.9.9', hasUpdate: true, releasePublished: true });
-  await new Promise((r) => setTimeout(r, 100));
-  step('更新状态从独立页面模块同步到欢迎提示', await evalJs(`
-    document.getElementById('updateState').textContent.includes('v9.9.9')
-      && document.getElementById('welcomeTips').textContent.includes('v9.9.9')
-  `));
-
   // 点「显示与窗口」
   await evalJs(`document.querySelector('#setNav .set-nav-item[data-cat="display"]').click()`);
   await new Promise((r) => setTimeout(r, 300));
@@ -257,6 +271,7 @@ app.whenReady().then(async () => {
   }))()`);
   step('切到「显示与窗口」后只显示该分类', afterSwitch.visible.length > 0 && afterSwitch.visible.every((c) => c === 'display'), `可见：${afterSwitch.visible.join(',')}`);
   step('导航高亮跟着切换', afterSwitch.on === 'display', `高亮：${afterSwitch.on}`);
+  step('设置下拉控件保留提示箭头', await evalJs(`getComputedStyle(document.getElementById('setDisplayMode')).backgroundImage !== 'none'`));
 
   await win.capturePage().then((img) => fs.writeFileSync(path.join(OUT, 'settings-display.png'), img.toPNG()));
 

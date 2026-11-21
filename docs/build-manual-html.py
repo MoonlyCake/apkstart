@@ -74,7 +74,8 @@ while i < n:
     if m:
         lvl = len(m.group(1))
         text = m.group(2).strip()
-        anchor = slug(text, used)
+        # 打开内置手册的首页入口使用旧锚点，品牌标题改名时保持入口有效。
+        anchor = slug('apkstart 产品使用手册与问题解决方案' if lvl == 1 else text, used)
         if lvl in (2, 3):
             toc.append((lvl, anchor, text))
         out.append('<h%d id="%s">%s</h%d>' % (lvl, anchor, inline(text), lvl))
@@ -155,17 +156,17 @@ doc = '''<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ApkStart 产品使用手册与问题解决方案</title>
+<title>Apk Start --Q 产品使用手册与问题解决方案</title>
 <style>
-:root{--bg:#ffffff;--fg:#1f2328;--mut:#57606a;--line:#d0d7de;--code:#eff1f3;--accent:#0969da;--accent-soft:#ddf4ff;--warn:#9a6700;--warn-bg:#fff8c5;--head:#f6f8fa;--tbl:#f6f8fa}
+:root{color-scheme:dark;--bg:#0b0c0d;--fg:#e6e9eb;--mut:#8a929b;--line:rgba(255,255,255,.13);--code:#14171a;--accent:#8fb6d0;--accent-soft:rgba(143,182,208,.14);--warn:#dfae62;--warn-bg:rgba(217,164,65,.1);--warn-fg:#e8c88a;--head:#0e1012;--tbl:#14171a}
 *{box-sizing:border-box}
 body{margin:0;font:16px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:var(--fg);background:var(--bg)}
 .wrap{display:flex;max-width:1180px;margin:0 auto}
 aside{position:sticky;top:0;height:100vh;overflow:auto;width:280px;flex:0 0 280px;border-right:1px solid var(--line);padding:24px 18px;background:var(--head)}
 aside h2{font-size:15px;margin:0 0 14px;letter-spacing:.5px}
-aside a{display:block;color:var(--mut);text-decoration:none;padding:3px 8px;border-radius:6px;font-size:13.5px;line-height:1.45}
+aside a{display:block;color:var(--mut);text-decoration:none;padding:3px 8px;font-size:13.5px;line-height:1.45}
 aside a:hover{background:var(--accent-soft);color:var(--accent)}
-#tocSearch{width:100%;margin-bottom:12px;padding:7px 9px;border:1px solid var(--line);border-radius:6px;font:13px/1.4 inherit;background:#fff;color:var(--fg)}
+#tocSearch{width:100%;margin-bottom:12px;padding:7px 9px;border:1px solid var(--line);border-radius:0;font:inherit;font-size:13px;line-height:1.4;background:#0b0d0f;color:var(--fg)}
 #tocSearch:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
 .toc-l3{padding-left:22px!important;font-size:12.5px!important;color:#8c959f!important}
 main{flex:1;min-width:0;padding:40px 48px 80px}
@@ -175,10 +176,10 @@ h3{font-size:18px;margin:30px 0 12px;scroll-margin-top:16px}
 h4{font-size:16px;margin:22px 0 8px}
 p{margin:12px 0}
 a{color:var(--accent)}
-code{background:var(--code);padding:2px 6px;border-radius:6px;font:13.5px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace}
-pre{background:var(--code);padding:16px 18px;border-radius:8px;overflow:auto;border:1px solid var(--line)}
+code{background:var(--code);padding:2px 6px;font:13.5px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace}
+pre{background:var(--code);padding:16px 18px;overflow:auto;border:1px solid var(--line)}
 pre code{background:none;padding:0}
-blockquote{margin:16px 0;padding:10px 16px;border-left:4px solid var(--warn);background:var(--warn-bg);color:#633c01;border-radius:0 8px 8px 0}
+blockquote{margin:16px 0;padding:10px 16px;border-left:3px solid var(--warn);background:var(--warn-bg);color:var(--warn-fg)}
 blockquote p{margin:0}
 ul,ol{margin:12px 0;padding-left:26px}
 li{margin:5px 0}
@@ -187,12 +188,15 @@ hr{border:0;border-top:1px solid var(--line);margin:28px 0}
 table{border-collapse:collapse;width:100%;font-size:14.5px}
 th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top}
 th{background:var(--tbl);font-weight:600;white-space:nowrap}
-tbody tr:nth-child(even){background:#fbfcfd}
+tbody tr:nth-child(even){background:var(--head)}
 .btnbar{position:fixed;right:22px;bottom:22px;display:flex;gap:8px}
-.btnbar button{border:1px solid var(--line);background:#fff;color:var(--fg);border-radius:8px;padding:9px 14px;font-size:13px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+.btnbar button{border:1px solid var(--line);background:#14171a;color:var(--fg);border-radius:0;padding:9px 14px;font-size:13px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.08)}
 .btnbar button:hover{border-color:var(--accent);color:var(--accent)}
 @media (max-width:880px){aside{display:none}main{padding:24px 20px 60px}h1{font-size:25px}}
-@media print{aside,.btnbar{display:none}main{padding:0;max-width:none}h2{page-break-after:avoid}table,pre,blockquote{page-break-inside:avoid}a{color:inherit;text-decoration:none}}
+/* 关闭背景打印时，浅色屏幕文字仍须能印在白纸上。 */
+@media print{
+:root{color-scheme:light;--bg:#fff;--fg:#1f2328;--line:#d0d7de;--code:#eff1f3;--warn:#9a6700;--warn-bg:#fff8c5;--warn-fg:#633c01;--head:#f6f8fa;--tbl:#f6f8fa}
+aside,.btnbar{display:none}main{padding:0;max-width:none}h2{page-break-after:avoid}table,pre,blockquote{page-break-inside:avoid}a{color:inherit;text-decoration:none}}
 </style>
 </head>
 <body>
@@ -228,7 +232,7 @@ __BODY__
 
 doc = doc.replace('__TOC__', toc_html).replace('__BODY__', body)
 for target in (OUT, APP_OUT):
-    with open(target, 'w', encoding='utf-8') as f:
+    with open(target, 'w', encoding='utf-8', newline='\n') as f:
         f.write(doc)
     print('生成:', target)
     print('大小: %d KB' % (os.path.getsize(target) // 1024))

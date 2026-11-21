@@ -21,11 +21,12 @@
   --text: #f2f4f5;
   --text-2: #c3c9cf;
   --muted: #8a929b;
-  --faint: #616972;
+  --faint: #818a94;
 
   /* 品牌：从冷蓝照片里取的钢蓝，只做标记，不做大面积填充 */
   --brand: #8fb6d0;
   --brand-dark: #6e97b4;
+  --brand-ink: #b6d2e3;
   --brand-soft: rgba(143, 182, 208, .12);
   --brand-grad: #edeff1;
   --danger: #e2705f;
@@ -244,14 +245,22 @@ html, body {
 
 /* 添加应用：虚线卡 */
 .card.add, .card-add {
+  justify-content: center;
+  min-height: 178px;
   background: transparent;
   border: 1px dashed rgba(255, 255, 255, .18);
   color: var(--faint);
 }
-.card.add:hover, .card-add:hover {
+.card.add:hover, .card-add:hover, .card-add:focus-visible {
   border-color: rgba(143, 182, 208, .55);
   color: var(--brand);
   background: rgba(143, 182, 208, .04);
+}
+.card-add .add-plus {
+  display: grid; place-items: center;
+  width: 52px; height: 52px;
+  margin-bottom: 10px;
+  background: var(--panel-2);
 }
 
 /* ---------------- 空状态 ---------------- */
@@ -275,6 +284,16 @@ html, body {
   color: #757d86;
 }
 .statusbar .sep { background: var(--line-strong); height: 10px; }
+.status-net::before {
+  content: "";
+  display: inline-block;
+  width: 5px; height: 5px;
+  margin-right: 5px;
+  vertical-align: 1px;
+  background: currentColor;
+}
+.status-net.ok { color: var(--brand); }
+.status-net.warn { color: #dfae62; }
 .dot { width: 5px; height: 5px; background: #4a5158; }
 .dot.ok { background: var(--brand); box-shadow: none; }
 .dot.warn { background: #d9a441; box-shadow: none; }
@@ -453,7 +472,8 @@ input[type="text"]:focus, input[type="number"]:focus, select:focus, textarea:foc
   box-shadow: none;
 }
 input[readonly] { color: var(--muted); }
-select {
+/* 基础层对 .field select 设置了背景；同等优先级才能保留自绘箭头。 */
+select, .field select {
   padding-right: 26px;
   appearance: none;
   background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
@@ -506,6 +526,7 @@ input[type="checkbox"] { accent-color: #8fb6d0; }
 }
 .env-check-item + .env-check-item, .drv-item + .drv-item { border-top: 1px solid var(--line); }
 .env-check-ok { color: var(--brand); }
+.dbg-item .dbg-fix:hover, .env-check-item .ec-fix:hover { color: #0b0c0d; }
 .drv-name, .dbg-group-title { color: var(--text); }
 .drv-meta, .drv-list, .dbg-list { color: var(--faint); font-family: var(--mono); font-size: 10.5px; }
 .drv-badge {
@@ -583,25 +604,45 @@ input[type="checkbox"] { accent-color: #8fb6d0; }
 
 /* ---------------- 首次运行欢迎 ---------------- */
 
+/* 欢迎卡由 hidden 控制，不使用设置弹窗的 .on 状态。 */
+.welcome-mask:not([hidden]) { display: grid; z-index: 90; }
 .welcome {
+  width: min(396px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
   background: #0e1012;
   border: 1px solid var(--line-strong);
   box-shadow: var(--shadow-lg);
-  overflow: hidden;
+  overflow: auto;
 }
-.welcome-halo { background: transparent; }
-.welcome-badge { filter: none; }
+.welcome-hero { padding: 24px 20px 18px; text-align: center; }
+.welcome-badge { margin-bottom: 10px; }
 .welcome-hi { font-size: 22px; font-weight: 650; letter-spacing: .3px; }
-.welcome-sub { color: var(--muted); font-size: 12px; }
-.welcome-body { border-top: 1px solid var(--line); }
-.welcome-stats, .welcome-tips { color: var(--text-2); }
-.welcome-tips li, .welcome-stats .item {
-  border-top: 1px solid var(--line);
-  color: var(--muted);
-  font-size: 11.5px;
+.welcome-sub { margin-top: 6px; color: var(--muted); font-size: 12px; }
+.welcome-body { border-top: 1px solid var(--line); padding: 16px 20px 12px; }
+.welcome-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.welcome-stat {
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  padding: 8px 5px;
+  text-align: center;
+  overflow-wrap: anywhere;
 }
-.welcome-opt { color: var(--faint); font-size: 11px; }
-.welcome-actions { border-top: 1px solid var(--line); }
+.welcome-stat b { display: block; color: var(--brand); font-size: 16px; }
+.welcome-stat span { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; }
+.welcome-tips { display: grid; gap: 8px; margin: 14px 0 8px; }
+.welcome-tip { display: flex; align-items: flex-start; gap: 8px; color: var(--text-2); font-size: 12px; }
+.welcome-tip i {
+  flex: none;
+  width: 16px;
+  text-align: center;
+  background: var(--brand-soft);
+  color: var(--brand);
+  font-style: normal;
+  font-weight: 650;
+}
+.welcome-opt { display: flex; align-items: center; gap: 6px; color: var(--faint); font-size: 11px; cursor: pointer; }
+.welcome-actions { display: flex; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--line); }
+.welcome-actions .btn.primary { flex: 1; }
 
 /* ---------------- 滚动条兜底 ---------------- */
 

@@ -202,7 +202,7 @@ html, body {
 .footer {
   position: relative;
   font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: clamp(9px, 2.1875vw, 13px); color: #5f666e;
+  font-size: clamp(9px, 2.1875vw, 13px); color: #808892;
   letter-spacing: 1.4px;
   opacity: 0;
   animation: fadeUp .85s ease-out .95s both;

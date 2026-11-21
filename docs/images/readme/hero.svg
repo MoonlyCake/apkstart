@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="680" viewBox="0 0 1200 680" role="img" aria-labelledby="t d">
-  <title id="t">Apk Start --Q 1.0.2：让 Android 应用在 Windows 桌面上有个位置</title>
+  <title id="t">Apk Start --Q 1.0.3：让 Android 应用在 Windows 桌面上有个位置</title>
   <desc id="d">纯黑底海报：整幅宽度的白色扩展黑体字标，下方左侧是中文主张与规格，中间是三步流程，右侧是一块冷蓝色版与桌面图标示意。</desc>
   <defs>
     <linearGradient id="sky" x1="0" y1="1" x2="1" y2="0">
@@ -26,7 +26,7 @@
   <!-- 抬头 -->
   <g font-family="Cascadia Mono, Consolas, monospace" font-size="10.5" letter-spacing="2.4" fill="#6B737C">
     <text x="40" y="44">ANDROID RUNNER FOR WINDOWS</text>
-    <text x="1160" y="44" text-anchor="end">V1.0.2 / MIT</text>
+    <text x="1160" y="44" text-anchor="end">V1.0.3 / MIT</text>
   </g>
   <path d="M40 58h1120" stroke="#FFFFFF" stroke-opacity=".16" stroke-width="1"/>
 
@@ -42,18 +42,18 @@
     <text x="40" y="404">它就在独立窗口里运行。</text>
   </g>
   <g font-family="Segoe UI, Microsoft YaHei, PingFang SC, sans-serif" fill="#7E868F" font-size="12.5">
-    <text x="40" y="446">基于 Android 30 AOSP 的精简运行时，</text>
-    <text x="40" y="466">不装模拟器，也不接管已有的应用数据。</text>
+    <text x="40" y="446">默认使用 Android 14 运行时，</text>
+    <text x="40" y="466">不必另装模拟器，不会擅自清除应用数据。</text>
   </g>
 
   <g font-family="Cascadia Mono, Consolas, monospace">
     <text x="40" y="514" font-size="10" letter-spacing="2.2" fill="#6B737C">SPEC</text>
     <g font-size="12">
       <text x="40" y="544" fill="#7B828B">系统镜像</text>
-      <text x="470" y="544" text-anchor="end" font-size="11.5" fill="#C7CED5">ANDROID 30 AOSP</text>
+      <text x="470" y="544" text-anchor="end" font-size="11.5" fill="#C7CED5">ANDROID 14 / GOOGLE PLAY</text>
       <path d="M40 554h430" stroke="#FFFFFF" stroke-opacity=".09"/>
       <text x="40" y="574" fill="#7B828B">音频</text>
-      <text x="470" y="574" text-anchor="end" font-size="11.5" fill="#C7CED5">双向 / 默认关闭</text>
+      <text x="470" y="574" text-anchor="end" font-size="11.5" fill="#C7CED5">播放默认开启 / 麦克风默认关闭</text>
       <path d="M40 584h430" stroke="#FFFFFF" stroke-opacity=".09"/>
       <text x="40" y="604" fill="#7B828B">窗口</text>
       <text x="470" y="604" text-anchor="end" font-size="11.5" fill="#C7CED5">原生 / 嵌入</text>
@@ -70,7 +70,7 @@
 
     <text x="530" y="458" font-family="Cascadia Mono, Consolas, monospace" font-size="10.5" fill="#8FB6D0">02</text>
     <text x="556" y="458" font-size="14" fill="#E7EAEC">准备运行时</text>
-    <text x="556" y="478" font-size="11.5" fill="#6F777F">首次写入，之后复用快照</text>
+    <text x="556" y="478" font-size="11.5" fill="#6F777F">首次部署，之后按需复用</text>
     <path d="M530 494h240" stroke="#FFFFFF" stroke-opacity=".09"/>
 
     <text x="530" y="532" font-family="Cascadia Mono, Consolas, monospace" font-size="10.5" fill="#8FB6D0">03</text>

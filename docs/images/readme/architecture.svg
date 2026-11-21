@@ -10,7 +10,7 @@
 
     <g font-family="Segoe UI, Microsoft YaHei, PingFang SC, Noto Sans SC, system-ui, sans-serif">
       <text x="48" y="46" fill="#6A727B" font-size="9.5" font-weight="700" letter-spacing="2.2">ARCHITECTURE</text>
-      <text x="1152" y="46" text-anchor="end" fill="#5C646C" font-family="Cascadia Mono, Consolas, monospace" font-size="9" letter-spacing="1">MAIN PROCESS / 4 LAYERS + HOST</text>
+      <text x="1152" y="46" text-anchor="end" fill="#5C646C" font-family="Cascadia Mono, Consolas, monospace" font-size="9" letter-spacing="1">ELECTRON / 4 LAYERS + HOST</text>
       <path d="M48 60h1104" stroke="#22262A" stroke-width="1"/>
 
       <!-- 层脊 -->

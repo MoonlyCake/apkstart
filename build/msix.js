@@ -99,6 +99,7 @@ const ASSETS = [
 ];
 
 const BG = [11, 12, 13];        // #0b0c0d 纯黑底
+const BG_HEX = `#${Buffer.from(BG).toString('hex')}`;
 const ACCENT = [255, 255, 255]; // 白色播放键
 
 /** 圆角矩形命中（用于在非正方形画布上画品牌图标） */
@@ -240,7 +241,7 @@ function manifest() {
       <uap:VisualElements
         DisplayName="${DISPLAY}"
         Description="${pkg.description || DISPLAY}"
-        BackgroundColor="#14161B"
+        BackgroundColor="${BG_HEX}"
         Square150x150Logo="Assets\\Square150x150Logo.png"
         Square44x44Logo="Assets\\Square44x44Logo.png">
         <!--
@@ -252,7 +253,7 @@ function manifest() {
         <uap:DefaultTile Wide310x150Logo="Assets\\Wide310x150Logo.png"
           Square71x71Logo="Assets\\Square71x71Logo.png"
           Square310x310Logo="Assets\\Square310x310Logo.png" />
-        <uap:SplashScreen Image="Assets\\SplashScreen.png" BackgroundColor="#14161B" />
+        <uap:SplashScreen Image="Assets\\SplashScreen.png" BackgroundColor="${BG_HEX}" />
       </uap:VisualElements>
     </Application>
   </Applications>
