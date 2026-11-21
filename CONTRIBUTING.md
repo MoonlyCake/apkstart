@@ -38,6 +38,7 @@ $env:APKSTART_TEST_APK="C:\path\to\any.apk"; npm test
 ```
 
 - 不要在测试里访问外网。需要网络行为的测试请起本地 `http` 服务（参考 `test/engine-test.js`）。
+- 自动化请用 `npm test`（或 `node --test <明确的测试文件>`），不要用裸 `node --test` 扫整个仓库。实机兼容诊断和桌面输入工具只在显式传 `--live` 时执行，不属于自动回归。
 
 ## PR 与版本号
 
