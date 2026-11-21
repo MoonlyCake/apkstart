@@ -8,6 +8,7 @@ const os = require('os');
 const path = require('path');
 const store = require('./store');
 const { parseApk } = require('./apk');
+const { isArmAbi, preferredArmAbi } = require('./native-abi');
 const { ZipFile } = require('./zip');
 const { parsePidList } = require('./adb');
 const { validPackageName } = require('./pkgname');
@@ -18,7 +19,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** APK 只有 ARM 原生库（国产 App 绝大多数如此） */
 function isArmOnly(meta) {
-  return !!(meta && meta.abis && meta.abis.length && !meta.abis.some((a) => /x86/i.test(a)));
+  return !!meta?.abis?.length && meta.abis.every(isArmAbi);
 }
 
 /**
@@ -36,6 +37,25 @@ async function runningHasArm(client) {
   } catch (_) {
     return null;
   }
+}
+
+async function installSingleApk(client, file, { meta, onLog = () => {}, assertReady = () => {} } = {}) {
+  if (meta === undefined) {
+    // 旧目录没有原生库清单；只在确实要由缓存重装时重新读取 APK。
+    try { meta = parseApk(file); } catch (_) { meta = null; }
+  }
+  const abi = await preferredArmAbi(meta, client);
+  assertReady();
+  if (abi) {
+    onLog(`x86 原生库仅包含少量通用文件，使用当前安卓支持的 ${abi} 库安装…`);
+    try { return await client.install(file, { abi, grantPermissions: false }); }
+    catch (error) {
+      if (!['NO_MATCHING_ABIS', 'ABI_OVERRIDE_UNSUPPORTED'].includes(error?.code)) throw error;
+      assertReady();
+      onLog(`当前安卓拒绝 ${abi} 架构覆盖，改用 Android 默认架构…`);
+    }
+  }
+  return client.install(file, { grantPermissions: false });
 }
 
 function baseApkRank(name) {
@@ -128,7 +148,7 @@ async function restoreMissingCachedApp(runtime, client, pkg, app, onLog, assertR
   onLog('应用文件缺失（快照与数据不一致），正在用本地备份自动重装…');
   try {
     if (!app.bundle) {
-      await client.install(app.apkPath, { grantPermissions: false });
+      await installSingleApk(client, app.apkPath, { onLog, assertReady });
     } else {
       const bundle = await parseBundle(app.apkPath);
       try {
@@ -225,7 +245,7 @@ class Installer {
           try { await rt.client.installMultiple(b.files); } finally { b.cleanup(); }
         } else {
           // eslint-disable-next-line no-await-in-loop
-          await rt.client.install(app.apkPath);
+          await installSingleApk(rt.client, app.apkPath);
         }
         onProgress({ stage: 'runtime', message: `正在恢复已装应用 ${app.label}…` });
       } catch (_) { /* 单个应用恢复失败不阻塞 */ }
@@ -283,14 +303,15 @@ class Installer {
 
   /** 安装本体 + 落盘元数据 + 快捷方式；失败时带一次自动修复重试 */
   async finishInstall(rt, meta, filePath, bundle, onProgress) {
-    const client = rt.client;
+    let client = rt.client;
     const existing = store.getApp(meta.package);
     // 装完之后旧 quickboot 快照里的磁盘状态就过期了，留着会导致「装好的应用重启后又不见了」
     try { this.runtime.emulator?.invalidateSnapshot(); } catch (_) { /* ignore */ }
     onProgress({ stage: 'install', message: existing ? '正在更新应用…' : '正在安装应用…' });
+    const onLog = (message) => onProgress({ stage: 'install', message });
     try {
       if (bundle) await client.installMultiple(bundle.files);
-      else await client.install(filePath);
+      else await installSingleApk(client, filePath, { meta, onLog });
     } catch (e) {
       // ABI 错误可触发一次兼容重试；镜像保护仍可拒绝会覆盖现有数据的切换。
       if (e.code === 'NO_MATCHING_ABIS') {
@@ -300,7 +321,8 @@ class Installer {
         onProgress({ stage: 'install', message: '已切换兼容镜像，正在重新安装…' });
         try {
           if (bundle) await rt2.client.installMultiple(bundle.files);
-          else await rt2.client.install(filePath);
+          else await installSingleApk(rt2.client, filePath, { meta, onLog });
+          client = rt2.client;
         } catch (e2) {
           // 已经切到兼容镜像仍失败：这次必须说实话，别再说「正在重试」。
           const raw2 = (e2 && e2.message) || String(e2 || '');

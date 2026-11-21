@@ -19,6 +19,7 @@ const { Provisioner } = require('./provision');
 const doctor = require('./doctor');
 const drivers = require('./drivers');
 const userdata = require('./userdata');
+const { hasStockDataTemplate, stageBootPublicKey } = require('./emulator-boot-data');
 const audio = require('./audio-policy');
 const { adbEnvironment, resolveAdbPort } = require('./adb');
 const { AVD_NAME, readAvdOwner } = require('./runtime-ownership');
@@ -127,8 +128,9 @@ class EmulatorEngine {
   _configuredImage(avdDir = path.join(this.provisioner.paths().avdHome, `${AVD_NAME}.avd`)) {
     try {
       const config = fs.readFileSync(path.join(avdDir, 'config.ini'), 'utf8');
-      const tag = /^tag\.id=(.+)$/m.exec(config)?.[1].trim();
-      const image = /^image\.sysdir\.1=(.+)$/m.exec(config)?.[1].trim();
+      // Qt can write the same INI as `key = value` on shutdown.
+      const tag = /^[ \t]*tag\.id[ \t]*=(.+)$/m.exec(config)?.[1].trim();
+      const image = /^[ \t]*image\.sysdir\.1[ \t]*=(.+)$/m.exec(config)?.[1].trim();
       return { tag, id: doctor.imageIdentity(image) };
     } catch (error) {
       if (error.code === 'ENOENT') return null;
@@ -458,8 +460,7 @@ class EmulatorEngine {
     ].join('\n') + '\n';
     fs.writeFileSync(cfgPath, this._iniWithDrivers(cfg));
 
-    // /data 分区必须先「真的能用」，否则后面一切都是白等（见 ensureDataPartition 注释）
-    const data = this.ensureDataPartition(avdDir, dataMB);
+    const data = this._prepareBootData(avdDir, home, choice.dir, dataMB);
 
     return {
       home, avdDir, ini: path.join(home, `${AVD_NAME}.ini`), image: choice,
@@ -467,8 +468,22 @@ class EmulatorEngine {
     };
   }
 
+  _prepareBootData(avdDir, home, imageDir, dataMB) {
+    if (!this._hasUserData(avdDir)) {
+      try {
+        // 预先写空 ext4 会跳过官方初始化，导致全新的 Android 也不认识宿主公钥。
+        if (hasStockDataTemplate(imageDir) && this._stageBootPublicKey(home)) {
+          return { ok: true, deferred: true };
+        }
+      } catch (_) { /* 保留旧镜像兜底；授权失败仍由安卓界面确认 */ }
+    }
+    return this.ensureDataPartition(avdDir, dataMB);
+  }
+
+  _stageBootPublicKey(home) { return stageBootPublicKey(home, this.provisioner.adbPath()); }
+
   /**
-   * 保证 userdata 分区是一个**真正可用**的 ext4 —— 这是「点开应用 30 秒进桌面」的地基。
+   * 为没有官方初始化模板的旧镜像新建 ext4；仅就地扩容已有的裸 ext4。
    *
    * 为什么必须自己做（三条都是实测踩出来的）：
    *  1. 系统镜像包里的 userdata.img 是 1MB 全零占位，真正格式化靠 avdmanager 调 SDK 的
@@ -485,13 +500,18 @@ class EmulatorEngine {
     const emulatorExe = this.locate().emulatorExe;
     if (!emulatorExe || !fs.existsSync(emulatorExe)) return { ok: false, reason: 'no-emulator' };
     try { fs.mkdirSync(avdDir, { recursive: true }); } catch (_) { /* ignore */ }
-    const emuDir = path.dirname(emulatorExe);
     const img = path.join(avdDir, 'userdata-qemu.img');
     const wantBytes = Math.max(1024, Math.round(dataMB || 4096)) * 1024 * 1024;
-    let size = 0;
-    try { size = fs.statSync(img).size; } catch (_) { /* 不存在 */ }
+    const base = fs.lstatSync(img, { throwIfNoEntry: false });
+    const overlay = fs.lstatSync(`${img}.qcow2`, { throwIfNoEntry: false });
+    // 官方 userdata 可能由 QCOW2 管理；不能把未识别的文件当成损坏而重建。
+    if (overlay || (base && (!base.isFile() || !userdata.hasExt4Superblock(img)))
+      || (!base && this._hasUserData(avdDir))) {
+      return { ok: false, reason: 'existing-userdata', error: '已有数据盘不是可就地扩容的裸 ext4，未改动数据。' };
+    }
 
-    if (size > 0 && userdata.hasExt4Superblock(img)) {
+    if (base) {
+      const size = base.size;
       // 文件够大 + 文件系统也真的长到了这个大小，才算「不用动」。
       // 只看文件大小会漏掉一种真实故障：qemu-img 撑开了文件、resize2fs 却失败了，
       // 于是文件 6GB、安卓只有 64MB —— 用户看到的就是「装游戏说空间不足」。
@@ -514,12 +534,12 @@ class EmulatorEngine {
       }
     }
 
-    // 首次 / 旧版留下的全零占位 / 镜像损坏：全新造一个
+    // 只有缺少数据盘的旧镜像需要预格式化；排他创建保证不覆盖现有数据。
+    let created = false;
     try {
-      fs.rmSync(img, { force: true });
-      fs.rmSync(`${img}.qcow2`, { force: true });
       // 先不带 encrypt 位（老 e2fsck/resize2fs 才肯干活）
-      fs.writeFileSync(img, userdata.buildEmptyExt4({ sizeMB: 64, encrypt: false }));
+      fs.writeFileSync(img, userdata.buildEmptyExt4({ sizeMB: 64, encrypt: false }), { flag: 'wx' });
+      created = true;
       this._qemuImg('resize', img, wantBytes);
       this._resize2fs(img);
       userdata.setEncryptFlag(img);
@@ -527,9 +547,11 @@ class EmulatorEngine {
       return { ok: true, created: true, size: wantBytes };
     } catch (e) {
       // 尽力而为：哪怕扩容失败，也要把 encrypt 位补回去，让 FBE 能初始化（分区会偏小）
-      try { userdata.setEncryptFlag(img); } catch (_) { /* ignore */ }
-      this.log(`重建 userdata 失败：${e.message}`);
-      return { ok: false, created: true, error: e.message };
+      if (created) {
+        try { userdata.setEncryptFlag(img); } catch (_) { /* ignore */ }
+      }
+      this.log(`创建 userdata 失败：${e.message}`);
+      return { ok: false, created, error: e.message };
     }
   }
 

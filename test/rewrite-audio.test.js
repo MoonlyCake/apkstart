@@ -121,6 +121,26 @@ test('changing either audio direction invalidates quickboot but never user data'
   assert.equal(fs.readFileSync(userdata, 'utf8'), 'preserve installed applications');
 });
 
+test('emulator ini whitespace does not look like an image change when restarting for audio', (t) => {
+  const { emu, dir, ini } = testAvd(t);
+  prepare(emu, {});
+  const config = path.join(dir, 'config.ini');
+  const rewrite = (content) => content.replace(/^([^=\r\n]+)=/gm, (_, key) => `${key} = `);
+  fs.writeFileSync(config, rewrite(ini()));
+  const disk = path.join(dir, 'userdata-qemu.img');
+  const pristine = Buffer.from('installed data must survive restart');
+  fs.writeFileSync(disk, pristine);
+  assert.equal(prepare(emu, { hostMicrophone: true }).wipePending, false);
+  assert.match(ini(), /^hw\.audioInput=yes$/m);
+  assert.deepEqual(fs.readFileSync(disk), pristine);
+
+  const differentImage = rewrite(ini().replace('system-images/android-34/', 'system-images/android-30/'));
+  fs.writeFileSync(config, differentImage);
+  assert.throws(() => prepare(emu, {}), { code: 'AVD_IMAGE_CHANGE_REQUIRES_RESET' });
+  assert.equal(ini(), differentImage);
+  assert.deepEqual(fs.readFileSync(disk), pristine);
+});
+
 test('a locked stale snapshot is not loaded or relabeled as current', (t) => {
   const { emu, dir } = testAvd(t);
   prepare(emu, {});

@@ -11,6 +11,7 @@ const crypto = require('crypto');
 const { performance } = require('node:perf_hooks');
 const store = require('./store');
 const { autoRotateSetting } = require('./orientation');
+const { isArmAbi } = require('./native-abi');
 
 /**
  * 镜像内「自动旋转」开关要写进 guest 的值（'1' 开 / '0' 关）。
@@ -483,17 +484,19 @@ class AdbClient {
    *  - adb 版本不认该参数 / 中文路径 / 传输错误时自动换写法重试；
    *  - NO_MATCHING_ABIS 抛带 code 的错误，由上层判断能否安全重试。
    */
-  async install(apkPath, { grantPermissions = false } = {}) {
+  async install(apkPath, { grantPermissions = false, abi } = {}) {
+    if (abi != null && !isArmAbi(abi)) throw new Error('无效的 ARM 安装架构');
     if (!fs.existsSync(apkPath)) throw new Error(`APK 不存在: ${apkPath}`);
     const staged = stageApk(apkPath);
     const file = staged.path;
+    const architecture = abi ? ['--abi', abi] : [];
     const variants = [
       // 仅显式调用方可请求 -g；普通安装让应用通过 Android 权限弹窗询问用户。
-      ...(grantPermissions ? [['install', '-r', '-t', '-g', '--bypass-low-target-sdk-block', file]] : []),
-      ['install', '-r', '-t', '--bypass-low-target-sdk-block', file],
-      ['install', '-r', '-t', file],
-      ['install', '-r', file],
-    ];
+      ...(grantPermissions ? [['-r', '-t', '-g', '--bypass-low-target-sdk-block']] : []),
+      ['-r', '-t', '--bypass-low-target-sdk-block'],
+      ['-r', '-t'],
+      ['-r'],
+    ].map((flags) => ['install', ...flags, ...architecture, file]);
     let last = '';
     let timeout = 240000;
     try { timeout = installTimeoutMs(fs.statSync(file).size); } catch (_) { /* 取不到大小就用默认值 */ }
@@ -517,7 +520,12 @@ class AdbClient {
             err.raw = raw;
             throw err;
           }
-          // 老 adb 不认新参数 / 测试包标记 → 换一种写法
+          if (abi && /(?:unknown|unrecognized|unsupported)\s+option\s*:?\s*['"]?--abi(?=[\s'"]|$)/i.test(raw)) {
+            const err = new Error('当前 Android 不支持指定安装架构', { cause: e });
+            err.code = 'ABI_OVERRIDE_UNSUPPORTED';
+            throw err;
+          }
+          // 老 adb 不认其它新参数 / 测试包标记 → 换一种写法；不在此偷偷撤掉 ABI。
           if (/Unknown option|unrecognized option|Unknown command/i.test(raw)) continue;
           if (tag === 'INSTALL_FAILED_TEST_ONLY' || tag === 'INSTALL_FAILED_DEPRECATED_SDK_VERSION') continue;
           // 传输类错误（设备掉线、adb server 重启）重试一次

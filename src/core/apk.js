@@ -8,6 +8,7 @@ const { ZipFile } = require('./zip');
 const { parseAxml, attr, attrValue, children } = require('./axml');
 const { ResTable } = require('./arsc');
 const { validPackageName } = require('./pkgname');
+const { nativeLibraries } = require('./native-abi');
 
 const LAUNCHER_ACTIONS = ['android.intent.action.MAIN'];
 const LAUNCHER_CATS = ['android.intent.category.LAUNCHER'];
@@ -253,11 +254,13 @@ function parseApkZip(zip, filePath, stat) {
   }
   if (!icon) icon = pickIconFromZip(zip);
 
-  // ---- ABI（判断 x86 运行时能否直接跑 ARM 原生库）----
-  const abis = [...new Set(zip.names()
-    .filter((n) => n.startsWith('lib/'))
-    .map((n) => n.split('/')[1])
-    .filter(Boolean))];
+  // 只读取 ZIP 目录，不为判断 ABI 解压原生库。
+  const nativeLibs = nativeLibraries(zip.names());
+  const abis = Object.keys(nativeLibs);
+  const explicitAbiPolicy = ['multiArch', 'use32bitAbi'].some((name) => {
+    const setting = attr(app, name);
+    return setting && ![false, 'false', 0, '0'].includes(setting.typed);
+  });
 
   return {
     ok: true,
@@ -271,6 +274,8 @@ function parseApkZip(zip, filePath, stat) {
     targetSdk,
     launchActivity,
     abis,
+    nativeLibs,
+    explicitAbiPolicy,
     orientation,
     iconPng: icon ? icon.data : null,
     iconFile: icon ? icon.file : null,
