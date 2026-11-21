@@ -74,7 +74,8 @@ function pointInTriangle(px, py, ax, ay, bx, by, cx, cy) {
 }
 
 /**
- * 绘制 ApkStart 图标：深色圆角方块 + 安卓绿启动三角
+ * 绘制 ApkStart 图标：直角钢蓝方块 + 白色播放三角
+ * 与 build/logo.html 的主标同源（同一比例、同一渐变方向）。
  * @param {number} size 输出边长
  */
 function drawAppIcon(size = 256) {
@@ -83,16 +84,18 @@ function drawAppIcon(size = 256) {
   const acc = new Float32Array(size * size * 4); // 累积
 
   const pad = S * 0.06;
-  const box = { x: pad, y: pad, w: S - pad * 2, h: S - pad * 2, r: S * 0.24 };
+  const box = { x: pad, y: pad, w: S - pad * 2, h: S - pad * 2, r: 0 };
 
   // 三角（播放键）
-  const tW = S * 0.30;
-  const tH = S * 0.34;
-  const tcx = S * 0.5 + S * 0.02;
+  // 小尺寸放大三角，16px 下仍能看清
+  const boost = size <= 48 ? 1.22 : 1;
+  const tW = S * 0.277 * boost;
+  const tH = S * 0.316 * boost;
+  const tcx = S * 0.557;   // 播放键的光学重心略偏右
   const tcy = S * 0.5;
-  const ax = tcx - tW * 0.38, ay = tcy - tH / 2;
-  const bx = tcx - tW * 0.38, by = tcy + tH / 2;
-  const cx2 = tcx + tW * 0.62, cy2 = tcy;
+  const ax = tcx - tW / 2, ay = tcy - tH / 2;
+  const bx = tcx - tW / 2, by = tcy + tH / 2;
+  const cx2 = tcx + tW / 2, cy2 = tcy;
 
   for (let y = 0; y < S; y++) {
     for (let x = 0; x < S; x++) {
@@ -101,14 +104,14 @@ function drawAppIcon(size = 256) {
       const inBox = roundRectAlpha(box.x, box.y, box.w, box.h, box.r, px, py);
       if (!inBox) continue;
 
-      // 背景渐变（对角）
-      const t = (x / S) * 0.6 + (y / S) * 0.4;
-      let r = Math.round(20 + t * 14);
-      let g = Math.round(26 + t * 18);
-      let b = Math.round(33 + t * 24);
+      // 背景渐变：#6E93B2 → #152238（左上到右下）
+      const t = (x / S) * 0.55 + (y / S) * 0.45;
+      let r = Math.round(110 - t * 89);
+      let g = Math.round(147 - t * 113);
+      let b = Math.round(178 - t * 122);
 
       if (pointInTriangle(px, py, ax, ay, bx, by, cx2, cy2)) {
-        r = 61; g = 220; b = 132; // #3ddc84
+        r = 255; g = 255; b = 255;
       }
 
       const oy = Math.floor(y / SS);

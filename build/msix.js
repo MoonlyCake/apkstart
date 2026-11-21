@@ -98,8 +98,8 @@ const ASSETS = [
   { file: 'SplashScreen.png', w: 620, h: 300 },
 ];
 
-const BG = [20, 22, 27];        // #14161b 深底
-const ACCENT = [61, 220, 132];  // #3ddc84 安卓绿
+const BG = [11, 12, 13];        // #0b0c0d 纯黑底
+const ACCENT = [255, 255, 255]; // 白色播放键
 
 /** 圆角矩形命中（用于在非正方形画布上画品牌图标） */
 function inRoundRect(px, py, x, y, w, h, r) {
@@ -110,22 +110,22 @@ function inRoundRect(px, py, x, y, w, h, r) {
   return dx * dx + dy * dy <= r * r;
 }
 
-/** 在 w×h 画布中央画一个边长 side 的品牌图标（圆角深块 + 绿色播放三角） */
+/** 在 w×h 画布中央画一个边长 side 的品牌图标（直角钢蓝方块 + 白色播放三角） */
 function composeIcon(w, h, side) {
   const rgba = new Uint8Array(w * h * 4);
   const ox = (w - side) / 2;
   const oy = (h - side) / 2;
   const pad = side * 0.06;
-  const box = { x: ox + pad, y: oy + pad, w: side - pad * 2, h: side - pad * 2, r: side * 0.24 };
-  const tW = side * 0.30;
-  const tH = side * 0.34;
-  const tcx = ox + side * 0.5 + side * 0.02;
+  const box = { x: ox + pad, y: oy + pad, w: side - pad * 2, h: side - pad * 2, r: 0 };
+  const tW = side * 0.277;
+  const tH = side * 0.316;
+  const tcx = ox + side * 0.557;
   const tcy = oy + side * 0.5;
-  const ax = tcx - tW * 0.38;
+  const ax = tcx - tW / 2;
   const ay = tcy - tH / 2;
-  const bx = tcx - tW * 0.38;
+  const bx = tcx - tW / 2;
   const by = tcy + tH / 2;
-  const cx2 = tcx + tW * 0.62;
+  const cx2 = tcx + tW / 2;
   const cy2 = tcy;
   const inTri = (px, py) => {
     const d1 = (px - bx) * (ay - by) - (ax - bx) * (py - by);
@@ -146,10 +146,10 @@ function composeIcon(w, h, side) {
       const px = x + 0.5;
       const py = y + 0.5;
       if (inRoundRect(px, py, box.x, box.y, box.w, box.h, box.r)) {
-        const t = (x / w) * 0.6 + (y / h) * 0.4;
-        r = Math.round(20 + t * 14);
-        g = Math.round(26 + t * 18);
-        b = Math.round(33 + t * 24);
+        const t = ((x - ox) / side) * 0.55 + ((y - oy) / side) * 0.45;
+        r = Math.round(110 - t * 89);
+        g = Math.round(147 - t * 113);
+        b = Math.round(178 - t * 122);
         if (inTri(px, py)) { r = ACCENT[0]; g = ACCENT[1]; b = ACCENT[2]; }
       }
       rgba[i] = r; rgba[i + 1] = g; rgba[i + 2] = b; rgba[i + 3] = a;
