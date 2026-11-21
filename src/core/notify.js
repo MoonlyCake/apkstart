@@ -2,7 +2,7 @@
 /**
  * 安卓通知 → Windows 原生通知。
  *
- * 模拟器没有把通知接到 Windows 上，这里按 2.5 秒轮询 `dumpsys notification`（只读、低开销），
+ * 模拟器没有把通知接到 Windows 上，默认每 2.5 秒检查一次 `dumpsys notification`，
  * 解析出「新出现的通知」再用 Electron 的 Notification 走系统通知中心 / 操作中心。
  * 点通知直接回到对应的应用窗口。
  */
@@ -73,29 +73,45 @@ class NotifyBridge {
     this.timer = null;
     this.running = false;
     this.primed = false;
+    this._polling = false;
+    this._cycle = 0;
+    this._baselineClient = null;
   }
 
-  start() {
+  start(intervalMs = POLL_MS) {
     if (this.timer) return;
     this.running = true;
-    this.timer = setInterval(() => this._tick(), POLL_MS);
+    this._cycle++;
+    this.timer = setInterval(() => this._tick(), Math.max(POLL_MS, intervalMs));
     if (this.timer.unref) this.timer.unref();
     this._tick();
   }
 
   stop() {
     this.running = false;
+    this._cycle++;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
   }
 
   async _tick() {
-    if (!this.running) return;
-    let client = null;
+    // Guest dumps can outlast the timer interval when Android is busy. Do not
+    // queue additional binder calls behind the one already in flight.
+    if (!this.running || this._polling) return;
+    const cycle = this._cycle;
+    this._polling = true;
     try {
-      client = this.getClient();
+      const client = this.getClient();
       if (!client || !(await client.isOnline())) return;
+      const current = () => this.running && this._cycle === cycle && this.getClient() === client;
+      if (!current()) return;
       const dump = await client.shell('dumpsys notification --noredact', { timeout: 12000 });
+      if (!current()) return;
+      if (this._baselineClient !== client) {
+        this._baselineClient = client;
+        this.seen.clear();
+        this.primed = false;
+      }
       const list = parseRecords(dump);
       if (!this.primed) {
         // 第一次只做基线，避免启动瞬间把历史通知全弹一遍
@@ -114,6 +130,7 @@ class NotifyBridge {
       if (this.seen.size > 500) this.seen = new Set([...this.seen].slice(-300));
       for (const n of fresh) this._show(n);
     } catch (_) { /* 运行时未就绪时忽略 */ }
+    finally { this._polling = false; }
   }
 
   _show(n) {

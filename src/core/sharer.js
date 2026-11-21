@@ -14,22 +14,30 @@ const quote = (value) => "'" + value.replace(/'/g, "'\\''") + "'";
 const same = (a, b) => a === b || (!!a && !!b && a.size === b.size && a.stamp === b.stamp);
 const isRecord = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
 
-function localFile(file) {
-  let st;
-  try { st = fs.lstatSync(file, { bigint: true }); }
-  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+function localStat(st) {
   if (!st.isFile()) throw new Error('目标不是普通文件');
   return { size: Number(st.size), stamp: st.mtimeNs + '|' + st.ctimeNs };
 }
 
-function localFiles(root, folder = root, files = new Map()) {
-  for (const entry of fs.readdirSync(folder, { withFileTypes: true })) {
+function localFile(file) {
+  let st;
+  try { st = fs.lstatSync(file, { bigint: true }); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  return localStat(st);
+}
+
+async function localFiles(root, folder = root, files = new Map()) {
+  // Full scans run while an Android window is in use. Keep directory IO off
+  // the main thread; the final, synchronous publication checks remain intact.
+  for (const entry of await fs.promises.readdir(folder, { withFileTypes: true })) {
     if (entry.name.startsWith('.')) continue;
     const full = path.join(folder, entry.name);
-    if (entry.isDirectory()) localFiles(root, full, files);
+    if (entry.isDirectory()) await localFiles(root, full, files);
     else if (entry.isFile()) {
-      const info = localFile(full);
-      if (info) files.set(path.relative(root, full).split(path.sep).join('/'), info);
+      let st;
+      try { st = await fs.promises.lstat(full, { bigint: true }); }
+      catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+      files.set(path.relative(root, full).split(path.sep).join('/'), localStat(st));
     }
   }
   return files;
@@ -157,10 +165,11 @@ class Sharer {
         ? new Map(Object.entries(state.value.entries)) : new Map();
 
       await guard();
-      fs.mkdirSync(dir, { recursive: true });
-      const root = fs.realpathSync(dir);
+      await fs.promises.mkdir(dir, { recursive: true });
+      const root = await fs.promises.realpath(dir);
+      await guard();
       await client.shell('mkdir -p ' + quote(remote));
-      const host = localFiles(root);
+      const host = await localFiles(root);
       const guest = await remoteFiles(client, remote);
       const names = new Set([...host.keys(), ...guest.keys()]);
       const count = new Map();

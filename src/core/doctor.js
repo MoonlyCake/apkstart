@@ -347,6 +347,28 @@ function planVariants(profile) {
   });
 }
 
+function planGpuRecovery(variants, { engine, emulatorVersion, platform = process.platform }) {
+  const [badVer, badGpu] = String(engine?.badGpu || '').split('|');
+  const bad = emulatorVersion && badVer === emulatorVersion ? badGpu : '';
+  // 旧记录只有版本号，即使没传实际参数也会写入，不能当成已重试。
+  const marker = `args|${emulatorVersion}`;
+  const windows = platform === 'win32';
+  const tried = windows && !!emulatorVersion && engine?.badGpuVulkanTried === marker;
+  const forceDisable = windows && engine?.hostVulkan === false;
+  const preferHost = forceDisable && engine?.gpuMode === 'host' && bad === 'host';
+  const retryIndex = windows && !forceDisable && bad === 'host' && !tried
+    ? variants.findIndex((v) => v.gpu === 'host') : -1;
+  const plans = variants.map((v, i) => {
+    if (v.gpu !== 'host' || (!forceDisable && !tried && i !== retryIndex)) return v;
+    return { ...v, disableVulkan: true, vulkanRetryMarker: i === retryIndex ? marker : '', label: `${v.label}（关闭 Vulkan）` };
+  });
+  if (bad && retryIndex < 0 && !preferHost) {
+    const rank = (v) => (v.gpu === bad ? 1 : 0);
+    plans.sort((a, b) => rank(a) - rank(b));
+  }
+  return plans;
+}
+
 /** 检测一对空闲端口（emulator console + adb 注册端口必须相邻偶数/奇数） */
 function isPortFree(port) {
   return new Promise((resolve) => {
@@ -582,7 +604,7 @@ function vcRedistOk() {
 
 module.exports = {
   hostInfo, freeDiskMB, isAsciiPath, shortPath, lcdFor, liteProfile,
-  versionNumbers, gpuCandidates, detectGpuVendor, chooseProfile, planVariants,
+  versionNumbers, gpuCandidates, detectGpuVendor, chooseProfile, planVariants, planGpuRecovery,
   overridesFromSettings, autoProfile,
   freePortPair, snapshotKey, imageIdentity,
   diagnose, describeProfile, writeReport, vcRedistOk,

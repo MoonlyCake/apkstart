@@ -990,12 +990,14 @@ class AdbClient {
    *  - 收起锁屏，避免开机后停在锁屏挡住应用；
    *  - 隐藏状态栏（保留底部导航键，鼠标不在手边时还能点返回/主页）；
    *  - 关掉系统动画，低配机器上体感差别非常大。
-   * 全部是 settings 级命令，一次几百毫秒，重复调用无害。
+   * 恢复旧版休眠状态并设置前台显示；在一次 shell 调用内完成。
    */
   async prepareForeground() {
     // 以前是 7 条命令串行发，每条都要新起一个 adb 进程（Windows 上 150~250ms），
     // 合计 1~1.7 秒，全压在「点开应用」的等待里。合成一条 shell 后只剩一次往返。
     const cmds = [
+      // 清掉旧版在上一次关闭应用时留下的强制 Doze，不另起 ADB 进程。
+      'dumpsys deviceidle unforce 2>/dev/null || true',
       'wm dismiss-keyguard',
       'settings put global policy_control immersive.status=*',
       'settings put secure immersive_mode_confirmations confirmed',

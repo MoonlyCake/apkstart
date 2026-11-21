@@ -848,10 +848,10 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     }
   });
 
-  await test('容器停放：清后台 + Android idle，且状态机覆盖多窗口/最后关闭', () => {
+  await test('容器停放：清后台但不强制休眠，且状态机覆盖多窗口/最后关闭', () => {
     const idle = container.buildIdleCommands();
     assert(idle.some((c) => c.includes('am kill-all')), '停放要清后台缓存进程');
-    assert(idle.some((c) => c.includes('deviceidle force-idle')), '停放要让 Android 进 idle');
+    assert(!idle.some((c) => c.includes('deviceidle force-idle')), '停放不能强制 Android 进 idle');
     let s = container.nextSessionState([], 'open', 'a');
     assert(s.hasApp && !s.idle && s.foreground === 'a');
     s = container.nextSessionState(s.active, 'open', 'b');

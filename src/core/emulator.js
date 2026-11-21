@@ -623,7 +623,7 @@ class EmulatorEngine {
   buildArgs({
     headless = true, accel = 'auto', port = 5554,
     gpu = 'software', memoryMB = 2048, cores = 2,
-    snapshot = true, wipe = false, lcd = null,
+    snapshot = true, wipe = false, lcd = null, disableVulkan = false, coldBoot = false,
     audioPolicy = audio.resolve(this.settings?.engine),
   } = {}) {
     // 驱动可以固定渲染后端 / 强制软件模拟。放在最前面算进 gpu/accel，
@@ -632,6 +632,8 @@ class EmulatorEngine {
     const drvGpu = eff ? drivers.gpuModeToArg(eff.gpuMode) : '';
     if (drvGpu) gpu = drvGpu;
     if (eff && eff.forceTcg) accel = 'off';
+    const amdHost = gpu === 'host' && process.platform === 'win32' && doctor.detectGpuVendor() === 'amd';
+    const disableHostVulkan = gpu === 'host' && (disableVulkan || amdHost);
     const args = [
       '-avd', AVD_NAME,
       '-port', String(port),
@@ -642,12 +644,8 @@ class EmulatorEngine {
       // 主线程被卡住、永远不开机（日志表现为 Showing crashdialog to get consent）。
       '-crash-report-mode', 'disabled',
       '-gpu', gpu,
-      // AMD + emulator 37.x：host 后端的 Vulkan 初始化会失败，进程起来十几秒
-      // 后直接 exit 1，于是被记成「host 不可用」永久退回 swangle（软件渲染），
-      // 视频/滑动全都掉帧。关掉 Vulkan 让它走 GL，才能真的吃到硬件加速。
-      // 软件后端本来就不用 Vulkan，加上只会多一层不确定性，所以只对 host 生效。
-      ...(gpu === 'host' && process.platform === 'win32' && doctor.detectGpuVendor() === 'amd'
-        ? ['-feature', '-Vulkan'] : []),
+      // 已知有问题的 host 后端保留硬件渲染，只绕过 Vulkan；不修改软件兜底。
+      ...(disableHostVulkan ? ['-feature', '-Vulkan'] : []),
       '-memory', String(memoryMB),
       '-cores', String(cores),
     ];
@@ -706,7 +704,7 @@ class EmulatorEngine {
     } else if (snapshot !== false) {
       args.push('-snapshot', SNAPSHOT_NAME);
       // 网络自愈要求这次冷启动：快照可能是在「没网」时存的，恢复出来依旧没网。
-      if (!this.hasSnapshot() || this._coldBoot) args.push('-no-snapshot-load');
+      if (!this.hasSnapshot() || this._coldBoot || coldBoot) args.push('-no-snapshot-load');
     } else {
       args.push('-no-snapshot');
     }
@@ -718,7 +716,11 @@ class EmulatorEngine {
     for (const a of ((eff && eff.args) || [])) {
       if (a.flag === '-gpu' || a.flag === '-accel' || audio.isAudioDriverArg(a.flag, a.value)) continue;
       if (a.flag === '-qemu') qemuArg = a.value;
-      else if (a.value === '') args.push(a.flag);
+      else if (a.flag === '-feature' && disableHostVulkan) {
+        // 补丁的其它 feature 仍保留，但不能反向覆盖这次 Vulkan 恢复策略。
+        const value = a.value.split(',').filter((name) => !/^-?Vulkan$/i.test(name)).join(',');
+        if (value) args.push(a.flag, value);
+      } else if (a.value === '') args.push(a.flag);
       else args.push(a.flag, a.value);
     }
     // -qemu 将剩余参数全部交给 QEMU，必须放在 emulator 参数之后。
@@ -734,7 +736,9 @@ class EmulatorEngine {
       headless, accel: plan.accel, port: plan.port, gpu: plan.gpu,
       memoryMB: plan.memoryMB, cores: plan.cores,
       snapshot: plan.snapshot, wipe: plan.wipe, lcd: plan.lcd,
-      audioPolicy: plan.audioPolicy,
+      audioPolicy: plan.audioPolicy, disableVulkan: plan.disableVulkan,
+      // 第一次验证新渲染参数，不加载可能由失败后端生成的旧快照。
+      coldBoot: !!plan.vulkanRetryMarker,
     });
     this._logWrite(logFile, `\n--- ${new Date().toISOString()} ${plan.label} ---\n${loc.emulatorExe} ${args.join(' ')}\n`);
 
@@ -1084,26 +1088,10 @@ class EmulatorEngine {
       }
     }
 
-    // 记住「上次拉起就崩」的 GPU 后端，下次把它排到最后。
-    // 实测：AMD Radeon 780M 上 `-gpu host` 能通过 emulator 自己的硬件检查，
-    // 但 VM 起来十几秒后进程直接 exit 1（日志里只有 "AEHD is operational"），
-    // 每次都要白等 20 多秒再退到 swangle。key 里带上 emulator 版本，
-    // 升级运行时后自动重新给它一次机会。
-    const badGpuKey = this.settings.engine.badGpu || '';
-    const [badVer, badGpu] = badGpuKey.includes('|') ? badGpuKey.split('|') : ['', ''];
-    // 关掉 Vulkan 之后 host 有机会真的可用：每个 emulator 版本重试一次，
-    // 免得老记录把用户永久钉在软件渲染上（那是「一直卡」的根因之一）。
-    const vulkanRetried = String(this.settings.engine.badGpuVulkanTried || '');
-    const retryHostWithoutVulkan = badGpu === 'host' && badVer === emuVersion && vulkanRetried !== emuVersion;
-    if (retryHostWithoutVulkan) {
-      store.saveSettings({ engine: { badGpu: '', badGpuVulkanTried: emuVersion } });
-      onLog('上次 host 渲染崩溃疑似 Vulkan 导致，本次以 -feature -Vulkan 重试硬件加速');
-    } else if (badGpu && badVer === emuVersion) {
-      const rank = (v) => (v.gpu === badGpu ? 1 : 0);
-      variants.sort((a, b) => rank(a) - rank(b));
-      if (variants[0] && variants[0].gpu === badGpu && variants.length > 1) {
-        onLog(`上次 ${badGpu} 渲染后端启动即崩溃，本次改用 ${variants[1].gpu} 先试`);
-      }
+    const firstGpu = variants[0]?.gpu;
+    variants = doctor.planGpuRecovery(variants, { engine: s.engine, emulatorVersion: emuVersion });
+    if (firstGpu !== variants[0]?.gpu) {
+      onLog(`上次 ${firstGpu} 渲染后端启动失败，本次改用 ${variants[0].gpu} 先试`);
     }
 
     const logFile = path.join(store.DATA_DIR, 'logs', 'emulator.log');
@@ -1118,6 +1106,7 @@ class EmulatorEngine {
     this.lastDiagnosis = null;
     let lastError = '';
     let authColdRetried = false;
+    let recordedVulkanRetry = false;
 
     for (let i = 0; i < variants.length; i += 1) {
       const base = variants[i];
@@ -1148,7 +1137,14 @@ class EmulatorEngine {
       }
       this._assertAvdWritable();
       // _coldBoot 只对这次 spawn 生效，避免之后每次开机都退化成长时间冷启动
-      const { args } = this.spawnOnce({ ...plan, wipe: plan.wipe || avd.wipePending }, { headless, onLog, logFile });
+      const { proc, args } = this.spawnOnce({ ...plan, wipe: plan.wipe || avd.wipePending }, { headless, onLog, logFile });
+      const hostWithoutVulkan = args[args.indexOf('-gpu') + 1] === 'host'
+        && args.some((arg, i) => arg === '-feature' && args[i + 1] === '-Vulkan');
+      if (proc?.pid && hostWithoutVulkan && plan.vulkanRetryMarker && !recordedVulkanRetry) {
+        store.saveSettings({ engine: { badGpuVulkanTried: plan.vulkanRetryMarker } });
+        recordedVulkanRetry = true;
+        onLog('已用 -gpu host -feature -Vulkan 重试硬件渲染');
+      }
       const mayLoadSnapshot = args.includes('-snapshot') && !args.includes('-no-snapshot-load');
       this._coldBoot = false;
 
@@ -1239,6 +1235,10 @@ class EmulatorEngine {
 
       if (ok) {
         const bootMs = Date.now() - started;
+        if (plan.disableVulkan && hostWithoutVulkan && this.settings.engine.badGpu === `${emuVersion}|host`) {
+          // 确认 Android 启动后才撤掉黑名单；后续继续沿用同版本的无 Vulkan 参数。
+          store.saveSettings({ engine: { badGpu: '' } });
+        }
         // 这一次真的起来了：清掉上次的失败记录，避免以后「诊断」翻出旧账
         this.lastDiagnosis = null;
         this._clearFailure();

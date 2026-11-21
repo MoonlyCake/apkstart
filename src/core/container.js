@@ -112,13 +112,12 @@ function buildSessionCommands({
 }
 
 /**
- * 关掉最后一个 App 后让容器「空转但不吃资源」。
- * 不关机、不销毁 AVD：下次打开还是秒进，只是先把 CPU/内存让给 Windows。
+ * 关掉最后一个 App 后释放后台进程，不关机、不销毁 AVD。
+ * 让 Android 自行管理休眠；强制 Doze 会拖住下次打开时的联网。
  */
 function buildIdleCommands({ deep = false } = {}) {
   const commands = [
     'am kill-all 2>/dev/null || true',
-    'dumpsys deviceidle force-idle 2>/dev/null || true',
   ];
   if (deep) commands.push('settings put global restricted_background_data 1 2>/dev/null || true');
   return commands;
