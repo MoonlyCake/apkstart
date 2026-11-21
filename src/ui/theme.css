@@ -1,424 +1,733 @@
 /* ============================================================================
- * theme.css —— 全局视觉刷新（在 style.css 之后加载，只做覆盖与增强）
+ * theme.css —— 全局视觉主题（在 style.css 之后加载，只做覆盖与增强）
  *
- * 设计目标：更"安卓运行器"的气质 —— 深绿品牌色 + 干净的浅色面板 + 圆润的卡片，
- * 同时把启动时的欢迎卡做成一整套统一语言。
+ * 语言：纯黑纸面 + 发丝线 + 白字 + 一张冷钢蓝。
+ * 参考的是黑白摄影集的做法：只有黑、白，和一个从照片里取出来的灰蓝。
+ * 不用渐变、不用圆角、不用彩色投影；层次靠 1px 线、留白、字重。
  * ========================================================================== */
 
 :root {
-  /* 品牌：翡翠绿 → 青绿渐变 */
-  --brand: #0f9d63;
-  --brand-dark: #0b7d4f;
-  --brand-2: #12b886;
-  --brand-soft: #e8f8f0;
-  --brand-ink: #075c3a;
+  /* 表面：几乎纯黑，卡片只比底色亮一档 */
+  --bg: #0b0c0d;
+  --bg-2: #08090a;
+  --panel: #101214;
+  --panel-2: #15181b;
 
-  --bg: #f4f7f5;
-  --bg-2: #eef3f0;
-  --panel: #ffffff;
-  --panel-2: #fafcfb;
-  --line: #e3e9e5;
-  --line-strong: #cfd8d2;
-  --text: #14201a;
-  --text-2: #3d4a44;
-  --muted: #6b7a72;
-  --faint: #93a19a;
-  --danger: #d92d20;
+  /* 线：半透明白 */
+  --line: rgba(255, 255, 255, .1);
+  --line-strong: rgba(255, 255, 255, .19);
 
-  --shadow-sm: 0 1px 2px rgba(14, 32, 24, .05);
-  --shadow-md: 0 10px 26px rgba(14, 32, 24, .09);
-  --shadow-lg: 0 24px 60px rgba(14, 32, 24, .16);
+  /* 字 */
+  --text: #f2f4f5;
+  --text-2: #c3c9cf;
+  --muted: #8a929b;
+  --faint: #616972;
 
-  --r-sm: 9px;
-  --r-md: 14px;
-  --r-lg: 20px;
+  /* 品牌：从冷蓝照片里取的钢蓝，只做标记，不做大面积填充 */
+  --brand: #8fb6d0;
+  --brand-dark: #6e97b4;
+  --brand-soft: rgba(143, 182, 208, .12);
+  --brand-grad: #edeff1;
+  --danger: #e2705f;
 
-  --ring: 0 0 0 3px rgba(15, 157, 99, .16);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, .45);
+  --shadow-md: 0 12px 34px rgba(0, 0, 0, .5);
+  --shadow-lg: 0 30px 80px rgba(0, 0, 0, .62);
+
+  /* 全站直角 */
+  --r-sm: 0px;
+  --r-md: 0px;
+  --r-lg: 0px;
+
+  --ring: 0 0 0 1px rgba(143, 182, 208, .55);
+  --mono: "Cascadia Mono", "Consolas", "Consolas Alt", monospace;
+
+  /* 让浏览器原生控件（下拉、复选、滚动条）跟着走深色 */
+  color-scheme: dark;
+  scrollbar-color: rgba(255, 255, 255, .18) transparent;
+}
+
+@font-face {
+  font-family: "ApkStart Display";
+  src: url("assets/fonts/ApkStartDisplay.ttf") format("truetype");
+  font-weight: 400;
+  font-display: swap;
 }
 
 html, body {
-  background:
-    radial-gradient(1200px 420px at 12% -12%, rgba(18, 184, 134, .10), transparent 62%),
-    radial-gradient(900px 380px at 100% 0%, rgba(15, 157, 99, .07), transparent 58%),
-    var(--bg);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  letter-spacing: .1px;
 }
 
-/* ---------------- 标题栏：玻璃质感 ---------------- */
+::selection { background: rgba(143, 182, 208, .32); }
+
+/* ---------------- 标题栏 ---------------- */
 
 .titlebar {
   height: 46px;
   flex: 0 0 46px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, .82), rgba(255, 255, 255, .46));
-  border-bottom: 1px solid rgba(20, 32, 26, .07);
-  backdrop-filter: saturate(1.4) blur(14px);
+  padding: 0 12px 0 16px;
+  background: transparent;
+  border-bottom: 1px solid var(--line);
 }
 
-.logo img,
-.logo svg {
-  width: 22px; height: 22px;
-  border-radius: 7px;
-  display: block;
-  box-shadow: 0 2px 8px rgba(15, 157, 99, .28);
-}
-
+.brand { gap: 10px; }
+.logo svg { display: block; }
 .brand-name {
-  font-size: 14px;
-  font-weight: 700;
-  letter-spacing: .1px;
-  background: linear-gradient(92deg, #14201a, #2b6a4d);
-  -webkit-background-clip: text; background-clip: text; color: transparent;
+  font-family: "ApkStart Display", "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: .2px;
+  padding-top: 1px;
+}
+.brand-release {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .8px;
+  color: var(--faint);
 }
 
 .brand-tag {
-  border: 1px solid rgba(15, 157, 99, .16);
-  background: rgba(18, 184, 134, .09);
-  color: var(--brand-ink);
-  font-weight: 600;
-  transition: background .15s ease, transform .15s ease;
+  margin-left: 6px;
+  padding: 2px 7px;
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: .9px;
+  line-height: 15px;
 }
-.brand-tag:hover { background: rgba(18, 184, 134, .16); transform: translateY(-1px); }
+.brand-tag:hover { color: var(--text); border-color: rgba(255, 255, 255, .34); }
+.brand-tag.ok {
+  color: var(--brand);
+  border-color: rgba(143, 182, 208, .5);
+  background: transparent;
+}
 
 .icon-btn {
-  width: 32px; height: 32px;
-  border-radius: 10px;
-  transition: background .15s ease, color .15s ease, transform .12s ease;
+  width: 28px; height: 28px;
+  border: 1px solid transparent;
+  color: var(--muted);
+  background: transparent;
 }
-.icon-btn:hover { background: rgba(20, 32, 26, .06); color: var(--text); }
-.icon-btn:active { transform: scale(.95); }
+.icon-btn:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, .05);
+  border-color: var(--line);
+}
 
-/* ---------------- 搜索框 / 主按钮 ---------------- */
+/* ---------------- 工具条 ---------------- */
+
+.toolbar {
+  padding: 16px 16px 10px;
+  gap: 10px;
+  border-bottom: 1px solid var(--line);
+}
 
 .search {
-  border-radius: 12px;
+  height: 32px;
+  padding: 0 10px;
+  gap: 8px;
   border: 1px solid var(--line);
-  background: rgba(255, 255, 255, .9);
-  box-shadow: var(--shadow-sm);
-  transition: box-shadow .15s ease, border-color .15s ease, background .15s ease;
+  background: #0b0d0f;
+  color: var(--faint);
+  transition: border-color .15s;
 }
 .search:focus-within {
-  border-color: rgba(15, 157, 99, .45);
-  box-shadow: var(--ring);
-  background: #fff;
+  border-color: rgba(143, 182, 208, .6);
+  box-shadow: none;
 }
+.search input {
+  font-size: 12.5px;
+  color: var(--text);
+  background: transparent;
+}
+.search input::placeholder { color: var(--faint); letter-spacing: .2px; }
+
+/* ---------------- 按钮 ---------------- */
 
 .btn {
-  border-radius: 11px;
-  border: 1px solid var(--line-strong);
-  background: #fff;
-  box-shadow: var(--shadow-sm);
-  font-weight: 600;
-  transition: transform .12s ease, box-shadow .15s ease, background .15s ease, border-color .15s ease;
+  height: 30px;
+  padding: 0 13px;
+  gap: 6px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  font-weight: 550;
+  letter-spacing: .3px;
+  transition: background .14s, border-color .14s, color .14s;
 }
-.btn:hover { background: #fbfdfc; box-shadow: 0 2px 8px rgba(14, 32, 24, .08); }
-.btn:active { transform: translateY(1px) scale(.995); }
+.btn:active { transform: none; }
 
+/* 主按钮：白底黑字。整页只有这一处纯白块，用来指路。 */
 .btn.primary {
-  border: none;
-  color: #fff;
-  background: linear-gradient(180deg, var(--brand-2), var(--brand));
-  box-shadow: 0 1px 0 rgba(255, 255, 255, .22) inset, 0 6px 16px rgba(15, 157, 99, .28);
+  background: #edeff1;
+  color: #0b0c0d;
+  border-color: #edeff1;
+  font-weight: 650;
 }
-.btn.primary:hover {
-  background: linear-gradient(180deg, #16c68f, var(--brand-dark));
-  box-shadow: 0 1px 0 rgba(255, 255, 255, .22) inset, 0 8px 22px rgba(15, 157, 99, .34);
+.btn.primary:hover { background: #ffffff; border-color: #ffffff; }
+.btn.primary svg { stroke: #0b0c0d; }
+
+.btn.ghost {
+  background: transparent;
+  border-color: var(--line-strong);
+  color: var(--text-2);
 }
-.btn.primary:focus-visible { outline: none; box-shadow: var(--ring), 0 6px 16px rgba(15, 157, 99, .28); }
+.btn.ghost:hover {
+  border-color: rgba(255, 255, 255, .36);
+  background: rgba(255, 255, 255, .04);
+  color: var(--text);
+}
 
-.btn.ghost { background: rgba(255, 255, 255, .6); }
-.btn.ghost:hover { background: rgba(20, 32, 26, .05); }
+.btn.danger {
+  background: transparent;
+  border-color: rgba(226, 112, 95, .45);
+  color: var(--danger);
+}
+.btn.danger:hover { background: rgba(226, 112, 95, .1); border-color: var(--danger); }
 
-/* ---------------- 应用卡片 ---------------- */
+.btn.sm { height: 25px; padding: 0 9px; font-size: 11.5px; }
+.btn.lg { height: 36px; padding: 0 18px; font-size: 12.5px; }
+.btn[disabled], .btn:disabled { opacity: .4; pointer-events: none; }
 
-.grid { gap: 14px; }
+/* ---------------- 内容区 ---------------- */
+
+.content { padding: 14px 16px 18px; }
+.grid { gap: 10px; }
 
 .card {
-  border-radius: var(--r-lg);
+  background: var(--panel);
   border: 1px solid var(--line);
-  background: linear-gradient(180deg, #fff, #fdfefe);
-  box-shadow: var(--shadow-sm);
-  transition: transform .16s cubic-bezier(.2, .7, .2, 1), box-shadow .18s ease, border-color .16s ease;
+  padding: 15px 12px 12px;
+  transition: border-color .16s, background .16s;
 }
 .card:hover {
-  transform: translateY(-3px);
-  border-color: rgba(15, 157, 99, .28);
-  box-shadow: 0 14px 30px rgba(14, 32, 24, .12);
-}
-.card::after {
-  content: '';
-  position: absolute; inset: 0;
-  border-radius: inherit;
-  pointer-events: none;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .8);
+  background: #141719;
+  border-color: rgba(255, 255, 255, .26);
+  box-shadow: none;
+  transform: none;
 }
 
 .card .icon {
-  border-radius: 16px;
-  box-shadow: 0 6px 16px rgba(14, 32, 24, .14), inset 0 1px 0 rgba(255, 255, 255, .35);
-}
-
-.card .badge-run {
-  background: linear-gradient(180deg, var(--brand-2), var(--brand));
-  box-shadow: 0 2px 8px rgba(15, 157, 99, .4);
-}
-
-/* ---------------- 「添加应用」虚线卡片 ----------------
- * 应用少的时候网格下面是一大片空白，用户也不知道还能干什么。
- * 这块卡片把「拖 APK 进来」摆到眼前，同时把空白填掉。
- * 用虚线 + 弱化配色，让它看起来是「空位」而不是又一个已经装好的应用。 */
-
-.card-add {
-  background: transparent;
-  border: 1.5px dashed var(--line-strong);
+  width: 58px; height: 58px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
   box-shadow: none;
-  color: var(--muted);
-  justify-content: center;
-  min-height: 178px;
+  margin-bottom: 11px;
 }
-.card-add:hover {
-  border-color: rgba(15, 157, 99, .55);
-  border-style: dashed;
-  background: rgba(18, 184, 134, .05);
-  box-shadow: none;
-  color: var(--brand-dark);
-}
-.card-add:active { transform: translateY(0); }
-.card-add:focus-visible {
-  outline: none;
-  border-color: rgba(15, 157, 99, .6);
-  box-shadow: var(--ring);
-}
-
-.card-add .add-plus {
-  width: 52px; height: 52px;
-  margin-bottom: 10px;
-  border-radius: 16px;
-  display: grid; place-items: center;
+.card .name { font-size: 12.5px; font-weight: 550; }
+.card .meta {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: .3px;
   color: var(--faint);
-  background: rgba(20, 32, 26, .045);
-  transition: background .16s ease, color .16s ease, transform .16s ease;
+  margin-top: 4px;
 }
-.card-add:hover .add-plus {
+.card .badge-run {
+  background: var(--brand);
+  box-shadow: none;
+}
+.card .pin { color: var(--faint); }
+.card .open-hint {
+  margin-top: 11px;
+  height: 23px;
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  color: var(--text-2);
+  font-size: 11px;
+  letter-spacing: .4px;
+}
+.card:hover .open-hint { border-color: rgba(255, 255, 255, .3); color: var(--text); }
+
+/* 添加应用：虚线卡 */
+.card.add, .card-add {
+  background: transparent;
+  border: 1px dashed rgba(255, 255, 255, .18);
+  color: var(--faint);
+}
+.card.add:hover, .card-add:hover {
+  border-color: rgba(143, 182, 208, .55);
   color: var(--brand);
-  background: rgba(18, 184, 134, .14);
-  transform: translateY(-1px);
+  background: rgba(143, 182, 208, .04);
 }
-.card-add .name { font-weight: 600; }
-.card-add .meta { color: var(--faint); }
+
+/* ---------------- 空状态 ---------------- */
+
+.empty h2 { font-size: 19px; font-weight: 650; letter-spacing: .2px; margin: 14px 0 10px; }
+.empty p { color: var(--muted); font-size: 12.5px; line-height: 1.9; }
+.empty .btn { margin-top: 20px; }
+.empty-art { opacity: .8; }
+.hint { color: var(--faint) !important; font-family: var(--mono); font-size: 10px !important; letter-spacing: .6px; }
 
 /* ---------------- 状态栏 ---------------- */
 
 .statusbar {
-  border-top: 1px solid rgba(20, 32, 26, .06);
-  background: linear-gradient(180deg, rgba(255, 255, 255, .5), rgba(255, 255, 255, .82));
-  backdrop-filter: blur(10px);
+  flex: 0 0 30px;
+  padding: 0 16px;
+  border-top: 1px solid var(--line);
+  background: transparent;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: .7px;
+  color: #757d86;
+}
+.statusbar .sep { background: var(--line-strong); height: 10px; }
+.dot { width: 5px; height: 5px; background: #4a5158; }
+.dot.ok { background: var(--brand); box-shadow: none; }
+.dot.warn { background: #d9a441; box-shadow: none; }
+.dot.err { background: var(--danger); }
+.powered-link { color: var(--faint); font-size: 9.5px; }
+.powered-link:hover { color: var(--text); }
+
+/* ---------------- Toast ---------------- */
+
+.toast {
+  background: #14171a;
+  border: 1px solid var(--line-strong);
+  border-left: 2px solid var(--brand);
+  color: var(--text);
+  font-size: 12px;
+  box-shadow: var(--shadow-md);
+}
+.toast.err { border-left-color: var(--danger); }
+.toast.warn { border-left-color: #d9a441; }
+
+/* ---------------- 拖放层 ---------------- */
+
+.dropzone {
+  background: rgba(8, 9, 10, .9);
+  border: 1px dashed rgba(143, 182, 208, .55);
+  backdrop-filter: blur(3px);
+}
+.dropzone-inner { color: var(--brand); }
+
+/* ---------------- 右键菜单 ---------------- */
+
+.ctxmenu {
+  background: #121518;
+  border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow-md);
+  padding: 4px;
+}
+.ctxmenu button, .ctxmenu .item {
+  font-size: 12px;
+  color: var(--text-2);
+}
+.ctxmenu button:hover, .ctxmenu .item:hover {
+  background: rgba(255, 255, 255, .07);
+  color: var(--text);
 }
 
-.dot { box-shadow: 0 0 0 3px rgba(18, 184, 134, .14); }
+/* ---------------- 设置弹窗 ---------------- */
 
-/* 状态栏里的网络指示：绿灯=已联网，黄灯=虚拟机没网。
- * 这个坑很隐蔽（应用里只显示「网络错误」，看不出是虚拟机的事），所以放在最显眼处。 */
-.status-net::before {
-  content: '';
-  display: inline-block;
-  width: 6px; height: 6px;
-  margin-right: 5px;
-  border-radius: 50%;
-  vertical-align: 1px;
-  background: currentColor;
+.modal-mask {
+  background: rgba(4, 5, 6, .78);
+  backdrop-filter: blur(5px);
 }
-.status-net.ok { color: var(--brand-ink); }
-.status-net.ok::before { background: var(--brand); box-shadow: 0 0 0 3px rgba(18, 184, 134, .16); }
-.status-net.warn { color: #9a6b00; }
-.status-net.warn::before { background: #e0a100; box-shadow: 0 0 0 3px rgba(224, 161, 0, .16); }
-
-/* ---------------- 模态框 ---------------- */
-
-.modal-mask { backdrop-filter: blur(6px); background: rgba(12, 24, 19, .34); }
 
 .modal {
-  border-radius: 22px;
-  border: 1px solid rgba(255, 255, 255, .6);
+  background: #0e1012;
+  border: 1px solid var(--line-strong);
   box-shadow: var(--shadow-lg);
   overflow: hidden;
 }
 
 .modal-head {
-  background: linear-gradient(180deg, #fff, #f7faf8);
+  padding: 16px 18px;
   border-bottom: 1px solid var(--line);
+  background: transparent;
 }
+.modal-head h1, .modal-head .title, .modal-title {
+  font-family: "ApkStart Display", "Segoe UI", sans-serif;
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: .8px;
+  color: var(--text);
+}
+.modal-head .sub { color: var(--faint); font-size: 11px; }
 
-.group-title {
-  color: var(--brand-ink);
+.modal-body { background: transparent; }
+.modal-main { background: transparent; padding: 18px 20px 22px; }
+.modal-foot {
+  border-top: 1px solid var(--line);
+  background: #0a0b0c;
+  padding: 12px 18px;
+}
+.modal-foot .inline-note { color: var(--faint); }
+
+/* 左侧导航 */
+.set-nav {
+  width: 186px;
+  padding: 14px 10px;
+  border-right: 1px solid var(--line);
+  background: #0a0b0c;
+  gap: 1px;
+}
+.set-nav-item {
+  height: 30px;
+  padding: 0 12px;
+  color: var(--muted);
+  font-size: 12px;
   letter-spacing: .3px;
 }
-
-/* ---------------- 滚动条 ---------------- */
-
-::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-thumb {
-  background: rgba(20, 32, 26, .16);
-  border: 3px solid transparent;
-  border-radius: 999px;
-  background-clip: content-box;
+.set-nav-item:hover { background: rgba(255, 255, 255, .05); color: var(--text-2); }
+.set-nav-item.on {
+  background: rgba(255, 255, 255, .05) !important;
+  border-color: transparent !important;
+  color: var(--text) !important;
+  font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--brand);
 }
-::-webkit-scrollbar-thumb:hover { background: rgba(20, 32, 26, .28); background-clip: content-box; }
-::-webkit-scrollbar-track { background: transparent; }
-
-/* ============================================================================
- * 启动欢迎卡
- * ========================================================================== */
-
-.welcome-mask[hidden] { display: none; }
-
-.welcome-mask {
-  position: fixed; inset: 0; z-index: 90;
-  display: grid; place-items: center;
-  background: rgba(10, 22, 17, .38);
-  backdrop-filter: blur(8px);
-  animation: wl-fade .22s ease both;
+.set-nav-badge {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 9px;
+  padding: 0 4px;
 }
 
-.welcome {
-  position: relative;
-  width: 396px;
-  max-width: calc(100vw - 48px);
-  border-radius: 24px;
-  overflow: hidden;
-  background: #fff;
-  border: 1px solid rgba(255, 255, 255, .7);
-  box-shadow: 0 32px 80px rgba(8, 24, 18, .32);
-  animation: wl-pop .28s cubic-bezier(.2, .8, .2, 1) both;
+/* 分组与字段 */
+.group {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  padding: 16px 16px 14px;
+  margin-bottom: 12px;
 }
-
-@keyframes wl-fade { from { opacity: 0; } to { opacity: 1; } }
-@keyframes wl-pop {
-  from { opacity: 0; transform: translateY(14px) scale(.97); }
-  to { opacity: 1; transform: none; }
-}
-
-.welcome-hero {
-  position: relative;
-  padding: 30px 26px 24px;
-  text-align: center;
-  color: #eafff5;
-  background:
-    radial-gradient(120% 130% at 20% 0%, #16c68f 0%, #0f9d63 46%, #0a6f47 100%);
-  overflow: hidden;
-}
-
-/* 光晕 */
-.welcome-halo {
-  position: absolute; left: 50%; top: -120px;
-  width: 340px; height: 240px; transform: translateX(-50%);
-  background: radial-gradient(closest-side, rgba(255, 255, 255, .45), rgba(255, 255, 255, 0) 72%);
-  pointer-events: none;
-}
-.welcome-hero::after {
-  content: '';
-  position: absolute; inset: 0;
-  background-image: radial-gradient(rgba(255, 255, 255, .16) 1px, transparent 1.2px);
-  background-size: 22px 22px;
-  opacity: .35;
-  mask-image: radial-gradient(70% 70% at 50% 30%, #000 20%, transparent 76%);
-  -webkit-mask-image: radial-gradient(70% 70% at 50% 30%, #000 20%, transparent 76%);
-  pointer-events: none;
-}
-
-.welcome-badge {
-  position: relative;
-  width: 66px; height: 66px;
-  margin: 0 auto 14px;
-  border-radius: 20px;
-  display: grid; place-items: center;
-  background: rgba(255, 255, 255, .16);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .4), 0 10px 24px rgba(3, 40, 26, .3);
-  backdrop-filter: blur(6px);
-}
-.welcome-badge img,
-.welcome-badge svg {
-  width: 44px; height: 44px;
-  border-radius: 13px;
-  display: block;
-  box-shadow: 0 6px 16px rgba(3, 40, 26, .35);
-}
-
-.welcome-hi {
-  position: relative;
-  font-size: 20px;
-  font-weight: 750;
-  letter-spacing: .2px;
-  text-shadow: 0 1px 0 rgba(0, 0, 0, .12);
-}
-
-.welcome-sub {
-  position: relative;
-  margin-top: 6px;
-  font-size: 12.5px;
-  color: rgba(234, 255, 245, .82);
-}
-
-.welcome-body { padding: 18px 22px 6px; }
-
-.welcome-stats {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
+.group-title {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 1.8px;
+  color: var(--faint);
+  text-transform: uppercase;
+  padding-bottom: 10px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
   gap: 8px;
 }
-.welcome-stat {
-  border: 1px solid var(--line);
-  background: linear-gradient(180deg, #fbfdfc, #f5f9f7);
-  border-radius: 14px;
-  padding: 10px 8px;
-  text-align: center;
-}
-.welcome-stat b {
-  display: block;
-  font-size: 16px;
-  font-weight: 750;
-  color: var(--brand-ink);
-  line-height: 1.25;
-}
-.welcome-stat span {
-  display: block;
-  margin-top: 2px;
-  font-size: 11px;
-  color: var(--muted);
+.group-title::before {
+  content: "";
+  width: 5px; height: 5px;
+  background: var(--brand);
+  flex: none;
 }
 
-.welcome-tips { margin: 14px 0 4px; display: grid; gap: 8px; }
-.welcome-tip {
-  display: flex; align-items: flex-start; gap: 9px;
-  font-size: 12.5px;
-  color: var(--text-2);
-  line-height: 1.55;
-}
-.welcome-tip i {
-  flex: 0 0 auto;
-  width: 18px; height: 18px;
-  margin-top: 1px;
-  border-radius: 6px;
-  display: grid; place-items: center;
-  background: var(--brand-soft);
-  color: var(--brand-dark);
-  font-style: normal;
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.welcome-opt {
-  margin-top: 12px;
-  display: flex; align-items: center; gap: 8px;
+.field { padding: 9px 0; }
+.field > label {
   font-size: 12px;
-  color: var(--muted);
-  cursor: pointer;
-  user-select: none;
+  font-weight: 600;
+  color: var(--text-2);
+  letter-spacing: .2px;
 }
-.welcome-opt input { accent-color: var(--brand); width: 14px; height: 14px; }
+.sub, .field .sub {
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 1.75;
+  margin-top: 5px;
+}
+.inline-note { color: var(--faint); font-size: 11px; }
+.note { color: var(--muted); font-size: 12px; line-height: 1.8; }
+.row { gap: 8px; }
 
-.welcome-actions {
-  display: flex;
-  gap: 10px;
-  padding: 14px 22px 20px;
+/* 输入控件 */
+input[type="text"], input[type="number"], input[type="search"], select, textarea {
+  background: #0b0d0f;
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  height: 30px;
+  padding: 0 10px;
+  transition: border-color .14s;
 }
-.welcome-actions .btn { flex: 1; height: 40px; border-radius: 12px; font-size: 13.5px; }
-.welcome-actions .btn.ghost { flex: 0 0 auto; padding: 0 16px; }
+textarea { height: auto; padding: 8px 10px; line-height: 1.6; }
+input[type="text"]:focus, input[type="number"]:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: rgba(143, 182, 208, .6);
+  box-shadow: none;
+}
+input[readonly] { color: var(--muted); }
+select {
+  padding-right: 26px;
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 14px) 13px, calc(100% - 9px) 13px;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+
+input[type="checkbox"] { accent-color: #8fb6d0; }
+
+.modal-body::-webkit-scrollbar, .modal-main::-webkit-scrollbar, .set-nav::-webkit-scrollbar { width: 10px; }
+.modal-body::-webkit-scrollbar-thumb, .modal-main::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, .14);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+/* 开关：方轨方钮 */
+.switch {
+  appearance: none;
+  width: 36px; height: 18px;
+  background: #1a1e21;
+  border: 1px solid var(--line-strong);
+  position: relative;
+  cursor: pointer;
+  transition: background .16s, border-color .16s;
+  flex: none;
+}
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 1px; left: 1px;
+  width: 14px; height: 14px;
+  background: #77808a;
+  transition: transform .16s, background .16s;
+}
+.switch:checked {
+  background: rgba(143, 182, 208, .18);
+  border-color: var(--brand);
+}
+.switch:checked::after { transform: translateX(18px); background: var(--brand); }
+.switch::after { border-radius: 0 !important; }
+.switch:focus-visible { box-shadow: var(--ring); }
+
+/* 环境自检 / 驱动 / 调试列表 */
+.env-check, .drv-item, .dbg-item, .env-check-item, .setup-guide, .lab-notice, .guide-tip {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--text-2);
+}
+.env-check-item + .env-check-item, .drv-item + .drv-item { border-top: 1px solid var(--line); }
+.env-check-ok { color: var(--brand); }
+.drv-name, .dbg-group-title { color: var(--text); }
+.drv-meta, .drv-list, .dbg-list { color: var(--faint); font-family: var(--mono); font-size: 10.5px; }
+.drv-badge {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: .5px;
+  padding: 0 4px;
+}
+.drv-err { color: var(--danger); }
+.lab-notice { border-left: 2px solid #d9a441; color: var(--muted); }
+
+.status-chip {
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: .6px;
+}
+
+.update-bar { background: #1a1e21; overflow: hidden; }
+.update-bar > i { background: var(--brand); display: block; height: 100%; }
+
+/* 关于 */
+.about-box {
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  padding: 18px;
+  gap: 18px;
+}
+.about-logo {
+  border: 1px solid var(--line-strong);
+  background: transparent;
+}
+.about-name {
+  font-family: "ApkStart Display", "Segoe UI", sans-serif;
+  font-size: 13px;
+  font-weight: 400;
+  letter-spacing: .4px;
+}
+.about-ver {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .8px;
+  color: var(--faint);
+}
+.about-links { gap: 8px; }
+.about-links a {
+  color: var(--muted);
+  font-size: 11.5px;
+  text-decoration: none;
+  border-bottom: 1px solid var(--line-strong);
+  padding-bottom: 1px;
+}
+.about-links a:hover { color: var(--text); border-color: rgba(255, 255, 255, .4); }
+.about-credit {
+  margin: 12px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  color: var(--faint);
+  font-size: 11px;
+  letter-spacing: .3px;
+}
+.about-credit strong { color: var(--text); font-weight: 650; }
+.about-info .note {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  margin: 6px 0 12px;
+  color: var(--muted);
+}
+
+/* ---------------- 首次运行欢迎 ---------------- */
+
+.welcome {
+  background: #0e1012;
+  border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+.welcome-halo { background: transparent; }
+.welcome-badge { filter: none; }
+.welcome-hi { font-size: 22px; font-weight: 650; letter-spacing: .3px; }
+.welcome-sub { color: var(--muted); font-size: 12px; }
+.welcome-body { border-top: 1px solid var(--line); }
+.welcome-stats, .welcome-tips { color: var(--text-2); }
+.welcome-tips li, .welcome-stats .item {
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.welcome-opt { color: var(--faint); font-size: 11px; }
+.welcome-actions { border-top: 1px solid var(--line); }
+
+/* ---------------- 滚动条兜底 ---------------- */
+
+html, body, .modal-body, .modal-main, .content, .set-nav, .dbg-list {
+  scrollbar-color: rgba(255, 255, 255, .18) transparent;
+  scrollbar-width: thin;
+}
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, .14);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, .26); background-clip: padding-box; }
+
+/* ---------------- 旧组件的深色补丁 ----------------
+   style.css 里少数组件写死了浅色底或圆角，这里统一收口。 */
+
+.note {
+  background: #121518;
+  border: 1px solid var(--line);
+  padding: 8px 10px;
+  margin: 2px 0 12px;
+}
+.status-chip {
+  background: rgba(217, 164, 65, .12);
+  border: 1px solid rgba(217, 164, 65, .38);
+  color: #dfae62;
+}
+.status-chip.err {
+  background: rgba(226, 112, 95, .12);
+  border-color: rgba(226, 112, 95, .42);
+  color: #ef8b7d;
+}
+.drv-badge.hit { background: rgba(143, 182, 208, .14); color: #b6d2e3; }
+.guide-foot, .advanced-group { background: transparent; border-color: var(--line); }
+.step .idx { background: rgba(255, 255, 255, .06); color: var(--muted); }
+.step.busy .idx { background: rgba(217, 164, 65, .16); color: #dfae62; }
+.env-check-item.warn .ec-sev,
+.env-check-head .ec-count.warn,
+.pf-dot.warn,
+.dbg-item.warn .dbg-sev { background: #d9a441; color: #231a08; }
+.toast .bar { background: rgba(255, 255, 255, .1); }
+
+/* ---------------- 形状收口：全站直角 ----------------
+   参考图里没有任何圆角，这里把 style.css 遗留的圆角一次性拉平。 */
+
+.card,
+.card .icon,
+.card .fallback,
+.card .open-hint,
+.card .badge,
+.card .pin,
+.logo,
+.search,
+.btn,
+.brand-tag,
+.icon-btn,
+.modal,
+.modal-head,
+.modal-foot,
+.group,
+.note,
+.ctxmenu,
+.ctxmenu button,
+.ctxmenu .item,
+.set-nav-item,
+.set-nav-badge,
+.field input,
+.field select,
+.about-box,
+.about-logo,
+.status-chip,
+.drv-badge,
+.env-check,
+.drv-item,
+.dbg-item,
+.env-check-item,
+.setup-guide,
+.lab-notice,
+.guide-tip,
+.dropzone,
+.welcome,
+.toast,
+.step .idx,
+.empty-art,
+#grid .card {
+  border-radius: 0 !important;
+}
+
+/* 圆形的状态点、头像之类保留圆形，其余全部直角 */
+.dot, .badge-run, .pin-dot { border-radius: 0 !important; }
+
+/* ---------------- 浅色残留收口 ----------------
+   style.css 里还有几处写死的浅底小件，这里统一到黑底。 */
+
+.btn:hover {
+  background: rgba(255, 255, 255, .06);
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+.btn.primary:hover { background: #ffffff; border-color: #ffffff; color: #0b0c0d; }
+.btn.ghost:hover { background: rgba(255, 255, 255, .04); }
+.btn.danger:hover { background: rgba(226, 112, 95, .1); }
+
+.setup-hv {
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  color: var(--muted);
+}
+.step .tag {
+  background: rgba(255, 255, 255, .06);
+  color: var(--muted);
+}
+.step .tag.req {
+  background: rgba(226, 112, 95, .14);
+  color: #ef8b7d;
+}
+.step.done .idx { background: var(--brand); color: #0b0c0d; }
+.step .bar { background: rgba(255, 255, 255, .09); }
+.guide-list code, .guide-tip code, kbd {
+  background: #14171a;
+  border: 1px solid var(--line);
+  color: var(--text-2);
+}
+.drv-item.on { border-color: rgba(143, 182, 208, .45); }
+.drv-err { color: var(--danger); }

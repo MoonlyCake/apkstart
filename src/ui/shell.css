@@ -83,7 +83,7 @@ html, body {
   justify-content: center;
   gap: 22px;
   overflow: hidden;
-  background: radial-gradient(120% 100% at 50% 42%, #1a1d22 0%, #0d0e11 56%, #08090b 100%);
+  background: #0b0c0d;
   transition: opacity .55s cubic-bezier(.4, 0, .2, 1),
               transform .55s cubic-bezier(.4, 0, .2, 1),
               filter .55s cubic-bezier(.4, 0, .2, 1);
@@ -102,7 +102,7 @@ html, body {
   width: 68vmin; height: 68vmin;
   left: 50%; top: 44%;
   margin: -34vmin 0 0 -34vmin;
-  background: radial-gradient(circle, rgba(79, 140, 255, .10) 0%, rgba(122, 208, 255, .04) 38%, transparent 70%);
+  background: radial-gradient(circle, rgba(143, 182, 208, .08) 0%, rgba(143, 182, 208, .03) 38%, transparent 70%);
   filter: blur(28px);
   border-radius: 50%;
   animation: bootAura 6s ease-in-out infinite;
@@ -115,7 +115,7 @@ html, body {
   top: 50%; left: 50%;
   width: 132px; height: 132px;
   margin: -112px 0 0 -66px;
-  background: radial-gradient(circle, rgba(122, 208, 255, .22) 0%, rgba(79, 140, 255, .10) 45%, transparent 72%);
+  background: radial-gradient(circle, rgba(143, 182, 208, .16) 0%, rgba(143, 182, 208, .08) 45%, transparent 72%);
   filter: blur(18px);
   border-radius: 50%;
   animation: bootGlow 3.6s ease-in-out infinite;
@@ -156,7 +156,7 @@ html, body {
 .boot-bar i {
   display: block; height: 100%; width: 38%;
   border-radius: 2px;
-  background: linear-gradient(90deg, transparent, rgba(122, 208, 255, .95), transparent);
+  background: linear-gradient(90deg, transparent, rgba(143, 182, 208, .9), transparent);
   animation: bootSlide 1.6s cubic-bezier(.45, 0, .55, 1) infinite;
 }
 .boot-tip {

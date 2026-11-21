@@ -5,15 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ApkStart 产品使用手册与问题解决方案</title>
 <style>
-:root{--bg:#ffffff;--fg:#1f2328;--mut:#57606a;--line:#d0d7de;--code:#eff1f3;--accent:#0969da;--accent-soft:#ddf4ff;--warn:#9a6700;--warn-bg:#fff8c5;--head:#f6f8fa;--tbl:#f6f8fa}
+:root{--bg:#0b0c0d;--fg:#e6e9eb;--mut:#8a929b;--line:rgba(255,255,255,.13);--code:#14171a;--accent:#8fb6d0;--accent-soft:rgba(143,182,208,.14);--warn:#dfae62;--warn-bg:rgba(217,164,65,.1);--head:#0e1012;--tbl:#14171a}
 *{box-sizing:border-box}
 body{margin:0;font:16px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:var(--fg);background:var(--bg)}
 .wrap{display:flex;max-width:1180px;margin:0 auto}
 aside{position:sticky;top:0;height:100vh;overflow:auto;width:280px;flex:0 0 280px;border-right:1px solid var(--line);padding:24px 18px;background:var(--head)}
 aside h2{font-size:15px;margin:0 0 14px;letter-spacing:.5px}
-aside a{display:block;color:var(--mut);text-decoration:none;padding:3px 8px;border-radius:6px;font-size:13.5px;line-height:1.45}
+aside a{display:block;color:var(--mut);text-decoration:none;padding:3px 8px;border-radius:0;font-size:13.5px;line-height:1.45}
 aside a:hover{background:var(--accent-soft);color:var(--accent)}
-#tocSearch{width:100%;margin-bottom:12px;padding:7px 9px;border:1px solid var(--line);border-radius:6px;font:13px/1.4 inherit;background:#fff;color:var(--fg)}
+#tocSearch{width:100%;margin-bottom:12px;padding:7px 9px;border:1px solid var(--line);border-radius:0;font:13px/1.4 inherit;background:#0b0d0f;color:var(--fg)}
 #tocSearch:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
 .toc-l3{padding-left:22px!important;font-size:12.5px!important;color:#8c959f!important}
 main{flex:1;min-width:0;padding:40px 48px 80px}
@@ -23,10 +23,10 @@ h3{font-size:18px;margin:30px 0 12px;scroll-margin-top:16px}
 h4{font-size:16px;margin:22px 0 8px}
 p{margin:12px 0}
 a{color:var(--accent)}
-code{background:var(--code);padding:2px 6px;border-radius:6px;font:13.5px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace}
-pre{background:var(--code);padding:16px 18px;border-radius:8px;overflow:auto;border:1px solid var(--line)}
+code{background:var(--code);padding:2px 6px;border-radius:0;font:13.5px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace}
+pre{background:var(--code);padding:16px 18px;border-radius:0;overflow:auto;border:1px solid var(--line)}
 pre code{background:none;padding:0}
-blockquote{margin:16px 0;padding:10px 16px;border-left:4px solid var(--warn);background:var(--warn-bg);color:#633c01;border-radius:0 8px 8px 0}
+blockquote{margin:16px 0;padding:10px 16px;border-left:3px solid var(--warn);background:var(--warn-bg);color:#e8c88a}
 blockquote p{margin:0}
 ul,ol{margin:12px 0;padding-left:26px}
 li{margin:5px 0}
@@ -35,9 +35,9 @@ hr{border:0;border-top:1px solid var(--line);margin:28px 0}
 table{border-collapse:collapse;width:100%;font-size:14.5px}
 th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top}
 th{background:var(--tbl);font-weight:600;white-space:nowrap}
-tbody tr:nth-child(even){background:#fbfcfd}
+tbody tr:nth-child(even){background:#0e1012}
 .btnbar{position:fixed;right:22px;bottom:22px;display:flex;gap:8px}
-.btnbar button{border:1px solid var(--line);background:#fff;color:var(--fg);border-radius:8px;padding:9px 14px;font-size:13px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+.btnbar button{border:1px solid var(--line);background:#14171a;color:var(--fg);border-radius:0;padding:9px 14px;font-size:13px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.08)}
 .btnbar button:hover{border-color:var(--accent);color:var(--accent)}
 @media (max-width:880px){aside{display:none}main{padding:24px 20px 60px}h1{font-size:25px}}
 @media print{aside,.btnbar{display:none}main{padding:0;max-width:none}h2{page-break-after:avoid}table,pre,blockquote{page-break-inside:avoid}a{color:inherit;text-decoration:none}}
@@ -107,8 +107,8 @@ ApkStart.exe --launch &lt;包名&gt;
 <hr/>
 <h2 id="2-安装与首次启动">2. 安装与首次启动</h2>
 <h3 id="2-1-选择适合你的版本">2.1 选择适合你的版本</h3>
-<p>两个源内容一致，国内建议用 Gitee：</p>
-<ul><li>GitHub：<code>github.com/RoutineMiku/apkstart/releases</code></li><li>Gitee：<code>gitee.com/daily-miku/apkstart/releases</code>（国内直连快得多）</li></ul>
+<p>下载地址：</p>
+<ul><li>GitHub：<code>github.com/MoonlyCake/apkstart/releases</code></li></ul>
 <div class="tw"><table><thead><tr><th>形态</th><th>文件名</th><th>什么时候选</th></tr></thead><tbody><tr><td><strong>商店版</strong></td><td><code>ApkStart_&lt;四段版本&gt;_x64.msix</code></td><td>从 Microsoft Store 安装。内置完整运行时，装完不联网，更新交给商店</td></tr><tr><td><strong>完整便携版</strong></td><td><code>ApkStart-v*-win64-full.zip</code>（约 830 MB，解压 ~1.3 GB）</td><td>不想装、也不想等下载：解压即用，运行时全在包里</td></tr><tr><td><strong>安装版</strong></td><td><code>ApkStart-v*-Setup.exe</code>（约 1.3 GB）</td><td>想要桌面/开始菜单快捷方式和卸载项</td></tr><tr><td><strong>轻量便携版</strong></td><td><code>ApkStart-v*-win64-portable.zip</code>（96 MiB，解压 ~227 MB）</td><td>只想先试试，首次启动再联网下载运行时</td></tr></tbody></table></div>
 <blockquote>⚠️ <strong>务必用最新版（当前 0.6.3）</strong>。旧版（0.5.x 及更早）要么没有内置运行时、每次启动去找/下 1.5 GB 运行时，要么默认用嵌入窗口——这正是「很慢、打不开、出来一个带旋转按钮的窗口」的典型来源。如果你是从旧版升级，请确认桌面图标指向的是新版程序目录。</blockquote>
 <h3 id="2-2-首次启动会发生什么">2.2 首次启动会发生什么</h3>
@@ -253,9 +253,10 @@ ApkStart.exe --launch &lt;包名&gt;          直接启动应用（桌面快捷�
 <h2 id="9-获取帮助与反馈">9. 获取帮助与反馈</h2>
 <p>反馈问题时请附上三样东西，能大幅加快定位：</p>
 <ol><li><strong>诊断报告</strong>：设置 → 诊断与修复 → 导出诊断报告；</li><li><strong>app.log 最后 20 行</strong>：<code>%APPDATA%\ApkStart\logs\app.log</code>；</li><li><strong>你的版本与形态</strong>：如"商店版 0.6.3"或"完整便携版 0.6.3"。</li></ol>
-<ul><li>GitHub：&lt;https://github.com/RoutineMiku/apkstart&gt;（Issues / Releases）</li><li>Gitee：&lt;https://gitee.com/daily-miku/apkstart&gt;</li></ul>
+<ul><li>GitHub：&lt;https://github.com/MoonlyCake/apkstart&gt;（Issues / Releases）</li></ul>
 <hr/>
-<p>*本手册对应 v0.6.3，随版本更新。若界面文案与此处略有出入，以软件内实际显示为准。*</p>
+<p>*本手册随版本更新。若界面文案与此处略有出入，以软件内实际显示为准。*</p>
+<p>本分支由 <strong>MoonlyCake</strong> 维护，基于上游 MIT 授权继续开发。</p>
 </main>
 </div>
 <div class="btnbar"><button onclick="window.print()">打印 / 存为 PDF</button></div>

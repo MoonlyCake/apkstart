@@ -1,6 +1,13 @@
-/* ApkStart 开机动画 · 极简苹果风
-   大面积留白 + 柔和模糊光晕 + logo 缓慢呼吸 + 细腻淡入淡出。
+/* ApkStart 开机动画 · 纯黑纸面
+   大面积留白 + 一枚冷蓝方标 + logo 缓慢呼吸 + 细腻淡入淡出。
    所有循环动效只改 transform / opacity，blur 只作用在静态层，保证开机不卡。 */
+
+@font-face {
+  font-family: "ApkStart Display";
+  src: url("assets/fonts/ApkStartDisplay.ttf") format("truetype");
+  font-weight: 400;
+  font-display: swap;
+}
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -8,8 +15,8 @@ html, body {
   width: 100%; height: 100%;
   overflow: hidden;
   font-family: -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
-  background: #0b0c0e;
-  color: #e8eaed;
+  background: #0b0c0d;
+  color: #f2f4f5;
   -webkit-app-region: drag;   /* 整个窗口可拖动 */
   user-select: none;
 }
@@ -30,7 +37,7 @@ html, body {
   padding: clamp(6px, 3.33vh, 16px) clamp(10px, 4.58vw, 30px) clamp(6px, 4.17vh, 20px);
   position: relative;
   overflow: hidden;
-  background: radial-gradient(120% 100% at 50% 42%, #15181b 0%, #0d0e10 58%, #08090b 100%);
+  background: #0b0c0d;
   transition: opacity .55s cubic-bezier(.4, 0, .2, 1),
               transform .55s cubic-bezier(.4, 0, .2, 1),
               filter .55s cubic-bezier(.4, 0, .2, 1);
@@ -71,17 +78,18 @@ html, body {
   border-radius: 50%;
   pointer-events: none;
   filter: blur(30px);
+  display: none;
 }
 .aura {
   width: 90%; height: 90%;
   left: 5%; top: 3%;
-  background: radial-gradient(circle, rgba(18, 184, 134, .09) 0%, rgba(15, 157, 99, .03) 42%, transparent 70%);
+  background: radial-gradient(circle, rgba(143, 182, 208, .07) 0%, rgba(143, 182, 208, .02) 42%, transparent 70%);
   animation: auraBreath 7s ease-in-out infinite;
 }
 .halo {
   width: 62%; height: 62%;
   left: 19%; top: 12%;
-  background: radial-gradient(circle, rgba(79, 140, 255, .07) 0%, transparent 68%);
+  background: radial-gradient(circle, rgba(143, 182, 208, .04) 0%, transparent 68%);
   animation: auraBreath 7s ease-in-out infinite reverse;
 }
 
@@ -97,8 +105,8 @@ html, body {
   top: calc(var(--logo-size) / 2); left: 50%;
   width: 132px; height: 132px;
   margin: -66px 0 0 -66px;
-  background: radial-gradient(circle, rgba(18, 184, 134, .28) 0%, rgba(15, 157, 99, .10) 45%, transparent 72%);
-  filter: blur(18px);
+  background: radial-gradient(circle, rgba(143, 182, 208, .14) 0%, rgba(143, 182, 208, .05) 45%, transparent 72%);
+  filter: blur(22px);
   border-radius: 50%;
   animation: glowBreath 4s ease-in-out infinite;
   pointer-events: none;
@@ -108,23 +116,24 @@ html, body {
   width: var(--logo-size); height: var(--logo-size);
   object-fit: contain;
   animation: breathe 4s ease-in-out infinite;
-  filter: drop-shadow(0 8px 22px rgba(0, 0, 0, .4));
+  filter: none;
 }
 .brand {
   position: relative;
   margin-top: var(--brand-gap);
-  font-size: var(--brand-size); font-weight: 600;
+  font-family: "ApkStart Display", "Segoe UI", sans-serif;
+  font-size: var(--brand-size); font-weight: 400;
   line-height: 1.2;
-  letter-spacing: .8px;
-  color: #f2f5f3;
+  color: #f2f4f5;
+  letter-spacing: .6px;
   opacity: 0;
   animation: fadeUp .85s ease-out .2s both;
 }
 .tagline {
   position: relative;
   margin-top: var(--tagline-gap);
-  font-size: var(--body-size); color: #74817a;
-  letter-spacing: .4px;
+  font-size: var(--body-size); color: #7b838c;
+  letter-spacing: 1.4px;
   opacity: 0;
   animation: fadeUp .85s ease-out .34s both;
 }
@@ -134,16 +143,14 @@ html, body {
   position: relative;
   margin-top: var(--progress-gap);
   width: min(clamp(140px, 54.17vw, 345px), 100%); height: clamp(2px, .55vh, 3px);
-  background: rgba(255, 255, 255, .08);
-  border-radius: 2px;
+  background: rgba(255, 255, 255, .07);
   overflow: hidden;
   opacity: 0;
   animation: fadeUp .85s ease-out .5s both;
 }
 .progress-bar {
   width: 0%; height: 100%;
-  background: linear-gradient(90deg, rgba(15, 157, 99, .7), #12b886);
-  border-radius: 2px;
+  background: #8fb6d0;
   transition: width .5s cubic-bezier(.4, 0, .2, 1);
 }
 
@@ -154,8 +161,8 @@ html, body {
   max-width: 100%;
   text-align: center;
   overflow-wrap: anywhere;
-  font-size: var(--body-size); color: #8a9a92;
-  letter-spacing: .2px;
+  font-size: var(--body-size); color: #8a929b;
+  letter-spacing: .4px;
   line-height: 1.44;
   min-height: 1.44em;
   opacity: 0;
@@ -169,33 +176,34 @@ html, body {
   margin-top: clamp(6px, 2.78vh, 14px);
   padding: clamp(6px, 2.5vh, 12px) clamp(10px, 3.75vw, 24px);
   background: rgba(255, 255, 255, .035);
-  border: 1px solid rgba(255, 255, 255, .055);
-  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, .1);
   max-width: min(clamp(200px, 77.5vw, 491px), 100%);
   opacity: 0;
   animation: fadeUp .7s ease-out .78s both;
 }
 .first-run-title {
   font-size: var(--body-size); font-weight: 600;
-  color: #12b886;
+  color: #8fb6d0;
+  letter-spacing: 1.2px;
   margin-bottom: clamp(4px, 1.39vh, 7px);
 }
 .first-run-list {
   list-style: none;
-  font-size: clamp(10.5px, 2.3958vw, 15.2px); color: #8a9a92;
+  font-size: clamp(10.5px, 2.3958vw, 15.2px); color: #8a929b;
   line-height: 1.5;
 }
 .first-run-list li::before {
   content: '·';
   margin-right: 8px;
-  color: #0f9d63;
+  color: #8fb6d0;
 }
 
 /* ---- 底部 ---- */
 .footer {
   position: relative;
-  font-size: clamp(9px, 2.1875vw, 14px); color: #74817a;
-  letter-spacing: .3px;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: clamp(9px, 2.1875vw, 13px); color: #5f666e;
+  letter-spacing: 1.4px;
   opacity: 0;
   animation: fadeUp .85s ease-out .95s both;
 }
