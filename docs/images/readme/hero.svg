@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="440" viewBox="0 0 1200 440" role="img" aria-labelledby="title desc">
-  <title id="title">Apk Start --Q 1.0.1 by MoonlyCake</title>
+  <title id="title">Apk Start --Q 1.0.2 by MoonlyCake</title>
   <desc id="desc">A midnight-blue poster with an illustrated desktop library and a floating Android app window. Android apps, at home on Windows.</desc>
   <defs>
     <linearGradient id="night" x2="1" y2="1" gradientUnits="objectBoundingBox">
@@ -70,7 +70,7 @@
       <rect x="70" y="236" width="100" height="4" rx="2" fill="url(#accent)"/>
       <g transform="translate(190 222)">
         <rect width="108" height="32" rx="16" fill="#272744" stroke="#625680"/>
-        <text x="54" y="21" text-anchor="middle" fill="#E7DCFF" font-size="14" font-weight="650" letter-spacing=".7">--Q 1.0.1</text>
+        <text x="54" y="21" text-anchor="middle" fill="#E7DCFF" font-size="14" font-weight="650" letter-spacing=".7">--Q 1.0.2</text>
       </g>
       <text x="68" y="283" fill="#E2EBFF" font-size="28" font-weight="500" letter-spacing="-.42">Android apps, at home on Windows.</text>
       <g transform="translate(68 327)" font-size="14.5" font-weight="650">
