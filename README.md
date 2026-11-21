@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/readme/hero.svg" alt="Apk Start --Q 1.0.7：让 Android 应用在 Windows 桌面上有个位置" width="100%">
+  <img src="docs/images/readme/hero.svg" alt="Apk Start --Q 1.0.8：让 Android 应用在 Windows 桌面上有个位置" width="100%">
 </p>
 
 <h3 align="center">把 APK 变成桌面上可以双击的窗口。</h3>
@@ -33,7 +33,7 @@ npm start
 
 **2 · 准备运行时。** 首次打开时按提示部署 Android Emulator、ADB 与系统镜像。这一步需要联网；若下载完整运行时包，部署时需约 6 GB 可用空间，安装应用和保存快照还需额外预留。
 
-**3 · 安装并打开。** 从界面选择 `.apk`、`.apks` 或 `.xapk`；也可以先打开 `.apk` 文件关联，之后双击资源管理器中的 APK：新装或更新成功后打开应用；如果当前安卓已经装了同一份 APK，直接打开，不重复安装。桌面快捷方式使用同一个默认运行时。
+**3 · 安装并打开。** 从界面选择 `.apk`、`.apks` 或 `.xapk`；也可以先打开 `.apk` 文件关联，之后双击资源管理器中的 APK：新装或更新成功后打开应用；如果当前安卓已经装了同一份 APK，直接打开，不重复安装。桌面快捷方式使用同一个默认运行时；原生窗口已最小化时，再打开会恢复它。
 
 > 启动慢或提示缺少硬件加速时，先到「设置 → 诊断与修复」跑一次本机体检，按报告检查 CPU 虚拟化与 Windows 虚拟机监控程序平台。说明见[环境体检](docs/preflight.md)。
 
