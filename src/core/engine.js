@@ -32,6 +32,7 @@ const EMU_SERIAL = `emulator-${EMU_PORT}`;
 const QEMU_ADB_PORT = 5555;
 const QEMU_SERIAL = `127.0.0.1:${QEMU_ADB_PORT}`;
 const OWNER_UNKNOWN = '无法确认运行中的安卓模拟器属于 ApkStart。请先关闭 ApkStart 的安卓窗口后重试。';
+const ADB_CONSENT_MESSAGE = '请在安卓模拟器窗口点「允许 USB 调试」。确认后 ApkStart 会自动继续。';
 
 function waitForGuestExit(proc, timeout = 3000) {
   if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve(true);
@@ -60,6 +61,7 @@ class Runtime {
     this.emulator = new EmulatorEngine(appRoot, { provisioner: this.provisioner });
     this.vmProc = null;
     this.vmStarting = false;
+    this._adbConsentPending = false;
     this.installing = false;
     this.lastActivity = Date.now();
     this._watchdog = null;
@@ -216,6 +218,9 @@ class Runtime {
       ready: false,
       needsSetup: null,
       error: '',
+      phase: this._adbConsentPending ? 'awaiting-auth' : this.installing ? 'installing' : 'idle',
+      authorizationRequired: !!this._adbConsentPending,
+      authorizationMessage: this._adbConsentPending ? ADB_CONSENT_MESSAGE : '',
       serial: this.emuSerial,
       network: this._networkSnapshot(),
       autoProfile: this.emulator.profile ? doctor.describeProfile(this.emulator.profile) : '',
@@ -231,9 +236,13 @@ class Runtime {
       return result;
     }
 
+    if (result.authorizationRequired) return result;
     try {
-      result.deviceOnline = await client.isOnline();
-      if (result.deviceOnline) {
+      result.deviceOnline = await client.deviceState() === 'device';
+      // ADB 的 transport 就绪不代表 Android 开机或包管理器已就绪。
+      result.ready = result.deviceOnline && !result.vmStarting && !result.installing
+        && await this.reuseProbe(client) === true && !this.vmStarting && !this.installing;
+      if (result.ready) {
         const [android, sdk, ff] = await Promise.all([
           client.androidVersion().catch(() => ''),
           client.sdkInt().catch(() => 0),
@@ -248,20 +257,13 @@ class Runtime {
       result.error = e.message;
     }
 
-    if (result.deviceOnline) result.ready = true;
-    else if (!env.emulator.ok) result.needsSetup = 'emulator';
-    else if (!env.sysimg.ok) result.needsSetup = 'sysimg';
-    // 不再把「没有硬件加速」当成阻塞步骤：doctor 会自动回退软件模拟，
-    // 并在开机失败时按 GPU/加速/内存组合依次重试。
-    else result.needsSetup = 'boot';
+    if (!result.ready) {
+      // 不再把「没有硬件加速」当成阻塞步骤：doctor 会自动回退软件模拟。
+      result.needsSetup = !env.emulator.ok ? 'emulator' : !env.sysimg.ok ? 'sysimg' : 'boot';
+    }
 
-    result.phase = result.deviceOnline
-      ? 'ready'
-      : this.installing
-        ? 'installing'
-        : result.vmRunning
-          ? 'booting'
-          : 'idle';
+    result.phase = result.installing ? 'installing' : result.ready ? 'ready'
+      : result.vmStarting || result.vmRunning || result.deviceOnline ? 'booting' : 'idle';
 
     return result;
   }
@@ -351,14 +353,17 @@ class Runtime {
       let lastHeal = 0;
       let probeIdentity = null;
       let nextOwnerCheck = 0;
+      let consentIdentity = null;
+      let consentReadyIdentity = null;
       const diagUnauthorized = () => ({
         code: 'ADB_UNAUTHORIZED',
         title: '安卓尚未授权本机的 ADB 调试连接',
         hint: '请使用可见的安卓模拟器窗口，确认「允许 USB 调试」后再重试。'
           + '不需要删除本机 ADB 密钥或清空安卓数据。',
       });
-      const probe = async ({ serial, port }) => {
+      const probe = async ({ serial, port, awaitingAuthorization = false }) => {
         if (!this.emulator.running()) return 'fatal';
+        if (awaitingAuthorization && (consentIdentity?.serial !== serial || !await consentIdentity.revalidate())) return 'fatal';
         // 启动轮询只读：缓存短期的归属校验，避免每 200ms 拉起 netstat。
         if (probeIdentity?.port !== port || Date.now() >= nextOwnerCheck) {
           if (probeIdentity?.port !== port || !await probeIdentity.revalidate()) {
@@ -379,12 +384,18 @@ class Runtime {
           const booted = lines[0] === '1' || /^1$/.test(lines[0] || '');
           const pmReady = lines.some((l) => /^package:/.test(l));
           errStreak = 0;
-          if (booted && pmReady) return 'ok';
+          if (booted && pmReady) {
+            if (awaitingAuthorization) {
+              if (!await consentIdentity?.revalidate()) return 'fatal';
+              consentReadyIdentity = consentIdentity;
+            }
+            return 'ok';
+          }
           return booted ? 'pending' : 'booting';
         } catch (e) {
           errStreak += 1;
           // 自愈会写快照/改连接，不能沿用只读探测的缓存。
-          if (!await probeIdentity.revalidate()) {
+          if (!await probeIdentity?.revalidate()) {
             probeIdentity = null;
             return 'pending';
           }
@@ -401,7 +412,7 @@ class Runtime {
           }
           // 其它 adb 传输异常：重新检查监听，必要时补启动服务。
           const now = Date.now();
-          if (errStreak >= 6 && now - probeStart > 25000 && now - lastHeal > 30000) {
+          if (!awaitingAuthorization && errStreak >= 6 && now - probeStart > 25000 && now - lastHeal > 30000) {
             lastHeal = now;
             onLog('adb 连接异常，检查 ADB 服务后继续等待…');
             await this.emulator.ensureAdbServer().catch(() => {});
@@ -411,12 +422,30 @@ class Runtime {
         }
       };
 
+      const onAuthorizationRequired = typeof this.presentAdbConsent === 'function' ? async ({ serial, port, signal }) => {
+        // Reuse the exact lock generation that returned unauthorized, not a newer guest on the same port.
+        const identity = probeIdentity;
+        if (identity?.serial !== serial || identity.port !== port || !await identity.revalidate() || signal.aborted) return null;
+        const hide = await this.presentAdbConsent(identity);
+        if (typeof hide !== 'function') return null;
+        if (!await identity.revalidate() || signal.aborted) { await hide(); return null; }
+        consentIdentity = identity;
+        this._adbConsentPending = true;
+        return async () => {
+          try { await hide(); } finally {
+            this._adbConsentPending = false;
+            consentIdentity = null;
+          }
+        };
+      } : undefined;
+
       const st = await this.emulator.start({
         headless: this.settings.engine.headless !== false,
         onLog,
         probe,
         networkProbe: (startupSerial, options) => this._checkNetwork({ ...options, startupSerial }),
         stopOwnedAttempt: (port) => this.stopOwnedAttempt(port),
+        onAuthorizationRequired,
       });
       // start() 失败时是「返回 {ok:false}」而不是抛异常（磁盘不足、多次重试仍失败等）。
       // 老实现不看这个字段，直接把 ok:true 往上返回 —— 上层于是认为「已经就绪」，
@@ -433,6 +462,9 @@ class Runtime {
       }
       const identity = await this.ownedEmulator();
       if (!identity || identity.serial !== (st.serial || this.emulator.serial)) return { ok: false, error: OWNER_UNKNOWN };
+      if (consentReadyIdentity && (identity.pid !== consentReadyIdentity.pid || !await consentReadyIdentity.revalidate())) {
+        return { ok: false, error: OWNER_UNKNOWN };
+      }
       this.lastActivity = Date.now();
       this.emuSerial = identity.serial;
       const client = this.client(this.emuSerial);

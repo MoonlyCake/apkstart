@@ -205,8 +205,8 @@ ApkStart.exe --launch &lt;包名&gt;
 <h3 id="6-4-adb-未授权-允许-usb-调试">6.4 adb 未授权（允许 USB 调试）</h3>
 <p><strong>症状</strong>：诊断里报"adb 未授权"或"安卓调试授权未完成"，<code>adb devices</code> 显示 <code>unauthorized</code>，应用一直起不来。</p>
 <p><strong>正确做法（按顺序）：</strong></p>
-<ol><li>看屏幕上有没有一个模拟器窗口弹着 <strong>「允许 USB 调试？」</strong> 对话框——去那个窗口点<strong>允许</strong>，并勾选 <strong>「一律允许使用这台计算机进行调试」</strong>，之后就不会再问。</li><li>若窗口点不动或一直不出现：设置 → 运行时 → <strong>重置安卓数据 / 清空安卓数据</strong>后重试（会清掉已装应用，APK 文件都在，会自动重装，不影响系统本身）。</li></ol>
-<blockquote>⚠️ <strong>千万不要去删 <code>%USERPROFILE%\.android\adbkey</code></strong>。实测那是反向操作：Android 只在 <code>adb_keys</code> 文件不存在时才写入新公钥；你换了新私钥，系统里存的旧公钥仍然生效，两者对不上，会永远授权不了。</blockquote>
+<ol><li>Apk Start 检测到当前模拟器需要授权时，会显示安卓窗口并等待最多 90 秒。若安卓弹出 <strong>「允许 USB 调试？」</strong>，确认这是你刚打开的本机模拟器，再点击 <strong>允许</strong>。确认后 Apk Start 会自动继续，不必重新安装 APK。</li><li>若窗口已显示但没有授权框，先解锁安卓，检查安卓设置中的 <strong>开发者选项 → USB 调试</strong>，然后重试。若仍未出现，从 Apk Start 的 <strong>设置 → 诊断与修复</strong> 导出报告；不需要为此清空安卓数据。</li></ol>
+<blockquote>不要删除 <code>%USERPROFILE%\.android\adbkey</code> 来排查未授权问题。更换密钥会让 Android 需要重新确认这台电脑，不能替代授权操作。</blockquote>
 <blockquote>命令行排查：ApkStart 的 adb 服务跑在<strong>专用端口 5044</strong>（和你自己的 5037 完全隔开）： ``<code>powershell $env:ANDROID_ADB_SERVER_PORT = 5044 adb devices    # 应看到 emulator-5554 </code>`<code> 不要对 5555 端口手动 </code>adb connect`——Play 镜像会弹"允许 USB 调试"盖在应用上，看起来像程序坏了。</blockquote>
 <hr/>
 <h3 id="6-5-双击图标没反应-一直转圈-出现带旋转按钮的窗口">6.5 双击图标没反应 / 一直转圈 / 出现带旋转按钮的窗口</h3>

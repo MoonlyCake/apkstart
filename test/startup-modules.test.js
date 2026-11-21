@@ -1,10 +1,157 @@
 'use strict';
 
 const { EventEmitter } = require('node:events');
+const fs = require('node:fs');
+const path = require('node:path');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const vm = require('node:vm');
 const { createStartupSplash, splashBounds } = require('../src/desktop/startup-splash');
 const { createStartupBackground } = require('../src/desktop/startup-background');
+const { createRuntimeDeployment } = require('../src/desktop/runtime-deployment');
+
+const components = ({ adb = true, emulator = true, sysimg = true } = {}) =>
+  ({ adb: { ok: adb }, emulator: { ok: emulator }, sysimg: { ok: sysimg } });
+
+function deploymentSetup({ prefs = { autoDeploy: true, runtime: {} }, checkEnv, ...overrides } = {}) {
+  const events = [];
+  const now = 5000;
+  const target = {
+    checkEnv: () => { events.push('probe'); return checkEnv?.() ?? components(); },
+    installRuntimePack: () => events.push('pack'),
+    installAdb: () => events.push('adb'),
+    installEmulator: () => events.push('emulator'),
+    installSystemImage: () => events.push('sysimg'),
+  };
+  const deploy = createRuntimeDeployment({
+    settings: () => prefs,
+    provisioner: () => target,
+    bundledDir: () => null,
+    recordFailure: (at) => { events.push(['failureAt', at]); prefs.runtime.deployFailedAt = at; },
+    progress: () => {},
+    log: () => {},
+    now: () => now,
+    ...overrides,
+  });
+  return { deploy, events, now, prefs };
+}
+
+test('manual deployment works without changing the automatic-download preference', async () => {
+  const { deploy, events, prefs } = deploymentSetup({ prefs: { autoDeploy: false, runtime: {} } });
+  assert.deepEqual(await deploy(), { ok: false, skipped: true, code: 'AUTO_DEPLOY_DISABLED' });
+  assert.deepEqual(events, []);
+  assert.deepEqual(await deploy({ force: true }), { ok: true, source: 'existing', needsExtract: false });
+  assert.deepEqual(events, ['probe', ['failureAt', 0]]);
+  assert.equal(prefs.autoDeploy, false);
+});
+
+test('manual deployment joins a running background deployment without duplicate writes', async () => {
+  let release;
+  const pendingProbe = new Promise((resolve) => { release = resolve; });
+  const { deploy, events } = deploymentSetup({ checkEnv: () => pendingProbe });
+  const background = deploy();
+  const manual = deploy({ force: true });
+  assert.deepEqual(events, ['probe']);
+  release(components());
+  const result = await Promise.all([background, manual]);
+  assert.equal(result[0].ok, true);
+  assert.equal(result[0], result[1]);
+  assert.deepEqual(events, ['probe', ['failureAt', 0]]);
+});
+
+test('a runtime pack without ADB does not claim all components are ready', async () => {
+  const probes = [components({ adb: false, emulator: false, sysimg: false }), components({ adb: false }), components()];
+  const { deploy, events } = deploymentSetup({ checkEnv: () => probes.shift() });
+  assert.deepEqual(await deploy({ force: true }), { ok: true, source: 'components' });
+  assert.deepEqual(events, ['probe', 'pack', 'probe', 'adb', 'probe', ['failureAt', 0]]);
+});
+
+test('a bundled installation missing components reports a repair, never starts a network fallback', async () => {
+  const { deploy, events } = deploymentSetup({
+    checkEnv: () => components({ sysimg: false }),
+    bundledDir: () => 'fixture-runtime',
+  });
+  const result = await deploy({ force: true });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'BUNDLED_INCOMPLETE');
+  assert.match(result.error, /系统镜像/);
+  assert.deepEqual(events, ['probe', ['failureAt', 0]]);
+});
+
+test('real deployment failures record the cooldown but manual retry still runs', async () => {
+  let healthy = false;
+  const { deploy, events, now } = deploymentSetup({
+    checkEnv: () => components({ adb: healthy }),
+  });
+  const failed = await deploy();
+  assert.equal(failed.code, 'DEPLOY_FAILED');
+  assert.match(failed.error, /adb 工具链/);
+  assert.deepEqual(events, ['probe', 'adb', 'probe', ['failureAt', now]]);
+  assert.deepEqual(await deploy(), { ok: false, skipped: true, code: 'DEPLOY_COOLDOWN' });
+  healthy = true;
+  assert.equal((await deploy({ force: true })).ok, true);
+  assert.deepEqual(events.slice(-2), ['probe', ['failureAt', 0]]);
+});
+
+test('APK installation closes its always-on-top startup splash before awaiting the installer', async () => {
+  // Run the real install entry without starting Electron or loading any host-side services.
+  const main = fs.readFileSync(path.join(__dirname, '../src/main.js'), 'utf8');
+  const installOne = main.slice(main.indexOf('async function installOne('), main.indexOf('async function runUpdate('));
+  const events = [];
+  let finishInstall;
+  const pendingInstall = new Promise((resolve) => { finishInstall = resolve; });
+  const context = vm.createContext({
+    showWindow: () => events.push('manager'),
+    startupSplash: { close: () => events.push('splash-closed') },
+    send: (channel) => events.push(channel),
+    installer: { install: () => { events.push('installer'); return pendingInstall; } },
+    windowctl: { refreshShell: async () => {} },
+    notify: () => {},
+    installBusy: 'fixture.apk',
+  });
+  vm.runInContext(installOne, context);
+  const install = context.installOne('fixture.apk');
+  assert.deepEqual(events, ['manager', 'splash-closed', 'install:start', 'installer']);
+  finishInstall({ app: { label: 'Fixture' } });
+  await install;
+  assert.equal(events.at(-1), 'install:done');
+  assert.equal(context.installBusy, null);
+});
+
+test('renderer reports awaiting authorization and booting without claiming Android is ready', async () => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/ui/app.js'), 'utf8');
+  const nodes = new Map();
+  const node = (id) => {
+    if (!nodes.has(id)) nodes.set(id, {});
+    return nodes.get(id);
+  };
+  const panels = Object.fromEntries(['SettingsNavigation', 'DiagnosticsPanel', 'PreflightPanel', 'UpdatesPanel', 'SettingsPanel']
+    .map((name) => [`create${name}`, () => ({})]));
+  const status = { adbOk: true, deviceOnline: true, ready: false, vmStarting: true,
+    phase: 'awaiting-auth', env: components(), serial: 'fixture', android: '11',
+    authorizationMessage: '请确认模拟器的授权提示', network: { ok: true } };
+  const context = vm.createContext({
+    window: { apkstart: { runtimeStatus: async () => status }, apkstartUiPanels: panels },
+    document: { getElementById: node },
+  });
+  vm.runInContext(src.slice(0, src.lastIndexOf('init().catch')), context);
+  await context.refreshStatus();
+  assert.equal(node('engineTag').textContent, '等待授权');
+  assert.equal(node('statusText').textContent, status.authorizationMessage);
+  assert.equal(node('setupStateText').textContent, status.authorizationMessage);
+  assert.equal(node('statusNet').hidden, true);
+  assert.match(node('setupSteps').innerHTML, /运行时组件齐全/);
+  status.phase = 'booting';
+  await context.refreshStatus();
+  assert.match(node('statusText').textContent, /正在引导/);
+  status.phase = 'ready';
+  status.ready = true;
+  status.vmStarting = false;
+  await context.refreshStatus();
+  assert.match(node('statusText').textContent, /运行时已就绪/);
+  assert.equal(node('statusDevice').textContent, 'fixture');
+  assert.equal(node('statusNet').hidden, false);
+});
 
 function createClock() {
   let now = 0;
@@ -195,7 +342,7 @@ test('startup keeps diagnostics, prewarm, and deployment at separate times and a
   await clock.advance(23800);
   assert.deepEqual(events.slice(-3), [
     'deploy',
-    ['toast', { type: 'ok', message: '运行时已自动准备完成' }],
+    ['toast', { type: 'ok', message: '安卓运行时组件已准备完成' }],
     'diagnostics run',
   ]);
 });

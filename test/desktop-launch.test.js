@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { createLaunchPresentation } = require('../src/desktop/launch-presentation');
 const { createAgentSession } = require('../src/desktop/agent-session');
+const { WinAgent } = require('../src/core/agent');
 
 function deferred() {
   let resolve;
@@ -199,4 +200,84 @@ test('a replacement native agent is scoped before use; stale agents cannot affec
     ['hide', 1], ['wheel', 9], ['dispose', 1], ['wheel-dispose'],
   ]);
   assert.equal(agents.length, 2);
+});
+
+function consentFixture({ show = async () => true } = {}) {
+  const entries = [];
+  const agents = [];
+  const session = createAgentSession({
+    createAgent() {
+      const agent = new EventEmitter();
+      const id = agents.length;
+      agents.push(agent);
+      agent.scope = async () => {};
+      agent.bootHide = async () => ({ ok: true });
+      agent.reserveAdbConsent = async (pid) => {
+        entries.push(['reserve', id, pid]);
+        return {
+          show: () => { entries.push(['show', id]); return show(); },
+          close: async () => entries.push(['close', id]),
+        };
+      };
+      agent.dispose = () => {};
+      return agent;
+    },
+    scopeDirs: () => ['/fixture/engine'], ownerPid: 61, log: () => {},
+    wheelRouter: { dispose() {} }, onReplace: () => {},
+  });
+  return { entries, agents, session };
+}
+
+test('ADB consent shows only after the native window is pinned and guest ownership is freshly checked', async () => {
+  const { entries, session } = consentFixture();
+  const cleanup = await session.presentAdbConsent({ pid: 82, revalidate: async () => {
+    entries.push(['revalidate']);
+    return true;
+  } });
+  assert.equal(typeof cleanup, 'function');
+  assert.deepEqual(entries, [['reserve', 0, 82], ['revalidate'], ['show', 0]]);
+  await Promise.all([cleanup(), cleanup()]);
+  assert.deepEqual(entries.at(-1), ['close', 0]);
+  assert.equal(entries.length, 4);
+  session.dispose();
+});
+
+test('ADB consent releases unshown leases on stale ownership and failed show', async () => {
+  const { entries, session } = consentFixture({ show: async () => false });
+  assert.equal(await session.presentAdbConsent({ pid: 82, revalidate: async () => false }), null);
+  assert.equal(await session.presentAdbConsent({ pid: 83, revalidate: async () => true }), null);
+  assert.deepEqual(entries, [['reserve', 0, 82], ['close', 0], ['reserve', 0, 83], ['show', 0], ['close', 0]]);
+  session.dispose();
+});
+
+test('an agent replacement during ADB consent revalidation cannot show a stale window', async () => {
+  const { entries, agents, session } = consentFixture();
+  const proof = deferred();
+  const pending = session.presentAdbConsent({ pid: 88, revalidate: () => proof.promise });
+  await tick();
+  agents[0].emit('exit');
+  proof.resolve(true);
+  assert.equal(await pending, null);
+  assert.deepEqual(entries, [['reserve', 0, 88], ['close', 0]]);
+  session.dispose();
+});
+
+test('ADB consent requests bind one PID and token to the original helper connection', async () => {
+  const agent = new WinAgent();
+  const calls = [];
+  agent.call = async (message) => { calls.push(message); return { ok: true }; };
+  assert.equal(await agent.reserveAdbConsent(91), null);
+  agent._attempt = { connected: true };
+  const lease = await agent.reserveAdbConsent(91);
+  assert.equal(await lease.show(), true);
+  await lease.close();
+  assert.deepEqual(calls.map(({ cmd, pid }) => [cmd, pid]), [
+    ['adbConsentTarget', 91], ['adbConsentShow', 91], ['adbConsentEnd', 91],
+  ]);
+  assert.match(calls[0].token, /^[0-9a-f]{32}$/);
+  assert.equal(new Set(calls.map(({ token }) => token)).size, 1);
+  agent._attempt = { connected: true };
+  assert.equal(await lease.show(), false);
+  assert.equal(await lease.close(), null);
+  assert.equal(calls.length, 3);
 });

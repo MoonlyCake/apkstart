@@ -217,17 +217,22 @@ async function refreshStatus() {
     const text = $('statusText');
     const tag = $('engineTag');
 
-    if (!s.adbOk) {
+    if (s.phase === 'awaiting-auth') {
+      dot.className = 'dot warn';
+      text.textContent = s.authorizationMessage || '请在安卓模拟器窗口中确认「允许 USB 调试」。';
+      tag.textContent = '等待授权';
+      tag.className = 'brand-tag';
+    } else if (!s.adbOk) {
       dot.className = 'dot err';
       text.textContent = '运行时未部署 —— 打开设置 → 运行时，一键完成';
       tag.textContent = '需要部署';
       tag.className = 'brand-tag';
-    } else if (s.deviceOnline) {
+    } else if (s.ready) {
       dot.className = 'dot ok';
       text.textContent = `运行时已就绪 · Android ${s.android || '?'}${s.freeform ? ' · 独立窗口已启用' : ''}`;
       tag.textContent = `Android ${s.android || ''}`.trim();
       tag.className = 'brand-tag ok';
-    } else if (s.phase === 'booting' || s.vmStarting) {
+    } else if (s.phase === 'booting' || s.vmStarting || s.deviceOnline) {
       dot.className = 'dot warn';
       text.textContent = '正在引导 Android…';
       tag.textContent = '引导中';
@@ -266,13 +271,13 @@ async function refreshStatus() {
       tag.textContent = s.installed ? '待机' : '待安装';
       tag.className = 'brand-tag';
     }
-    $('statusDevice').textContent = s.deviceOnline ? (s.serial || '') : '';
+    $('statusDevice').textContent = s.ready ? (s.serial || '') : '';
     // 网络状态：这是用户最容易踩的坑（应用里一直「网络错误」，但看不出是虚拟机没网）。
     // 直接摆在状态栏，出问题时一眼能看到，不用去翻日志。
     const netEl = $('statusNet');
     const netSep = $('statusNetSep');
     if (netEl) {
-      const show = !!s.deviceOnline && !!s.network;
+      const show = !!s.ready && !!s.network;
       netEl.hidden = !show;
       if (netSep) netSep.hidden = !show;
       if (show) {
@@ -334,26 +339,30 @@ function renderSetup(s) {
   const emuDone0 = !!(env.emulator && env.emulator.ok);
   const imgDone0 = !!(env.sysimg && env.sysimg.ok);
   const allDone0 = adbDone && emuDone0 && imgDone0;
+  const awaitingAuth = s.phase === 'awaiting-auth';
+  const authMessage = s.authorizationMessage || '请在安卓模拟器窗口中确认「允许 USB 调试」。';
+  const booting = s.phase === 'booting' || s.vmStarting || (s.deviceOnline && !s.ready);
   const stateText = $('setupStateText');
   if (stateText) {
     const missing = [];
     if (!adbDone) missing.push('adb');
     if (!emuDone0) missing.push('引擎');
     if (!imgDone0) missing.push('系统镜像');
-    stateText.textContent = s.deviceOnline
-      ? `已就绪 · Android ${s.android || ''}`
-      : s.phase === 'booting' || s.vmStarting
-        ? '正在引导 Android…'
-        : allDone0
-          ? '组件齐全 · 待开机（打开应用时自动拉起）'
-          : `缺少 ${missing.join('、')}${accelOk ? '' : '（无硬件加速，将回退软件模拟）'}`;
+    stateText.textContent = awaitingAuth
+      ? authMessage
+      : s.ready
+        ? `已就绪 · Android ${s.android || ''}`
+        : booting
+          ? '正在引导 Android…'
+          : allDone0
+            ? '组件齐全 · 待开机（打开应用时自动拉起）'
+            : `缺少 ${missing.join('、')}${accelOk ? '' : '（无硬件加速，将回退软件模拟）'}`;
     stateText.title = s.autoProfile || accel.note || hv.note || '';
   }
 
   const emuDone = !!(env.emulator && env.emulator.ok);
   const imgDone = !!(env.sysimg && env.sysimg.ok);
   const busy = state.setupBusy;
-  const booting = s.phase === 'booting';
 
   // 只保留一个步骤：下载、参数自适应、开机全部由「一键完成」串起来，
   // 且首次启动会在后台自动跑，用户不需要逐步点击。
@@ -365,25 +374,27 @@ function renderSetup(s) {
   const step = {
     key: 'all',
     index: 1,
-    title: allDone ? '一切就绪' : '一键完成',
-    tag: allDone ? '已自动完成' : '自动',
+    title: allDone ? '运行时组件齐全' : '一键完成',
+    tag: allDone ? '组件已准备' : '自动',
     done: allDone,
     busy: !!busy,
-    desc: s.deviceOnline
-      ? `Android ${s.android || ''} 已就绪 · 应用窗口会按屏幕自动适配`
-      : booting
-        ? '正在引导 Android…'
-        : allDone
-          ? '组件齐全，双击任意 APK 或桌面图标即会自动开机'
-          : `还差 ${left.join('、')}；点下面「一键完成」，会在后台一次装好并自动开机`,
-    actions: s.deviceOnline
+    desc: awaitingAuth
+      ? authMessage
+      : s.ready
+        ? `Android ${s.android || ''} 已就绪 · 应用窗口会按屏幕自动适配`
+        : booting
+          ? '正在引导 Android…'
+          : allDone
+            ? '组件齐全，双击任意 APK 或桌面图标即会自动开机'
+            : `还差 ${left.join('、')}；点下面「一键完成」，会在后台一次装好并自动开机`,
+    actions: s.ready
       ? '<button class="btn ghost sm" data-act="vmStop">停止运行时</button>'
       : '',
   };
 
   $('setupSteps').innerHTML = stepRow(step);
   $('btnDeployAll').disabled = !!busy;
-  $('btnDeployAll').textContent = busy ? '准备中…' : (allDone ? '已完成 · 点此复查' : '一键完成');
+  $('btnDeployAll').textContent = busy ? '处理中…' : (s.ready ? '已就绪 · 点此复查' : (allDone ? '检查并开机' : '一键完成'));
   // 「上次为什么没起来」优先显示落盘的失败记录：进程重启后内存里的 diagnosis 是空的，
   // 只显示 autoProfile 会让用户完全看不出原因（issue #20/#25 的报告就是这样）。
   const lf = s.lastFailure;
@@ -437,7 +448,7 @@ async function deployAll() {
       return;
     }
     await refreshStatus();
-    toast({ title: '组件已就绪，正在自动开机…', body: '首次约 1-3 分钟，之后几秒即可。', type: 'info' });
+    toast({ title: '运行时组件准备完成，正在启动 Android…', body: '首次启动需要一些时间。', type: 'info' });
     const started = await api.runtimeStart();
     await refreshStatus();
     toast(started && started.ok

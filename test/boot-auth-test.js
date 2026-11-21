@@ -127,20 +127,26 @@ const adbDevices = (line) => `List of devices attached\n${line}\n`;
     assert.ok(/ADB_VENDOR_KEYS/.test(src), '必须显式指定 adb 公钥目录');
   });
 
-  async function blockedBoot({ snapshot }) {
+  async function blockedBoot({ snapshot, consent, waitMs = 1000 }) {
     const { Runtime } = require('../src/core/engine');
     const { EmulatorEngine } = require('../src/core/emulator');
     const doctor = require('../src/core/doctor');
     const saved = { freePortPair: doctor.freePortPair, planVariants: doctor.planVariants };
-    const trace = { starts: [], stopped: [], snapshotsInvalidated: 0, gpuFailures: 0 };
+    const trace = {
+      starts: [], stopped: [], snapshotsInvalidated: 0, gpuFailures: 0,
+      opened: 0, hidden: 0, awaiting: false, pendingProbes: 0, prepared: 0,
+    };
+    let approved = false;
+    let owner = 4321;
     const gpus = ['swangle', 'host', 'software'];
     doctor.freePortPair = async (port) => port;
     doctor.planVariants = () => gpus.map((gpu) => ({ label: gpu, gpu, snapshot: true, bootTimeoutMs: 20 }));
     const emu = Object.create(EmulatorEngine.prototype);
-    const settings = { engine: { audio: true, hostMicrophone: true }, display: {}, runtime: {} };
+    const settings = { engine: { audio: true, hostMicrophone: true, headless: false }, display: {}, runtime: {} };
     Object.defineProperty(emu, 'settings', { value: settings });
     Object.assign(emu, {
       _log: [], _assertAvdWritable() {}, _logWrite() {}, _persistFailure() {},
+      _clearFailure() { if (consent === 'owner-replaced') owner += 1; },
       locate: () => ({ root: __dirname, emulatorExe: 'fixture-not-an-executable' }),
       imageChoice: () => ({ api: 30, compat: false }),
       provisioner: {
@@ -162,15 +168,27 @@ const adbDevices = (line) => `List of devices attached\n${line}\n`;
       _noteGpuFailure() { trace.gpuFailures += 1; },
       invalidateSnapshot() { trace.snapshotsInvalidated += 1; },
     });
+    emu.start = (options) => EmulatorEngine.prototype.start.call(emu, { ...options, authorizationWaitMs: waitMs });
     const rt = Object.create(Runtime.prototype);
     Object.defineProperty(rt, 'settings', { value: settings });
     Object.assign(rt, {
       emulator: emu,
       adbPath: () => 'fixture-adb',
-      ownedEmulator: async () => ({ port: emu.port, serial: emu.serial, revalidate: async () => true }),
+      ownedEmulator: async () => ({ pid: owner, port: emu.port, serial: emu.serial, revalidate: async () => true }),
+      client: (serial) => ({ serial }),
+      prepare: async () => { trace.prepared += 1; },
+      setGuestPriority: async () => {},
+      _armSnapshotSave: () => {},
       adbClient: (serial, adbPath) => ({
         serial, adbPath, serverPort: emu.adbPort,
-        shell: async () => { throw new Error('cannot connect to device'); },
+        async shell() {
+          if (rt._adbConsentPending) {
+            trace.awaiting = true;
+            trace.pendingProbes += 1;
+          }
+          if (!approved) throw new Error('cannot connect to device');
+          return consent === 'boot-incomplete' ? '1\n' : '1\npackage:/system/framework/framework-res.apk\n';
+        },
         deviceState: async () => 'unauthorized',
       }),
       stopOwnedAttempt: async (port) => {
@@ -179,9 +197,19 @@ const adbDevices = (line) => `List of devices attached\n${line}\n`;
         return true;
       },
     });
+    if (consent) {
+      rt.presentAdbConsent = async (identity) => {
+        assert.equal(identity.pid, 4321);
+        assert.equal(identity.serial, emu.serial);
+        trace.opened += 1;
+        if (consent === 'no-window') return null;
+        approved = true;
+        return async () => { trace.hidden += 1; };
+      };
+    }
     try {
       const result = await rt.bootEmulator({ env: { accel: { ok: true, kind: 'whpx' } } });
-      return { ...trace, reason: result.diagnosis?.code, ok: result.ok };
+      return { ...trace, reason: result.diagnosis?.code, ok: result.ok, awaitingAtEnd: !!rt._adbConsentPending };
     } finally {
       Object.assign(doctor, saved);
     }
@@ -206,6 +234,135 @@ const adbDevices = (line) => `List of devices attached\n${line}\n`;
     assert.deepEqual(trace.stopped, [5554, 5556]);
     assert.equal(trace.gpuFailures, 0);
     assert.equal(trace.reason, 'ADB_UNAUTHORIZED');
+  });
+
+  await atest('冷启动授权窗口出现一次，确认后继续同一台模拟器', async () => {
+    const trace = await blockedBoot({ snapshot: false, consent: 'approved' });
+    assert.deepEqual(trace.starts.map(({ port }) => port), [5554]);
+    assert.deepEqual(trace.stopped, []);
+    assert.equal(trace.opened, 1);
+    assert.equal(trace.hidden, 1);
+    assert.equal(trace.awaiting, true);
+    assert.equal(trace.awaitingAtEnd, false);
+    assert.equal(trace.ok, true);
+    assert.equal(trace.prepared, 1);
+  });
+
+  await atest('快照未授权先冷启，只有冷启后才显示授权窗口', async () => {
+    const trace = await blockedBoot({ snapshot: true, consent: 'approved' });
+    assert.deepEqual(trace.starts.map(({ port }) => port), [5554, 5556]);
+    assert.deepEqual(trace.stopped, [5554]);
+    assert.equal(trace.snapshotsInvalidated, 1);
+    assert.equal(trace.opened, 1);
+    assert.equal(trace.hidden, 1);
+    assert.equal(trace.ok, true);
+  });
+
+  await atest('授权后包管理器尚未就绪不误报成功，超时会收回授权窗口', async () => {
+    const trace = await blockedBoot({ snapshot: false, consent: 'boot-incomplete', waitMs: 60 });
+    assert.deepEqual(trace.stopped, [5554]);
+    assert.equal(trace.opened, 1);
+    assert.equal(trace.hidden, 1);
+    assert.equal(trace.pendingProbes, 1);
+    assert.equal(trace.awaitingAtEnd, false);
+    assert.equal(trace.gpuFailures, 0);
+    assert.equal(trace.reason, 'ADB_UNAUTHORIZED');
+    assert.equal(trace.ok, false);
+  });
+
+  await atest('没有可见授权窗口就停止本轮，不切显卡、不持续空等', async () => {
+    const trace = await blockedBoot({ snapshot: false, consent: 'no-window' });
+    assert.deepEqual(trace.stopped, [5554]);
+    assert.equal(trace.opened, 1);
+    assert.equal(trace.hidden, 0);
+    assert.equal(trace.pendingProbes, 0);
+    assert.equal(trace.gpuFailures, 0);
+    assert.equal(trace.ok, false);
+  });
+
+  await atest('同一个 ADB 序列号换了进程时不继续操作新实例', async () => {
+    const trace = await blockedBoot({ snapshot: false, consent: 'owner-replaced' });
+    assert.deepEqual(trace.stopped, []);
+    assert.equal(trace.hidden, 1);
+    assert.equal(trace.prepared, 0);
+    assert.equal(trace.ok, false);
+  });
+
+  await atest('等授权时关闭窗口立即取消探测并执行清理', async () => {
+    const { EventEmitter } = require('node:events');
+    const { EmulatorEngine } = require('../src/core/emulator');
+    const emu = Object.create(EmulatorEngine.prototype);
+    const child = emu.proc = new EventEmitter();
+    let hidden = 0;
+    const result = await emu._waitForAdbConsent({
+      endpoint: { serial: 'emulator-5554', port: 5554 },
+      present: async () => () => { hidden += 1; },
+      probe: () => {
+        emu.proc = null;
+        child.emit('exit');
+        return new Promise(() => {}); // A slow ADB read must not hold the closed window.
+      },
+      onLog() {}, waitMs: 10000,
+    });
+    assert.equal(result, false);
+    assert.equal(hidden, 1);
+    assert.equal(child.listenerCount('exit'), 0);
+  });
+
+  await atest('授权窗在超时后才回包时仍会清理', async () => {
+    const { EmulatorEngine } = require('../src/core/emulator');
+    const emu = Object.create(EmulatorEngine.prototype);
+    emu.proc = {};
+    let hidden = 0;
+    let show;
+    const result = await emu._waitForAdbConsent({
+      endpoint: { serial: 'emulator-5554', port: 5554 },
+      present: () => new Promise((resolve) => { show = resolve; }),
+      probe: () => assert.fail('不得在授权窗口超时后继续探测'),
+      onLog() {}, waitMs: 25,
+    });
+    assert.equal(result, false);
+    show(() => { hidden += 1; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(hidden, 1);
+  });
+
+  await atest('状态：授权等待、ADB 已连接、安卓已就绪是三个不同阶段', async () => {
+    const { Runtime } = require('../src/core/engine');
+    const rt = Object.create(Runtime.prototype);
+    Object.defineProperty(rt, 'settings', { value: { engine: {}, runtime: {} } });
+    Object.defineProperty(rt, 'backend', { value: { id: 'builtin' } });
+    const env = { adb: { ok: true }, emulator: { ok: true }, sysimg: { ok: true }, qemu: {} };
+    rt.provisioner = { checkEnv: async () => env };
+    rt.emulator = { running: () => true };
+    rt._probeNetworkInBackground = () => {};
+    let packageReady = false;
+    let deviceState = 'device';
+    rt.client = () => ({
+      deviceState: async () => deviceState,
+      shell: async () => packageReady ? '1\npackage:/system/framework/framework-res.apk\n' : '1\n',
+      androidVersion: async () => '11',
+      sdkInt: async () => 30,
+    });
+    rt.vmStarting = true;
+    assert.equal((await rt.status()).phase, 'booting');
+    assert.equal((await rt.status()).deviceOnline, true);
+    assert.equal((await rt.status()).ready, false);
+    rt._adbConsentPending = true;
+    const pending = await rt.status();
+    assert.equal(pending.phase, 'awaiting-auth');
+    assert.equal(pending.authorizationRequired, true);
+    assert.match(pending.authorizationMessage, /允许 USB 调试/);
+    assert.equal(pending.ready, false);
+    rt.vmStarting = false;
+    rt._adbConsentPending = false;
+    assert.equal((await rt.status()).ready, false); // package manager not ready
+    packageReady = true;
+    assert.equal((await rt.status()).phase, 'ready');
+    assert.equal((await rt.status()).ready, true);
+    deviceState = 'unauthorized';
+    assert.equal((await rt.status()).deviceOnline, false);
+    assert.equal((await rt.status()).ready, false);
   });
 
   console.log(`\n结果：${passed} 通过，${failed} 失败\n`);

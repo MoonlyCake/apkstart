@@ -24,6 +24,7 @@ const audio = require('./audio-policy');
 const { adbEnvironment, resolveAdbPort } = require('./adb');
 const { AVD_NAME, readAvdOwner } = require('./runtime-ownership');
 const SNAPSHOT_NAME = 'apkstart';
+const ADB_CONSENT_WAIT_MS = 90000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -1072,11 +1073,50 @@ class EmulatorEngine {
     return ok;
   }
 
+  /** 等用户在同一台模拟器里确认，而不是通过重启或改密钥回避 Android 的授权。 */
+  async _waitForAdbConsent({ endpoint, probe, present, onLog, waitMs }) {
+    const proc = this.proc;
+    if (!proc || waitMs <= 0) return false;
+    const wait = new AbortController();
+    const cancel = () => wait.abort();
+    const expired = new Promise((resolve) => wait.signal.addEventListener('abort', () => resolve(false), { once: true }));
+    const timer = setTimeout(cancel, waitMs);
+    proc.once?.('exit', cancel);
+    let hide;
+    const active = () => !wait.signal.aborted && this.proc === proc && !proc.killed;
+    const observe = async () => {
+      const cleanup = await present({ ...endpoint, signal: wait.signal });
+      if (typeof cleanup !== 'function') return false;
+      // 窗口代理可能在超时后才回包；也要收回它刚显示的窗口。
+      if (!active()) { await cleanup(); return false; }
+      hide = cleanup;
+      onLog('等待 ADB 授权：请在安卓模拟器窗口点「允许 USB 调试」，确认后会自动继续。');
+      while (active()) {
+        const state = await probe({ ...endpoint, awaitingAuthorization: true });
+        if (!active() || state === 'fatal') return false;
+        if (state === 'ok') return true;
+        await sleep(1000);
+      }
+      return false;
+    };
+    try {
+      return await Promise.race([expired, observe().catch(() => false)]);
+    } finally {
+      clearTimeout(timer);
+      proc.off?.('exit', cancel);
+      cancel();
+      if (hide) await Promise.resolve().then(hide).catch(() => {});
+    }
+  }
+
   /**
    * 启动 + 自动重试。
    * @param {Function} probe 异步回调，返回 'ok' | 'booting' | 'pending' | 'fatal' | 'unauthorized'
    */
-  async start({ headless = false, onLog = () => {}, probe = null, networkProbe, maxAttempts = 4, stopOwnedAttempt } = {}) {
+  async start({
+    headless = false, onLog = () => {}, probe = null, networkProbe, maxAttempts = 4,
+    stopOwnedAttempt, onAuthorizationRequired, authorizationWaitMs = ADB_CONSENT_WAIT_MS,
+  } = {}) {
     // 已启动实例只由 Runtime 按 AVD 身份接管，监听端口本身不能作为归属证明。
     this._assertAvdWritable();
     if (this.running()) throw new Error('ApkStart 已有启动尝试在运行。');
@@ -1285,7 +1325,18 @@ class EmulatorEngine {
           state = await probe({ serial: this.serial, port, adbPort });
         } catch (_) { state = 'pending'; }
         if (state === 'ok') { ok = true; break; }
-        if (state === 'unauthorized') { fatal = true; break; }
+        if (state === 'unauthorized') {
+          // 坏快照可以冷启一次；真正需要人工确认时，保留本轮实例和窗口。
+          if (!mayLoadSnapshot && !headless && typeof onAuthorizationRequired === 'function') {
+            ok = await this._waitForAdbConsent({
+              endpoint: { serial: this.serial, port, adbPort }, probe,
+              present: onAuthorizationRequired, onLog, waitMs: authorizationWaitMs,
+            });
+            if (ok) break;
+          }
+          fatal = true;
+          break;
+        }
         if (state === 'fatal') { fatal = true; break; }
         // 只要 adb 能执行 shell，说明内核已经在引导，日志里的普通 Vulkan/EGL 信息不算失败
         if (state === 'booting') sawBooting = true;
@@ -1312,6 +1363,7 @@ class EmulatorEngine {
       if (ok) {
         const bootMs = Date.now() - started;
         // 这一次真的起来了：清掉上次的失败记录，避免以后「诊断」翻出旧账
+        this.lastDiagnosis = null;
         this._clearFailure();
         // 一定要存 quickboot 快照：模拟器进程会随 ApkStart 退出而结束（Electron 的
         // job 对象会连带杀掉子进程），下次打开有没有快照直接决定是 25 秒还是 7 秒。
